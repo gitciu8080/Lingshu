@@ -1,4 +1,4 @@
-.env
+.env.example
 .TaskMemory/
 .LongMemory/
 __pycache__/

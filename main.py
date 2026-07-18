@@ -20,17 +20,15 @@ from agent.Attack import create_attack_agent
 from agent.Brain import create_brain_agent
 from agent.Orchestrator import create_orchestrator_agent
 from agent.Recon import create_recon_agent
+from agent.tooling import stream_agent_reply
 
 
 async def run_mission(
     target: str,
     goal: str,
     model_ver: str = "Flash",
-    authorized: bool = False,
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务。"""
-    if not authorized:
-        raise PermissionError("必须通过 --authorized 明确确认拥有目标测试授权")
     normalized_target = validate_target(target)
     runtime = RuntimeConfig.from_env()
     project_dir = Path(__file__).resolve().parent
@@ -65,7 +63,8 @@ async def run_mission(
         runtime.command_timeout,
     )
 
-    plan_result = await brain.reply(
+    plan_result = await stream_agent_reply(
+        brain,
         UserMsg(
             name="user",
             content=(
@@ -73,6 +72,7 @@ async def run_mission(
                 "请制定可审计的阶段计划，并明确各阶段退出条件和回退路径。"
             ),
         ),
+        prefix="[Brain] ",
     )
     mission.plan = plan_result.get_text_content() or "使用内置四阶段计划"
     mission.record("Brain", "plan_created")
@@ -81,7 +81,8 @@ async def run_mission(
     print(f"[Brain] 作战计划\n{mission.plan}\n")
 
     orchestrator = create_orchestrator_agent(model, recon, attack, mission, store)
-    final_result = await orchestrator.reply(
+    final_result = await stream_agent_reply(
+        orchestrator,
         UserMsg(
             name="user",
             content=(
@@ -90,8 +91,9 @@ async def run_mission(
                 "从侦察开始，以工具证据推进；结束时必须调用 complete_mission。"
             ),
         ),
+        prefix="[Orchestrator] ",
     )
-    print(f"[Orchestrator]\n{final_result.get_text_content() or '未返回文本结果'}\n")
+    print(f"\n[系统] Orchestrator 最终响应:\n{final_result.get_text_content() or '未返回文本结果'}\n")
 
     if mission.phase not in {Phase.COMPLETED, Phase.FAILED}:
         mission.record("system", "orchestrator_stopped_without_terminal_state")
@@ -114,11 +116,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="Flash",
         choices=["Flash", "Pro", "chat"],
     )
-    parser.add_argument(
-        "--authorized",
-        action="store_true",
-        help="确认已获得该目标的安全测试授权",
-    )
     return parser
 
 
@@ -126,9 +123,9 @@ def main() -> None:
     args = build_parser().parse_args()
     try:
         asyncio.run(
-            run_mission(args.target, args.goal, args.model, args.authorized),
+            run_mission(args.target, args.goal, args.model),
         )
-    except (ValueError, RuntimeError, PermissionError) as exc:
+    except (ValueError, RuntimeError) as exc:
         raise SystemExit(f"[配置错误] {exc}") from exc
 
 

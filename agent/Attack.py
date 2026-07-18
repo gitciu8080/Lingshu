@@ -6,7 +6,7 @@ from agentscope.message import UserMsg
 from agentscope.tool import Toolkit
 
 from agent.CVE_Search import cve_search
-from agent.tooling import AllowedFunctionTool, create_scoped_shell_tool
+from agent.tooling import AllowedFunctionTool, create_scoped_shell_tool, stream_agent_reply
 
 
 ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
@@ -36,8 +36,10 @@ def create_attack_agent(
         Args:
             service_info: Recon 得到的服务、版本和响应证据。
         """
-        result = await analysis_agent.reply(
+        result = await stream_agent_reply(
+            analysis_agent,
             UserMsg(name="Attack", content=service_info),
+            prefix="[Analysis] ",
         )
         return result.get_text_content() or "[Analysis] 未返回文本结果"
 

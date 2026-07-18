@@ -6,8 +6,57 @@ import ipaddress
 import re
 from pathlib import Path
 
+from agentscope.agent import Agent
+from agentscope.event import (
+    TextBlockDeltaEvent,
+    TextBlockEndEvent,
+    TextBlockStartEvent,
+    ThinkingBlockDeltaEvent,
+    ThinkingBlockEndEvent,
+    ThinkingBlockStartEvent,
+)
+from agentscope.message import Msg
 from agentscope.permission import PermissionBehavior, PermissionDecision
 from agentscope.tool import FunctionTool
+
+
+async def stream_agent_reply(
+    agent: Agent,
+    inputs: Msg | list[Msg] | None = None,
+    prefix: str = "",
+) -> Msg:
+    """调用 agent 并流式输出到控制台，返回最终 Msg。
+
+    Args:
+        agent: 要调用的 Agent。
+        inputs: 输入消息。
+        prefix: 每个文本块起始行的前缀标签，如 "[Brain] "（仅打印一次）。
+
+    Returns:
+        agent.reply() 返回的最终 Msg。
+    """
+    final_msg: Msg | None = None
+
+    async for evt_or_msg in agent._reply(inputs=inputs):  # noqa: SLF001
+        if isinstance(evt_or_msg, Msg):
+            final_msg = evt_or_msg
+        elif isinstance(evt_or_msg, TextBlockStartEvent):
+            # 文本块开始时打印一次前缀
+            print(f"{prefix}", end="", flush=True)
+        elif isinstance(evt_or_msg, TextBlockDeltaEvent):
+            print(evt_or_msg.delta, end="", flush=True)
+        elif isinstance(evt_or_msg, TextBlockEndEvent):
+            print(flush=True)
+        elif isinstance(evt_or_msg, ThinkingBlockStartEvent):
+            print(f"{prefix}🧠 ", end="", flush=True)
+        elif isinstance(evt_or_msg, ThinkingBlockDeltaEvent):
+            print(evt_or_msg.delta, end="", flush=True)
+        elif isinstance(evt_or_msg, ThinkingBlockEndEvent):
+            print(flush=True)
+
+    if final_msg is None:
+        raise RuntimeError("Agent did not produce a final message.")
+    return final_msg
 
 
 class AllowedFunctionTool(FunctionTool):

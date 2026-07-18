@@ -5,6 +5,24 @@ import ipaddress
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
+
+
+def _load_dotenv(dotenv_path: str | Path = ".env") -> None:
+    """加载 .env 文件到 os.environ（不覆盖已有的环境变量）。"""
+    path = Path(dotenv_path).resolve()
+    if not path.is_file():
+        return
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip("\"'")
+            if key and key not in os.environ:
+                os.environ[key] = val
 
 
 _HOSTNAME_RE = re.compile(
@@ -39,6 +57,7 @@ class RuntimeConfig:
 
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
+        _load_dotenv()
         api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
         if not api_key:
             raise RuntimeError(

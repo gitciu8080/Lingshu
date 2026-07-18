@@ -1,6 +1,8 @@
 """Analysis：只进行漏洞研判，不执行命令。"""
 from agentscope.agent import Agent, ReActConfig
+from agentscope.tool import Toolkit
 
+from agent.CVE_Search import create_cve_search_tool
 
 ANALYSIS_SYS_PROMPT = """你是网络安全漏洞分析专家（Analysis）。
 你只根据提供的真实侦察证据进行研判，不执行命令，不改变任务状态。
@@ -14,4 +16,7 @@ def create_analysis_agent(model) -> Agent:
         system_prompt=ANALYSIS_SYS_PROMPT,
         model=model,
         react_config=ReActConfig(max_iters=3),
+        toolkit=Toolkit(tools=[
+            create_cve_search_tool(),
+        ])
     )

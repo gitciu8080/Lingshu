@@ -5,7 +5,7 @@ from agentscope.tool import Toolkit
 
 from AgenticMemory import get_experience_hint, save_mission
 from TaskState import MissionState, MissionStore, Phase
-from agent.tooling import AllowedFunctionTool
+from agent.tooling import AllowedFunctionTool, stream_agent_reply
 
 
 ORCHESTRATOR_SYS_PROMPT = """你是网络安全行动总指挥（Orchestrator）。
@@ -46,11 +46,13 @@ def create_orchestrator_agent(
             mission.transition(Phase.RECON, f"需要补充侦察: {focus}")
         mission.record("Orchestrator", "dispatch_recon", focus=focus)
         store.save(mission)
-        result = await recon_agent.reply(
+        result = await stream_agent_reply(
+            recon_agent,
             UserMsg(
                 name="Orchestrator",
                 content=f"授权目标：{mission.target}\n本轮重点：{focus}\n只返回真实工具证据和侦察报告。",
             ),
+            prefix="[Recon] ",
         )
         report = result.get_text_content() or "[Recon] 未返回文本结果"
         mission.add_finding("Recon", report)
@@ -79,7 +81,8 @@ def create_orchestrator_agent(
                 mission.transition(Phase.POST_EXPLOITATION, f"开始执行: {objective}")
         mission.record("Orchestrator", "dispatch_attack", objective=objective)
         store.save(mission)
-        result = await attack_agent.reply(
+        result = await stream_agent_reply(
+            attack_agent,
             UserMsg(
                 name="Orchestrator",
                 content=(
@@ -87,6 +90,7 @@ def create_orchestrator_agent(
                     f"真实目标信息：\n{target_info}"
                 ),
             ),
+            prefix="[Attack] ",
         )
         report = result.get_text_content() or "[Attack] 未返回文本结果"
         mission.add_attack_step(objective, report)
