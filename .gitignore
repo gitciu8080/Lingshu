@@ -1,8 +1,13 @@
 .env.example
 .TaskMemory/
 .LongMemory/
+.reasonix/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
 .idea/
+AGENTS.md
+CHANGES.md
+构想.md
+WorkDir/

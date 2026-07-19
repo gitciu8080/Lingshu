@@ -1,11 +1,17 @@
-"""Attack：在授权范围内完成分析、验证和利用。"""
+"""Attack：在授权范围内完成分析、验证和利用。
+
+Skill 加载从 MissionState.category_decision 动态生成，不再硬编码 ctf-web。
+"""
+from __future__ import annotations
+
 from pathlib import Path
 
 from agentscope.agent import Agent, ReActConfig
 from agentscope.message import UserMsg
 from agentscope.tool import Toolkit
 
-from agent.CVE_Search import cve_search
+from agent.CVE_Search import cve_search, create_cve_search_tool
+from agent.categorize import ALL_CATEGORIES
 from agent.tooling import AllowedFunctionTool, create_scoped_shell_tool, stream_agent_reply
 
 
@@ -23,13 +29,82 @@ ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
 报告必须区分：已验证事实、失败尝试、证据、当前权限、发现的 Flag（如有）和建议下一步。"""
 
 
+# ── Skill 路径映射 ──
+_SKILL_PATH_MAP: dict[str, str] = {
+    "web": "Skills/ctf-skills/ctf-web",
+    "pwn": "Skills/ctf-skills/ctf-pwn",
+    "reverse": "Skills/ctf-skills/ctf-reverse",
+    "crypto": "Skills/ctf-skills/ctf-crypto",
+    "forensics": "Skills/ctf-skills/ctf-forensics",
+    "malware": "Skills/ctf-skills/ctf-malware",
+    "misc": "Skills/ctf-skills/ctf-misc",
+    "osint": "Skills/ctf-skills/ctf-osint",
+    "ai-ml": "Skills/ctf-skills/ctf-ai-ml",
+    "writeup": "Skills/ctf-skills/ctf-writeup",
+}
+
+
+def _build_skill_list(
+    category_decision: dict | None,
+    project_dir: str | Path = "",
+) -> list[str]:
+    """根据题型分类决策构建 Skill 加载路径。
+
+    Args:
+        category_decision: MissionState.category_decision 的字典形式。
+        project_dir: 项目根目录（用于路径存在性检查）。
+
+    Returns:
+        Skill 路径列表，始终包含 writeup。
+
+    Raises:
+        FileNotFoundError: 题型已确定但对应 Skill 目录缺失。
+    """
+    skill_paths: list[str] = []
+    project_path = Path(project_dir) if project_dir else None
+
+    if category_decision and category_decision.get("primary", "unknown") != "unknown":
+        primary = category_decision["primary"]
+        if primary in _SKILL_PATH_MAP:
+            path = _SKILL_PATH_MAP[primary]
+            if project_path and not (project_path / path).is_dir():
+                raise FileNotFoundError(
+                    f"题型 {primary!r} 的 Skill 目录不存在: {path}. "
+                    f"请确认 Skills/ctf-skills/ctf-{primary}/ 已安装。"
+                )
+            skill_paths.append(path)
+
+        # secondary
+        for cat in category_decision.get("secondary", []):
+            if cat in _SKILL_PATH_MAP and cat != primary:
+                p = _SKILL_PATH_MAP[cat]
+                if project_path and not (project_path / p).is_dir():
+                    continue  # 次要 Skill 缺失不阻塞
+                skill_paths.append(p)
+
+    # writeup 始终加载
+    skill_paths.append(_SKILL_PATH_MAP["writeup"])
+    return skill_paths
+
+
 def create_attack_agent(
     model,
     analysis_agent: Agent,
     target: str,
     project_dir: str | Path,
     timeout: int,
+    category_decision: dict | None = None,
 ) -> Agent:
+    """创建 Attack Agent。
+
+    Args:
+        model: LLM 模型。
+        analysis_agent: Analysis 子 Agent。
+        target: 授权目标字符串（向后兼容）。
+        project_dir: 项目根目录。
+        timeout: 命令超时秒数。
+        category_decision: 题型分类决策（v0.2.0 新增）。为 None 时仅加载 writeup。
+    """
     async def analysis(service_info: str) -> str:
         """请求 Analysis 专家研判真实服务证据。
 
@@ -43,13 +118,15 @@ def create_attack_agent(
         )
         return result.get_text_content() or "[Analysis] 未返回文本结果"
 
+    skill_list = _build_skill_list(category_decision, project_dir)
+
     toolkit = Toolkit(
         tools=[
             AllowedFunctionTool(analysis, is_read_only=True),
             AllowedFunctionTool(cve_search, is_read_only=True),
             create_scoped_shell_tool(target, project_dir, timeout),
         ],
-        skills_or_loaders=["Skills/ctf-skills/ctf-web"],
+        skills_or_loaders=skill_list,
     )
     return Agent(
         name="Attack",

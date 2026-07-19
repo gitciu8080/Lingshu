@@ -72,6 +72,12 @@ class MissionState:
     updated_at: str = field(default_factory=_now)
     events: list[AuditEvent] = field(default_factory=list)
 
+    # ── v0.2.0 新增 ──
+    target_spec: dict[str, Any] | None = None
+    category_decision: dict[str, Any] | None = None
+    category_history: list[dict[str, Any]] = field(default_factory=list)
+    authorization_evidence: dict[str, Any] = field(default_factory=dict)
+
     def record(self, actor: str, action: str, **details: Any) -> None:
         self.updated_at = _now()
         self.events.append(

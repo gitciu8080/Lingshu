@@ -46,39 +46,69 @@ def validate_target(target: str) -> str:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
-    """从环境变量加载的模型与运行配置。"""
+    """从环境变量加载的模型与运行配置。
 
-    api_key: str
-    base_url: str = "https://api.deepseek.com"
-    model_flash: str = "deepseek-v4-flash"
-    model_pro: str = "deepseek-v4-pro"
-    model_chat: str = "deepseek-chat"
+    同时支持 DeepSeek 和 Qwen (OpenAI 兼容 API) 两个提供商。
+    通过 --provider 参数在运行时选择。
+    """
+
+    # ── DeepSeek ──
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model_low: str = "deepseek-v4-flash"       # 低推理（chat 已弃用合并为 flash）
+    deepseek_model_min: str = "deepseek-v4-flash"       # 默认
+    deepseek_model_max: str = "deepseek-v4-pro"         # 深度推理
+
+    # ── Qwen (llama.cpp OpenAI 兼容) ──
+    qwen_api_key: str = ""
+    qwen_base_url: str = "http://10.8.128.108:8200/v1"
+    qwen_model: str = "/mnt/nvme0n1p1/llama.cppModels/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+
     command_timeout: int = 300
 
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
         _load_dotenv()
-        api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-        if not api_key:
-            raise RuntimeError(
-                "缺少 DEEPSEEK_API_KEY。请先在 Kali 环境中设置该环境变量。",
-            )
         return cls(
-            api_key=api_key,
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
-            model_flash=os.getenv("DEEPSEEK_MODEL_FLASH", "deepseek-v4-flash"),
-            model_pro=os.getenv("DEEPSEEK_MODEL_PRO", "deepseek-v4-pro"),
-            model_chat=os.getenv("DEEPSEEK_MODEL_CHAT", "deepseek-chat"),
+            # DeepSeek
+            deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", "").strip(),
+            deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
+            deepseek_model_low=os.getenv("DEEPSEEK_MODEL_LOW", "deepseek-v4-flash"),
+            deepseek_model_min=os.getenv("DEEPSEEK_MODEL_MIN", "deepseek-v4-flash"),
+            deepseek_model_max=os.getenv("DEEPSEEK_MODEL_MAX", "deepseek-v4-pro"),
+            # Qwen
+            qwen_api_key=os.getenv("QWEN_API_KEY", "sk-placeholder").strip(),
+            qwen_base_url=os.getenv("QWEN_BASE_URL", "http://10.8.128.108:8200/v1").rstrip("/"),
+            qwen_model=os.getenv(
+                "QWEN_MODEL",
+                "/mnt/nvme0n1p1/llama.cppModels/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+            ),
+            # 通用
             command_timeout=max(10, min(int(os.getenv("LINGSHU_COMMAND_TIMEOUT", "300")), 600)),
         )
 
-    def model_name(self, version: str) -> str:
+    def model_name(self, version: str, provider: str = "deepseek") -> str:
+        """根据提供商和思考级别返回模型名称。"""
+        if provider == "qwen":
+            return self.qwen_model  # 单一模型，不随级别变化
         mapping = {
-            "Flash": self.model_flash,
-            "Pro": self.model_pro,
-            "chat": self.model_chat,
+            "Low": self.deepseek_model_low,
+            "Min": self.deepseek_model_min,
+            "Max": self.deepseek_model_max,
         }
         try:
             return mapping[version]
         except KeyError as exc:
-            raise ValueError(f"不支持的模型版本: {version}") from exc
+            raise ValueError(f"不支持的思考级别: {version}，可选 Low/Min/Max") from exc
+
+    def get_api_key(self, provider: str) -> str:
+        """返回对应提供商的 API Key。"""
+        if provider == "qwen":
+            return self.qwen_api_key
+        return self.deepseek_api_key
+
+    def get_base_url(self, provider: str) -> str:
+        """返回对应提供商的 Base URL。"""
+        if provider == "qwen":
+            return self.qwen_base_url
+        return self.deepseek_base_url
