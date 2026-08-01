@@ -10,7 +10,7 @@ import os
 import re
 import sys
 
-from agent.tooling import AllowedFunctionTool
+from Tools.tooling import AllowedFunctionTool
 
 
 _CVE_SEARCH_SCRIPT = os.path.join(

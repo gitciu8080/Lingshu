@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import re
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from agentscope.agent import Agent
 from agentscope.event import (
@@ -24,6 +26,7 @@ async def stream_agent_reply(
     agent: Agent,
     inputs: Msg | list[Msg] | None = None,
     prefix: str = "",
+    on_event: Callable[..., None] | None = None,
 ) -> Msg:
     """调用 agent 并流式输出到控制台，返回最终 Msg。
 
@@ -31,28 +34,41 @@ async def stream_agent_reply(
         agent: 要调用的 Agent。
         inputs: 输入消息。
         prefix: 每个文本块起始行的前缀标签，如 "[Brain] "（仅打印一次）。
+        on_event: 可选回调 (event_type, payload) → None，用于 Web SSE 推送。
 
     Returns:
         agent.reply() 返回的最终 Msg。
     """
     final_msg: Msg | None = None
+    agent_name = agent.name if hasattr(agent, "name") else prefix.strip("[] ")
+
+    def _emit(event_type: str, **payload: Any) -> None:
+        if on_event is not None:
+            payload.setdefault("agent", agent_name)
+            on_event(event_type, **payload)
 
     async for evt_or_msg in agent._reply(inputs=inputs):  # noqa: SLF001
         if isinstance(evt_or_msg, Msg):
             final_msg = evt_or_msg
+            _emit("message", content=evt_or_msg.get_text_content() or "")
         elif isinstance(evt_or_msg, TextBlockStartEvent):
-            # 文本块开始时打印一次前缀
             print(f"{prefix}", end="", flush=True)
+            _emit("text_start", agent=agent_name)
         elif isinstance(evt_or_msg, TextBlockDeltaEvent):
             print(evt_or_msg.delta, end="", flush=True)
+            _emit("text_delta", delta=evt_or_msg.delta, agent=agent_name)
         elif isinstance(evt_or_msg, TextBlockEndEvent):
             print(flush=True)
+            _emit("text_end", agent=agent_name)
         elif isinstance(evt_or_msg, ThinkingBlockStartEvent):
             print(f"{prefix}🧠 ", end="", flush=True)
+            _emit("thinking_start", agent=agent_name)
         elif isinstance(evt_or_msg, ThinkingBlockDeltaEvent):
             print(evt_or_msg.delta, end="", flush=True)
+            _emit("thinking_delta", delta=evt_or_msg.delta, agent=agent_name)
         elif isinstance(evt_or_msg, ThinkingBlockEndEvent):
             print(flush=True)
+            _emit("thinking_end", agent=agent_name)
 
     if final_msg is None:
         raise RuntimeError("Agent did not produce a final message.")
@@ -84,24 +100,58 @@ _DENIED = [
 ]
 
 
+def _parse_target(target: str) -> tuple[str | None, str | None]:
+    """从 target 字符串中提取 IP 和期望在命令中出现的标识。
+
+    Returns:
+        (ip, identifier): ip 为纯 IP 或 None（hostname），identifier 为命令中必须包含的字符串。
+    """
+    # 尝试解析为 IP:port 或纯 IP
+    if ":" in target:
+        host_part, _, port_part = target.partition(":")
+        try:
+            ip = str(ipaddress.ip_address(host_part))
+            # 命令只需包含 IP 或 host_part，不需要 port
+            return ip, host_part
+        except ValueError:
+            pass  # 不是有效 IP，当做 hostname:port
+    else:
+        try:
+            return str(ipaddress.ip_address(target)), target
+        except ValueError:
+            pass
+    # hostname 或无端口的目标
+    return None, target
+
+
 def _validate_scoped_command(command: str, target: str) -> None:
     if not command.strip() or len(command) > 12000 or "\x00" in command:
         raise ValueError("命令为空、过长或包含非法字符")
     if any(pattern.search(command) for pattern in _DENIED):
         raise PermissionError("命令命中本机破坏性操作拦截规则")
 
+    target_ip, target_id = _parse_target(target)
+
+    # ── IP 白名单检查 ──
+    allowed_ips = {"127.0.0.1", "0.0.0.0"}
+    if target_ip:
+        allowed_ips.add(target_ip)
     foreign_ips: set[str] = set()
     for candidate in _IPV4_RE.findall(command):
         try:
             normalized = str(ipaddress.ip_address(candidate))
         except ValueError:
             continue
-        if normalized not in {target, "127.0.0.1", "0.0.0.0"}:
+        if normalized not in allowed_ips:
             foreign_ips.add(normalized)
     if foreign_ips:
         raise PermissionError(f"命令包含授权范围外 IP: {', '.join(sorted(foreign_ips))}")
-    if _NETWORK_TOOLS.search(command) and target not in command:
-        raise PermissionError("网络命令必须显式包含本次授权目标")
+
+    # ── 网络工具目标检查 ──
+    if _NETWORK_TOOLS.search(command):
+        # 命令需要包含 target_id（IP 或 hostname）或原始 target 字符串
+        if target_id not in command and target not in command:
+            raise PermissionError("网络命令必须显式包含本次授权目标")
 
 
 def create_scoped_shell_tool(target: str, cwd: str | Path, timeout: int) -> AllowedFunctionTool:

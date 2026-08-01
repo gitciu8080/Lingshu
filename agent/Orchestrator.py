@@ -1,11 +1,14 @@
 """Orchestrator：唯一可以修改任务状态的战术决策核心。"""
+from collections.abc import Callable
+from typing import Any
+
 from agentscope.agent import Agent, ReActConfig
 from agentscope.message import UserMsg
 from agentscope.tool import Toolkit
 
 from AgenticMemory import get_experience_hint, save_mission
 from TaskState import MissionState, MissionStore, Phase
-from agent.tooling import AllowedFunctionTool, stream_agent_reply
+from Tools.tooling import AllowedFunctionTool, stream_agent_reply
 
 
 ORCHESTRATOR_SYS_PROMPT = """你是网络安全行动总指挥（Orchestrator）。
@@ -33,6 +36,7 @@ def create_orchestrator_agent(
     attack_agent: Agent,
     mission: MissionState,
     store: MissionStore,
+    event_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> Agent:
     async def dispatch_recon(focus: str = "全面但低影响的信息收集") -> str:
         """派遣 Recon 对本次授权目标进行信息收集。
@@ -53,6 +57,7 @@ def create_orchestrator_agent(
                 content=f"授权目标：{mission.target}\n本轮重点：{focus}\n只返回真实工具证据和侦察报告。",
             ),
             prefix="[Recon] ",
+            on_event=event_callback,
         )
         report = result.get_text_content() or "[Recon] 未返回文本结果"
         mission.add_finding("Recon", report)
@@ -91,6 +96,7 @@ def create_orchestrator_agent(
                 ),
             ),
             prefix="[Attack] ",
+            on_event=event_callback,
         )
         report = result.get_text_content() or "[Attack] 未返回文本结果"
         mission.add_attack_step(objective, report)

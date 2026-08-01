@@ -10,9 +10,8 @@ from agentscope.agent import Agent, ReActConfig
 from agentscope.message import UserMsg
 from agentscope.tool import Toolkit
 
-from agent.CVE_Search import cve_search, create_cve_search_tool
-from agent.categorize import ALL_CATEGORIES
-from agent.tooling import AllowedFunctionTool, create_scoped_shell_tool, stream_agent_reply
+from Tools.CVE_Search import cve_search
+from Tools.tooling import AllowedFunctionTool, create_scoped_shell_tool, stream_agent_reply
 
 
 ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。

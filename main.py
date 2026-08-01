@@ -12,28 +12,29 @@ import argparse
 import asyncio
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agentscope.message import UserMsg
 
-from config import RuntimeConfig, validate_target
+from config import RuntimeConfig
 from LLM.model import create_model
 from TaskState import MissionState, MissionStore, Phase
 from agent.Analysis import create_analysis_agent
-from agent.archive import safe_extract, SafeExtractError
+from Tools.archive import safe_extract, SafeExtractError
 from agent.Attack import create_attack_agent
 from agent.Brain import create_brain_agent
-from agent.categorize import CategoryDecision, classify, reclassify
+from agent.categorize import classify
 from agent.Orchestrator import create_orchestrator_agent
 from agent.Recon import (
     create_artifact_triage_agent,
     create_network_recon_agent,
-    create_recon_agent,
 )
-from agent.target import TargetSpec, normalize_target
-from agent.tooling import stream_agent_reply
+from Tools.target import TargetSpec, normalize_target
+from Tools.tooling import stream_agent_reply
 
 
 # ── 工作目录规划 ──
@@ -86,6 +87,7 @@ async def run_mission(
     goal: str,
     model_ver: str = "Min",
     provider: str = "deepseek",
+    event_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务。"""
     # ── 1. 解析目标 ──
@@ -188,6 +190,7 @@ async def run_mission(
         brain,
         UserMsg(name="user", content=plan_prompt),
         prefix="[Brain] ",
+        on_event=event_callback,
     )
     mission.plan = plan_result.get_text_content() or "使用内置四阶段计划"
     mission.record("Brain", "plan_created")
@@ -206,7 +209,9 @@ async def run_mission(
     )
 
     # ── 9. Orchestrator 主循环 ──
-    orchestrator = create_orchestrator_agent(model, recon, attack, mission, store)
+    orchestrator = create_orchestrator_agent(
+        model, recon, attack, mission, store, event_callback=event_callback,
+    )
     final_result = await stream_agent_reply(
         orchestrator,
         UserMsg(
@@ -218,6 +223,7 @@ async def run_mission(
             ),
         ),
         prefix="[Orchestrator] ",
+        on_event=event_callback,
     )
     print(f"\n[系统] Orchestrator 最终响应:\n{final_result.get_text_content() or '未返回文本结果'}\n")
 

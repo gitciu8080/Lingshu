@@ -11,7 +11,7 @@ from pathlib import Path
 from agentscope.agent import Agent, ReActConfig
 from agentscope.tool import Toolkit
 
-from agent.tooling import create_scoped_shell_tool
+from Tools.tooling import create_scoped_shell_tool
 
 # ---------------------------------------------------------------------------
 # NetworkReconAgent — 网络扫描

@@ -7,10 +7,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Literal
 
-from agent.target import TargetKind, TargetSpec
+from Tools.target import TargetKind, TargetSpec
 
 # ---------------------------------------------------------------------------
 # 题型标识
