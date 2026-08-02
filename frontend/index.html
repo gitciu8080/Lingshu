@@ -40,7 +40,8 @@
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
   /* ── 主体双栏布局 ── */
-  .main { display: flex; flex: 1; overflow: hidden; }
+  #mainContent { display: flex; flex-direction: column; flex: 1; overflow: hidden; min-height: 0; }
+  .main { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 
   /* ── 左侧面板 ── */
   .sidebar {
@@ -190,20 +191,122 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
   ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+/* ── 登录界面 ── */
+.login-page { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #0d1117 100%); display: flex; align-items: center; justify-content: center; z-index: 1000; overflow: hidden; }
+.login-page::before { content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: radial-gradient(circle at 20% 30%, rgba(88,166,255,0.1) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(163,113,247,0.1) 0%, transparent 50%); pointer-events: none; }
+.login-container { position: relative; width: 420px; padding: 40px; background: rgba(22,27,34,0.95); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.6); backdrop-filter: blur(10px); }
+.login-header { text-align: center; margin-bottom: 32px; }
+.login-header .logo { font-size: 48px; margin-bottom: 12px; filter: drop-shadow(0 0 10px rgba(88,166,255,0.5)); }
+.login-header h1 { font-size: 28px; font-weight: 700; background: linear-gradient(135deg, var(--accent), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; }
+.login-header .subtitle { font-size: 12px; color: var(--text-dim); letter-spacing: 2px; text-transform: uppercase; }
+.login-tabs { display: flex; margin-bottom: 24px; border-bottom: 1px solid var(--border); }
+.login-tab { flex: 1; padding: 12px; text-align: center; cursor: pointer; font-size: 14px; font-weight: 600; color: var(--text-dim); transition: all 0.3s; border-bottom: 2px solid transparent; }
+.login-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.login-form { display: none; }
+.login-form.active { display: block; }
+.login-form .form-group { margin-bottom: 20px; }
+.login-form .form-group label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 8px; font-weight: 600; }
+.login-form .input-wrapper { position: relative; }
+.login-form .input-wrapper .icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-dim); font-size: 16px; }
+.login-form .input-wrapper input { width: 100%; padding: 12px 12px 12px 40px; background: var(--input-bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-family: inherit; font-size: 14px; outline: none; transition: border-color 0.2s; }
+.login-form .input-wrapper input:focus { border-color: var(--accent); }
+.login-form .input-wrapper .toggle-password { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); cursor: pointer; color: var(--text-dim); font-size: 16px; transition: color 0.2s; }
+.login-form .input-wrapper .toggle-password:hover { color: var(--accent); }
+.login-btn { width: 100%; padding: 14px; border: none; border-radius: 6px; font-family: inherit; font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.login-btn.login { background: linear-gradient(135deg, var(--accent), #1f6feb); color: #fff; box-shadow: 0 4px 12px rgba(88,166,255,0.3); }
+.login-btn.login:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(88,166,255,0.4); }
+.login-btn.register { background: linear-gradient(135deg, var(--green), #2ea043); color: #fff; box-shadow: 0 4px 12px rgba(63,185,80,0.3); }
+.login-btn.register:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(63,185,80,0.4); }
+.login-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+.login-error { color: var(--red); font-size: 13px; text-align: center; margin-top: 16px; display: none; }
+.login-error.show { display: block; }
+.login-info { margin-top: 20px; padding: 12px; background: rgba(210,153,29,0.1); border: 1px solid rgba(210,153,29,0.3); border-radius: 6px; text-align: center; font-size: 12px; color: var(--gold); }
+.login-footer { text-align: center; margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 12px; }
+.login-footer p { margin: 4px 0; }
 </style>
 </head>
 <body>
 
+<!-- ── 登录界面 ── -->
+<div class="login-page" id="loginPage">
+  <div class="login-container">
+    <div class="login-header">
+      <div class="logo">🛡️</div>
+      <h1>LingShu Agent</h1>
+      <div class="subtitle">AUTOMATED SECURITY TESTING PLATFORM</div>
+    </div>
+    <div class="login-tabs">
+      <div class="login-tab active" data-tab="login">🔐 登录</div>
+      <div class="login-tab" data-tab="register">📝 注册</div>
+    </div>
+    <div class="login-form active" id="loginForm">
+      <div class="form-group">
+        <label>用户名</label>
+        <div class="input-wrapper">
+          <span class="icon">👤</span>
+          <input type="text" id="loginUsername" placeholder="请输入用户名" autocomplete="username">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>密码</label>
+        <div class="input-wrapper">
+          <span class="icon">🔒</span>
+          <input type="password" id="loginPassword" placeholder="请输入密码" autocomplete="current-password">
+          <span class="toggle-password" onclick="togglePassword('loginPassword', this)">👁️</span>
+        </div>
+      </div>
+      <button class="login-btn login" id="loginBtn" onclick="handleLogin()">🚀 进入系统</button>
+      <div class="login-error" id="loginError"></div>
+    </div>
+    <div class="login-form" id="registerForm">
+      <div class="form-group">
+        <label>用户名</label>
+        <div class="input-wrapper">
+          <span class="icon">👤</span>
+          <input type="text" id="regUsername" placeholder="请输入用户名" autocomplete="username">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>邮箱（可选）</label>
+        <div class="input-wrapper">
+          <span class="icon">📧</span>
+          <input type="email" id="regEmail" placeholder="请输入邮箱">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>密码（至少 6 位）</label>
+        <div class="input-wrapper">
+          <span class="icon">🔒</span>
+          <input type="password" id="regPassword" placeholder="请输入密码" autocomplete="new-password">
+          <span class="toggle-password" onclick="togglePassword('regPassword', this)">👁️</span>
+        </div>
+      </div>
+      <button class="login-btn register" id="registerBtn" onclick="handleRegister()">✅ 创建账户</button>
+      <div class="login-error" id="registerError"></div>
+    </div>
+    <div class="login-info">💡 默认管理员账户：admin / admin123</div>
+    <div class="login-footer">
+      <p>© 2026 LingShu Agent</p>
+      <p>v1.0.0 | Secure | Intelligent | Autonomous</p>
+    </div>
+  </div>
+</div>
 <!-- 顶部标题栏 -->
 <header class="header">
   <div style="display:flex;align-items:center;">
     <h1><span>灵枢</span> Lingshu</h1>
     <div id="statusDot" class="status-dot idle" title="就绪"></div>
   </div>
-  <div style="font-size:12px;color:var(--text-dim);">Multi-Agent Security Testing Console</div>
+  <div style="display:flex;align-items:center;gap:14px;">
+    <span id="userInfo" style="display:none;font-size:12px;color:var(--accent);font-weight:600;"></span>
+    <button id="logoutBtn" class="btn" style="display:none;background:var(--border);color:var(--text);font-size:11px;padding:5px 12px;" onclick="handleLogout()">🚪 退出</button>
+    <div style="font-size:12px;color:var(--text-dim);">Multi-Agent Security Testing Console</div>
+  </div>
 </header>
 
 <!-- 主体 -->
+<div id="mainContent">
 <div class="main">
 
   <!-- 左侧面板 -->
@@ -393,7 +496,7 @@ async function uploadFile(file) {
   formData.append('file', file);
 
   try {
-    const resp = await fetch('/api/mission/upload', { method: 'POST', body: formData });
+    const resp = await authFetch('/api/mission/upload', { method: 'POST', body: formData });
     if (!resp.ok) {
       const err = await resp.json();
       appendSystemMsg(`上传失败: ${err.detail || resp.statusText}`);
@@ -438,7 +541,7 @@ async function startMission() {
 
   // 发起启动请求（同时打开 SSE 连接）
   try {
-    const resp = await fetch('/api/mission/start', {
+    const resp = await authFetch('/api/mission/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ target, goal, provider, model }),
@@ -486,7 +589,7 @@ async function startMission() {
 async function cancelMission() {
   if (!missionRunning) return;
   try {
-    await fetch('/api/mission/cancel', { method: 'POST' });
+    await authFetch('/api/mission/cancel', { method: 'POST' });
     appendSystemMsg('⏹ 已发送取消请求');
     setRunning(false);
     stopTimer();
@@ -665,8 +768,10 @@ function toggleAutoScroll() {
 
 // ── 状态轮询 ──
 async function refreshState() {
+  if (!getAuthToken()) return; // 未登录不轮询
   try {
-    const resp = await fetch('/api/mission/state');
+    const resp = await authFetch('/api/mission/state');
+    if (!resp.ok) return;
     const state = await resp.json();
     updateStatusBar(state);
   } catch (e) {}
@@ -737,11 +842,215 @@ async function copyFlag() {
   }
 }
 
-// ── 初始化：定期刷新状态 ──
-setInterval(refreshState, 5000);
+// ── 认证相关 ──
+const AUTH_KEY = 'lingshu_token';
 
-// ── 页面加载时检查 ──
+function getAuthToken() {
+  return localStorage.getItem(AUTH_KEY);
+}
+
+function setAuthToken(token) {
+  localStorage.setItem(AUTH_KEY, token);
+}
+
+function clearAuthToken() {
+  localStorage.removeItem(AUTH_KEY);
+}
+
+// 统一请求封装：自动携带 Bearer Token，401 时清除令牌并跳回登录页
+async function authFetch(url, options = {}) {
+  const token = getAuthToken();
+  const headers = Object.assign({}, options.headers);
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const resp = await fetch(url, Object.assign({}, options, { headers }));
+  if (resp.status === 401) {
+    clearAuthToken();
+    showLogin();
+    throw new Error('认证已过期，请重新登录');
+  }
+  return resp;
+}
+
+async function checkAuth() {
+  const token = getAuthToken();
+  if (!token) {
+    showLogin();
+    return;
+  }
+  try {
+    const resp = await fetch('/auth/me', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if (!resp.ok) {
+      clearAuthToken();
+      showLogin();
+      return;
+    }
+    const user = await resp.json();
+    hideLogin();
+    updateUserDisplay(user);
+  } catch (e) {
+    clearAuthToken();
+    showLogin();
+  }
+}
+
+function showLogin() {
+  document.getElementById('loginPage').style.display = 'flex';
+  document.getElementById('mainContent').style.display = 'none';
+}
+
+function hideLogin() {
+  document.getElementById('loginPage').style.display = 'none';
+  document.getElementById('mainContent').style.display = 'flex';
+}
+
+function updateUserDisplay(user) {
+  const userInfo = document.getElementById('userInfo');
+  if (userInfo) {
+    userInfo.textContent = '👤 ' + user.username;
+    userInfo.style.display = 'block';
+  }
+  const logoutBtn = document.getElementById('logoutBtn');
+  if (logoutBtn) logoutBtn.style.display = 'inline-flex';
+}
+
+async function handleLogout() {
+  try { await authFetch('/auth/logout', { method: 'POST' }); } catch (e) {}
+  clearAuthToken();
+  window.location.reload();
+}
+
+function togglePassword(inputId, toggleBtn) {
+  const input = document.getElementById(inputId);
+  if (input.type === 'password') {
+    input.type = 'text';
+    toggleBtn.textContent = '🙈';
+  } else {
+    input.type = 'password';
+    toggleBtn.textContent = '👁️';
+  }
+}
+
+// 切换登录/注册 Tab
+document.querySelectorAll('.login-tab').forEach(tab => {
+  tab.addEventListener('click', function() {
+    document.querySelectorAll('.login-tab').forEach(t => t.classList.remove('active'));
+    this.classList.add('active');
+    document.querySelectorAll('.login-form').forEach(f => f.classList.remove('active'));
+    const tabName = this.getAttribute('data-tab');
+    document.getElementById(tabName + 'Form').classList.add('active');
+  });
+});
+
+// 处理登录
+async function handleLogin() {
+  const username = document.getElementById('loginUsername').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const errorEl = document.getElementById('loginError');
+  const btn = document.getElementById('loginBtn');
+  
+  if (!username || !password) {
+    showError(errorEl, '请输入用户名和密码');
+    return;
+  }
+  
+  btn.disabled = true;
+  btn.textContent = '⏳ 登录中...';
+  errorEl.classList.remove('show');
+  
+  try {
+    const resp = await fetch('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    
+    const data = await resp.json();
+    
+    if (!resp.ok) {
+      throw new Error(data.detail || '登录失败');
+    }
+    
+    setAuthToken(data.access_token);
+    showError(errorEl, '登录成功，正在跳转...', true);
+    setTimeout(() => {
+      window.location.reload();
+    }, 1000);
+  } catch (e) {
+    showError(errorEl, e.message || '登录失败，请重试');
+    btn.disabled = false;
+    btn.textContent = '🚀 进入系统';
+  }
+}
+
+// 处理注册
+async function handleRegister() {
+  const username = document.getElementById('regUsername').value.trim();
+  const email = document.getElementById('regEmail').value.trim();
+  const password = document.getElementById('regPassword').value;
+  const errorEl = document.getElementById('registerError');
+  const btn = document.getElementById('registerBtn');
+  
+  if (!username || !password) {
+    showError(errorEl, '请填写完整信息');
+    return;
+  }
+  
+  if (password.length < 6) {
+    showError(errorEl, '密码长度不能少于 6 位');
+    return;
+  }
+  
+  btn.disabled = true;
+  btn.textContent = '⏳ 注册中...';
+  errorEl.classList.remove('show');
+  
+  try {
+    const resp = await fetch('/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, email })
+    });
+    
+    const data = await resp.json();
+    
+    if (!resp.ok) {
+      throw new Error(data.detail || '注册失败');
+    }
+    
+    setAuthToken(data.access_token);
+    showError(errorEl, '注册成功，正在跳转...', true);
+    setTimeout(() => {
+      window.location.reload();
+    }, 1000);
+  } catch (e) {
+    showError(errorEl, e.message || '注册失败，请重试');
+    btn.disabled = false;
+    btn.textContent = '✅ 创建账户';
+  }
+}
+
+function showError(el, msg, isSuccess) {
+  el.textContent = msg;
+  el.style.color = isSuccess ? 'var(--green)' : '';
+  el.classList.toggle('show', !!msg);
+}
+
+// 回车键提交
+document.getElementById('loginPassword').addEventListener('keypress', function(e) {
+  if (e.key === 'Enter') handleLogin();
+});
+document.getElementById('regPassword').addEventListener('keypress', function(e) {
+  if (e.key === 'Enter') handleRegister();
+});
+
+// ── 初始化（须在 AUTH_KEY 等定义之后执行）──
+checkAuth();
+setInterval(refreshState, 5000);
 refreshState();
+
 </script>
+  </div>
 </body>
 </html>
