@@ -61,6 +61,7 @@ class MissionState:
     target: str
     goal: str
     authorized: bool
+    session_id: str = ""
     phase: Phase = Phase.PLANNING
     plan: str = ""
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -77,6 +78,16 @@ class MissionState:
     category_decision: dict[str, Any] | None = None
     category_history: list[dict[str, Any]] = field(default_factory=list)
     authorization_evidence: dict[str, Any] = field(default_factory=dict)
+
+    # 首次进入攻击阶段（EXPLOITATION）的人工批准状态；
+    # 持久化后即使崩溃恢复也不会重复询问
+    exploitation_approved: bool = False
+
+    # 作战计划清单：Brain 首次规划（笼统条目），Orchestrator 经 update_plan 维护
+    # 每项: {id, content, phase, status, evidence, origin}
+    #   status: pending | in_progress | completed | failed | skipped
+    #   origin: brain | orchestrator
+    plan_items: list[dict[str, Any]] = field(default_factory=list)
 
     def record(self, actor: str, action: str, **details: Any) -> None:
         self.updated_at = _now()
@@ -124,6 +135,12 @@ class MissionStore:
 
     def __init__(self, path: str | Path = ".TaskMemory/current_mission.json") -> None:
         self.path = Path(path)
+
+    @classmethod
+    def for_session(cls, session_id: str, base_dir: str | Path = ".TaskMemory/sessions") -> "MissionStore":
+        """为指定会话创建独立的持久化存储路径。"""
+        path = Path(base_dir) / f"{session_id}.json"
+        return cls(path)
 
     def save(self, state: MissionState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
 # 目标类型枚举
@@ -178,6 +179,29 @@ def normalize_target(target: str) -> TargetSpec:
     value = target.strip().rstrip(".")
     if not value:
         raise ValueError("目标不能为空")
+
+    # ── 0. URL 协议前缀处理（http:// / https://）──
+    if value.lower().startswith(("http://", "https://")):
+        parsed = urlparse(value)
+        scheme = parsed.scheme.lower()
+        url_host = parsed.hostname
+        if not url_host:
+            raise ValueError(f"URL 中缺少主机名: {target!r}")
+        url_port = parsed.port  # None 表示未显式指定
+        if url_port is None:
+            url_port = 80 if scheme == "http" else 443
+        if not (1 <= url_port <= 65535):
+            raise ValueError(f"端口超出范围 1-65535: {url_port}")
+        # 尝试解析为 IP
+        try:
+            ip = str(ipaddress.ip_address(url_host))
+            return TargetSpec.new_network(ip, url_port)
+        except ValueError:
+            pass
+        # 主机名
+        if _HOSTNAME_RE.fullmatch(url_host):
+            return TargetSpec.new_network(url_host.lower(), url_port)
+        raise ValueError(f"URL 中的主机名无效: {url_host!r}")
 
     # ── 1. 文件/目录目标 ──
     target_path = Path(value)
