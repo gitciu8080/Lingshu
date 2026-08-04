@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from jose import JWTError, jwt
@@ -77,6 +77,39 @@ def init_db():
             )
         """)
         _create_default_admin(conn)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                title TEXT DEFAULT '新会话',
+                target TEXT NOT NULL,
+                goal TEXT DEFAULT '',
+                provider TEXT DEFAULT 'deepseek',
+                model TEXT DEFAULT 'Min',
+                phase TEXT DEFAULT 'planning',
+                status TEXT DEFAULT 'active',
+                success BOOLEAN,
+                flag TEXT,
+                summary TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                event_type TEXT DEFAULT '',
+                agent_name TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id) REFERENCES sessions(id),
+                UNIQUE(session_id, seq)
+            )
+        """)
         conn.commit()
     finally:
         conn.close()
@@ -160,8 +193,16 @@ def decode_access_token(token: str) -> dict:
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
+    """获取当前用户，优先使用中间件预加载的结果以避免重复 DB 查询。"""
+    # 优先使用中间件已验证并缓存的用户对象
+    pre_loaded = getattr(request.state, "current_user", None)
+    if pre_loaded and isinstance(pre_loaded, dict) and "id" in pre_loaded:
+        return pre_loaded
+
+    # Fallback：手动解码令牌并查找用户
     token = credentials.credentials
     payload = decode_access_token(token)
     user = get_user_by_username(payload["username"])
@@ -170,15 +211,6 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户不存在",
         )
-    conn = get_db()
-    try:
-        conn.execute(
-            "UPDATE users SET last_login = ? WHERE username = ?",
-            (datetime.now(timezone.utc).isoformat(), payload["username"]),
-        )
-        conn.commit()
-    finally:
-        conn.close()
     return {
         "id": user["id"],
         "username": user["username"],
