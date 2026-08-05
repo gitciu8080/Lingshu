@@ -157,20 +157,24 @@ class LingShuState {
     this.onClearChat?.();
 
     // 加载会话详情更新标题栏
+    let sessionDetail = null;
     try {
       const resp = await this.authFetch(`/api/session/${id}`);
       if (resp.ok) {
-        const detail = await resp.json();
-        this.onUpdatePanelHeader?.(detail);
+        sessionDetail = await resp.json();
+        this.onUpdatePanelHeader?.(sessionDetail);
       }
     } catch {}
 
     // 加载历史消息
     await loadMessages(id);
 
-    // 如果是活跃会话，建立 SSE
+    // 刷新会话列表获取最新状态（防止 is_live 过期）
+    await this.loadSessions();
+
+    // 使用会话详情或刷新后的列表判断是否活跃
     const session = this.sessions.find(s => s.id === id);
-    const isLive = session && session.is_live === true;
+    const isLive = session ? session.is_live === true : sessionDetail?.is_live === true;
     if (isLive) {
       this.connectSSE(id);
       this.onSetInputState?.(true);
@@ -195,7 +199,6 @@ class LingShuState {
   /** 发送用户消息 */
   async sendMessage(content) {
     if (!this.currentSessionId) return;
-    this.onRenderUserMessage?.(content);
     await this.authFetch(`/api/session/${this.currentSessionId}/message`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -247,7 +250,10 @@ class LingShuState {
       if (!isRetry) {
         this._sseRetryCount = 0;
       }
-      const resp = await this.authFetch(`/api/session/${sessionId}/stream`, { signal });
+      const resp = await this.authFetch(
+        `/api/session/${sessionId}/stream?after_seq=${this.lastMessageSeq}`,
+        { signal },
+      );
       if (!resp.ok) {
         // 404 表示会话已结束，不重连
         if (resp.status === 404) return;
@@ -276,7 +282,8 @@ class LingShuState {
       // done=true：正常关闭（服务端结束流）
     } catch (e) {
       if (e.name === 'AbortError') return; // 主动关闭，不重连
-      // 检查会话是否仍然活跃
+      // 刷新后再判断会话是否仍活跃，避免本地缓存过期导致放弃重连。
+      await this.loadSessions();
       const session = this.sessions.find(s => s.id === sessionId);
       const isLive = session && session.is_live === true;
       if (!isLive) return; // 会话已结束，不重连
@@ -311,12 +318,22 @@ class LingShuState {
     if (event.session_id && this.currentSessionId && event.session_id !== this.currentSessionId) {
       return;
     }
+    if (event.seq && event.seq <= this.lastMessageSeq) {
+      return;
+    }
+    if (event.seq) {
+      this.lastMessageSeq = event.seq;
+    }
     // 流式气泡累积映射：agent → { bubble, contentEl }
     if (!this._streamBubbles) this._streamBubbles = {};
 
     switch (event.type) {
+      case 'user_message':
+        this.onRenderUserMessage?.(event.content || '');
+        break;
+
       case 'mission_start':
-        this.onRenderSystemMessage?.(`🚀 任务启动: ${event.target || ''}`);
+        this.onRenderSystemMessage?.(`🚀 目标: ${event.target || ''} | 任务: ${event.goal || ''}`);
         this.currentPhase = 'planning';
         this.onUpdatePhaseTag?.('planning');
         this.onTargetInfo?.(event);
@@ -326,6 +343,7 @@ class LingShuState {
         // 创建空 Agent 气泡，保存引用供 delta 追加
         const ref = this.onRenderAgentMessage?.(event.agent, '', '') || {};
         this._streamBubbles[event.agent] = ref;
+        this.activeAgentBubbles[event.agent] = ref;
         break;
       }
 
@@ -342,12 +360,15 @@ class LingShuState {
 
       case 'text_end': {
         // 用全文替换（经 Markdown 渲染），清除引用
-        const ref = this._streamBubbles[event.agent];
+        const ref = this._streamBubbles[event.agent] || this.activeAgentBubbles[event.agent];
         if (ref && ref.contentEl && event.full_text) {
           ref.contentEl.innerHTML = mdRender(event.full_text);
           this.onScrollToBottom?.();
+        } else if (event.full_text) {
+          this.onRenderAgentMessage?.(event.agent || 'system', event.full_text);
         }
         delete this._streamBubbles[event.agent];
+        delete this.activeAgentBubbles[event.agent];
         break;
       }
 
@@ -370,14 +391,37 @@ class LingShuState {
       case 'thinking_end':
         {
           const key = 'think_' + event.agent;
-          const ref = this._streamBubbles[key];
+          const ref = this._streamBubbles[key] || this.activeAgentBubbles[event.agent];
           if (ref && ref.contentEl && event.full_text) {
-            ref.contentEl.textContent = event.full_text;
+            ref.contentEl.innerHTML = '<details class="thinking-collapsible" open><summary>🧠 思考过程 (点击折叠)</summary><div class="thinking-body">' + mdRender(event.full_text) + '</div></details>';
             this.onScrollToBottom?.();
+          } else if (event.full_text) {
+            const ref = this.onRenderAgentMessage?.(event.agent || 'system', '', 'thinking') || {};
+            if (ref.contentEl) {
+              ref.contentEl.innerHTML = '<details class="thinking-collapsible" open><summary>🧠 思考过程 (点击折叠)</summary><div class="thinking-body">' + mdRender(event.full_text) + '</div></details>';
+            }
           }
           delete this._streamBubbles[key];
+          delete this.activeAgentBubbles[event.agent];
         }
         break;
+
+      case 'stream_snapshot': {
+        const isThinking = event.stream_type === 'thinking';
+        const key = isThinking ? 'think_' + event.agent : event.agent;
+        let ref = this._streamBubbles[key] || this.activeAgentBubbles[event.agent];
+        if (!ref || !ref.contentEl) {
+          ref = this.onRenderAgentMessage?.(
+            event.agent || 'system', '', isThinking ? 'thinking' : '',
+          ) || {};
+          this._streamBubbles[key] = ref;
+        }
+        if (ref.contentEl) {
+          ref.contentEl.textContent = event.full_text || '';
+          this.onScrollToBottom?.();
+        }
+        break;
+      }
 
       case 'tool_call_start':
         // 工具调用开始 → 右侧面板展示
