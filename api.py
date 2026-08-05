@@ -44,9 +44,11 @@ import session_store
 class SessionContext:
     session_id: str
     user_id: int
-    event_queue: asyncio.Queue
     input_queue: asyncio.Queue
     task: asyncio.Task | None = None
+    subscribers: set[asyncio.Queue] = field(default_factory=set)
+    stream_buffers: dict[str, str] = field(default_factory=dict)
+    approval_decision_submitted: bool = False
 
 # 活跃会话注册表：session_id → SessionContext
 _active_sessions: dict[str, SessionContext] = {}
@@ -112,14 +114,14 @@ _SYSTEM_ROLE_EVENTS = frozenset({
 })
 
 
-def _persist_event(session_id: str, event_type: str, payload: dict) -> None:
-    """将重要事件异步持久化到 session_messages 表，供历史消息加载。"""
+def _persist_event(session_id: str, event_type: str, payload: dict) -> int | None:
+    """持久化重要事件并返回消息序号，供重连去重与补偿。"""
     if event_type not in _PERSIST_EVENT_TYPES:
-        return
+        return None
     agent_name = payload.get("agent", "")
     # 根据事件类型提取内容和确定 role
     if event_type == "mission_start":
-        content = f"目标: {payload.get('target', '')} | 目标: {payload.get('goal', '')}"
+        content = f"目标: {payload.get('target', '')} | 任务: {payload.get('goal', '')}"
     elif event_type == "mission_end":
         content = f"状态: {payload.get('status', '未知')}"
     elif event_type == "mission_cancelled":
@@ -143,23 +145,44 @@ def _persist_event(session_id: str, event_type: str, payload: dict) -> None:
         content = payload.get("tool_name", "")
     elif event_type == "tool_call_end":
         content = payload.get("tool_name", "")
+    elif event_type == "approval_required":
+        # 保存完整事件数据（含 scan_summary、plan_items、reason），供断线重连时恢复审批弹窗
+        content = json.dumps(payload, ensure_ascii=False)
+    elif event_type == "approval_resolved":
+        # 保存审批结果，供前端恢复时判断是否已审批
+        content = json.dumps({"approved": payload.get("approved", False), "decision": payload.get("decision", "")}, ensure_ascii=False)
     else:
         content = payload.get("content", payload.get("message", ""))
     # 系统事件 role="system"，Agent 流式/消息事件 role="agent"
     role = "system" if event_type in _SYSTEM_ROLE_EVENTS else "agent"
+    return session_store.add_message(
+        session_id, role, content, event_type, agent_name,
+    )
+
+
+# ── 靶机信息持久化 ──
+
+def _persist_target_info(session_id: str, payload: dict) -> None:
+    """将靶机信息持久化到 sessions 表的 target_info 列。"""
     try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(
-            asyncio.to_thread(session_store.add_message, session_id, role, content, event_type, agent_name)
+        existing = session_store.get_session(session_id)
+        current_info = {}
+        if existing and existing.get("target_info"):
+            try:
+                current_info = json.loads(existing["target_info"])
+            except (json.JSONDecodeError, TypeError):
+                current_info = {}
+        current_info.update(payload)
+        session_store.update_session(
+            session_id, target_info=json.dumps(current_info, ensure_ascii=False),
         )
-    except RuntimeError:
-        # 无事件循环时同步写入
-        session_store.add_message(session_id, role, content, event_type, agent_name)
+    except Exception:
+        pass
 
 
 # ── Session-aware 事件回调工厂 ──
 
-def _make_session_callback(session_id: str, queue: asyncio.Queue):
+def _make_session_callback(session_id: str, ctx: SessionContext):
     """为指定会话创建事件回调闭包，同时推送 SSE 和持久化到 DB。
 
     内置 Agent 流式全文缓冲：
@@ -171,20 +194,19 @@ def _make_session_callback(session_id: str, queue: asyncio.Queue):
     text_start/thinking_start 也一并持久化（无 content），用于历史恢复
     时在 Agent 日志面板创建气泡入口。
     """
-    _buf: dict[str, str] = {}  # agent_name → 累积全文
-
     def callback(event_type: str, **payload: Any) -> None:
-        nonlocal _buf
         # 全文缓冲：text_delta / thinking_delta → 累积
         if event_type in ("text_delta", "thinking_delta"):
             agent = payload.get("agent", "")
-            _buf[agent] = _buf.get(agent, "") + (
+            key = f"{event_type.removesuffix('_delta')}:{agent}"
+            ctx.stream_buffers[key] = ctx.stream_buffers.get(key, "") + (
                 payload.get("delta") or payload.get("content") or ""
             )
         # 全文终结：text_end → 注入 full_text 并清除缓冲区
         elif event_type in ("text_end", "thinking_end"):
             agent = payload.get("agent", "")
-            full = _buf.pop(agent, "")
+            key = f"{event_type.removesuffix('_end')}:{agent}"
+            full = ctx.stream_buffers.pop(key, "")
             if full:
                 payload["full_text"] = full
             # 也推到 SSE（前端依靠 SSE 拿到含 full_text 的 text_end）
@@ -192,28 +214,100 @@ def _make_session_callback(session_id: str, queue: asyncio.Queue):
         # start 时清旧缓冲（防止上一条异常截断后残留）
         elif event_type in ("text_start", "thinking_start"):
             agent = payload.get("agent", "")
-            if agent in _buf:
-                _buf.pop(agent)  # 旧残留丢弃
+            key = f"{event_type.removesuffix('_start')}:{agent}"
+            ctx.stream_buffers[key] = ""
 
         payload["session_id"] = session_id
-        try:
-            queue.put_nowait({"type": event_type, **payload})
-        except asyncio.QueueFull:
-            pass
-        # 异步持久化到 session_messages 表（仅 _PERSIST_EVENT_TYPES 中的事件会实际落库）
-        _persist_event(session_id, event_type, payload)
+        # 先持久化再广播，确保刷新/重连可以从数据库补偿事件。
+        seq = _persist_event(session_id, event_type, payload)
+        event = {"type": event_type, **payload}
+        if seq is not None:
+            event["seq"] = seq
+        # 靶机信息持久化
+        if event_type in ("target_info", "flag_found", "phase_change"):
+            _persist_target_info(session_id, {event_type: payload})
+        # 审批状态持久化：approval_required 时保存完整事件数据，approval_resolved 时清除
+        if event_type == "approval_required":
+            ctx.approval_decision_submitted = False
+            session_store.update_session(
+                session_id,
+                pending_approval=json.dumps(payload, ensure_ascii=False),
+            )
+        elif event_type == "approval_resolved":
+            ctx.approval_decision_submitted = True
+            session_store.update_session(session_id, pending_approval=None)
+
+        # 每个浏览器连接拥有独立队列，所有订阅者收到完全相同的事件。
+        for subscriber in tuple(ctx.subscribers):
+            subscriber.put_nowait(event.copy())
 
     return callback
 
 
-async def _session_event_generator(session_id: str, queue: asyncio.Queue):
-    """从指定会话的事件队列消费事件，带心跳。"""
-    while True:
+def _message_to_event(message: dict) -> dict:
+    """将持久化消息转换为 SSE 事件，用于连接建立时补偿。"""
+    event_type = (
+        "user_message"
+        if message.get("role") == "user"
+        else message.get("event_type") or "message"
+    )
+    content = message.get("content", "")
+    event: dict[str, Any] = {
+        "type": event_type,
+        "session_id": message.get("session_id", ""),
+        "agent": message.get("agent_name", ""),
+        "seq": message.get("seq", 0),
+    }
+    if event_type in ("text_end", "thinking_end"):
+        event["full_text"] = content
+    elif event_type == "phase_change":
+        event["phase"] = content
+    elif event_type in ("approval_required", "approval_resolved", "plan_updated"):
         try:
-            event = await asyncio.wait_for(queue.get(), timeout=15.0)
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        except asyncio.TimeoutError:
-            yield ": heartbeat\n\n"
+            event.update(json.loads(content))
+        except (json.JSONDecodeError, TypeError):
+            event["content"] = content
+    elif event_type == "tool_call_start":
+        event["tool_name"] = content
+    elif event_type == "error":
+        event["message"] = content
+    else:
+        event["content"] = content
+    return event
+
+
+async def _session_event_generator(
+    session_id: str,
+    ctx: SessionContext,
+    after_seq: int = 0,
+):
+    """为单个客户端建立独立订阅，并补偿刷新建连间隙事件。"""
+    queue: asyncio.Queue = asyncio.Queue()
+    ctx.subscribers.add(queue)
+    # 注册订阅和读取补偿消息之间不 await，不会产生事件丢失窗口。
+    catchup = session_store.get_messages(session_id, after_seq=after_seq, limit=5000)
+    stream_snapshot = dict(ctx.stream_buffers)
+    try:
+        for message in catchup:
+            yield f"data: {json.dumps(_message_to_event(message), ensure_ascii=False)}\n\n"
+        for key, full_text in stream_snapshot.items():
+            stream_type, agent = key.split(":", 1)
+            snapshot = {
+                "type": "stream_snapshot",
+                "stream_type": stream_type,
+                "agent": agent,
+                "full_text": full_text,
+                "session_id": session_id,
+            }
+            yield f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            except asyncio.TimeoutError:
+                yield ": heartbeat\n\n"
+    finally:
+        ctx.subscribers.discard(queue)
 
 
 # ── 会话归属验证辅助函数 ──
@@ -438,7 +532,10 @@ async def logout(current_user: dict = Depends(get_current_user)):
 async def index():
     html_path = _PROJECT_ROOT / "frontend" / "index.html"
     if html_path.is_file():
-        return html_path.read_text(encoding="utf-8")
+        return HTMLResponse(
+            html_path.read_text(encoding="utf-8"),
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
     return HTMLResponse("<h1>前端页面未找到</h1>", status_code=404)
 
 
@@ -446,7 +543,11 @@ async def index():
 async def session_state_js():
     js_path = _PROJECT_ROOT / "frontend" / "session_state.js"
     if js_path.is_file():
-        return FileResponse(js_path, media_type="application/javascript")
+        return FileResponse(
+            js_path,
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
     return Response(status_code=404)
 
 
@@ -473,7 +574,6 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         ctx = SessionContext(
             session_id=session_id,
             user_id=current_user["id"],
-            event_queue=asyncio.Queue(maxsize=5000),
             input_queue=asyncio.Queue(),
         )
 
@@ -493,7 +593,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     )
 
     # 构建 session-aware callback
-    callback = _make_session_callback(session_id, ctx.event_queue)
+    callback = _make_session_callback(session_id, ctx)
 
     # 推送启动事件
     callback("mission_start", target=req.target, goal=req.goal,
@@ -509,14 +609,18 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
 
 
 @app.get("/api/session/{session_id}/stream")
-async def session_stream(session_id: str, current_user: dict = Depends(get_current_user)):
+async def session_stream(
+    session_id: str,
+    after_seq: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
     """会话 SSE 事件流。"""
     await _verify_session_owner(session_id, current_user["id"])
     ctx = _active_sessions.get(session_id)
     if ctx is None:
         raise HTTPException(status_code=404, detail="会话不存在或已结束")
     return StreamingResponse(
-        _session_event_generator(session_id, ctx.event_queue),
+        _session_event_generator(session_id, ctx, after_seq),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
@@ -529,8 +633,23 @@ async def send_message(session_id: str, msg: ChatMessage, current_user: dict = D
     ctx = _active_sessions.get(session_id)
     if ctx is None:
         raise HTTPException(status_code=404, detail="会话不存在或已结束")
+    if msg.content.strip() in {"批准", "补充侦察", "拒绝"}:
+        session = await asyncio.to_thread(session_store.get_session, session_id)
+        if ctx.approval_decision_submitted or not session.get("pending_approval"):
+            return {"status": "approval_already_resolved"}
+        ctx.approval_decision_submitted = True
+    seq = await asyncio.to_thread(
+        session_store.add_message, session_id, "user", msg.content,
+    )
+    event = {
+        "type": "user_message",
+        "session_id": session_id,
+        "content": msg.content,
+        "seq": seq,
+    }
+    for subscriber in tuple(ctx.subscribers):
+        subscriber.put_nowait(event.copy())
     await ctx.input_queue.put(msg.content)
-    await asyncio.to_thread(session_store.add_message, session_id, "user", msg.content)
     return {"status": "sent"}
 
 
@@ -567,6 +686,14 @@ async def get_session_detail(session_id: str, current_user: dict = Depends(get_c
             session["mission_state"] = mission_data
         except (json.JSONDecodeError, OSError):
             pass
+    # 解析 target_info（如果存在）
+    if session.get("target_info"):
+        try:
+            session["target_info"] = json.loads(session["target_info"])
+        except (json.JSONDecodeError, TypeError):
+            session["target_info"] = {}
+    else:
+        session["target_info"] = {}
     return session
 
 
@@ -583,6 +710,32 @@ async def get_session_messages(
         lambda: session_store.get_messages(session_id, after_seq=after_seq, limit=limit)
     )
     return {"messages": messages}
+
+
+@app.get("/api/session/{session_id}/pending_approval")
+async def get_pending_approval(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """检查会话是否有待处理的审批请求。"""
+    await _verify_session_owner(session_id, current_user["id"])
+    # 直接查询 sessions 表的 pending_approval 字段
+    session = await asyncio.to_thread(session_store.get_session, session_id)
+    if not session or not session.get("pending_approval"):
+        return {"pending": False}
+    # 解析并返回完整事件数据
+    try:
+        payload = json.loads(session["pending_approval"])
+        event = {
+            "session_id": payload.get("session_id", session_id),
+            "scan_summary": payload.get("scan_summary", {}),
+            "plan_items": payload.get("plan_items", []),
+            "reason": payload.get("reason", ""),
+            "agent": payload.get("agent", "Orchestrator"),
+        }
+        return {"pending": True, "event": event}
+    except (json.JSONDecodeError, TypeError):
+        return {"pending": False}
 
 
 @app.delete("/api/session/{session_id}")
@@ -630,7 +783,7 @@ async def start_mission_compat(req: MissionStartRequest, current_user: dict = De
     ctx = _active_sessions.get(session_id)
     if ctx:
         return StreamingResponse(
-            _session_event_generator(session_id, ctx.event_queue),
+            _session_event_generator(session_id, ctx),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
@@ -644,7 +797,7 @@ async def stream_events_compat(current_user: dict = Depends(get_current_user)):
     for sid, ctx in _active_sessions.items():
         if ctx.user_id == current_user["id"]:
             return StreamingResponse(
-                _session_event_generator(sid, ctx.event_queue),
+                _session_event_generator(sid, ctx),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
             )
