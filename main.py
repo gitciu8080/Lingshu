@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import argparse  # 命令行参数解析
 import asyncio  # 异步事件循环，驱动整个多智能体任务
-import json  # 解析 Brain 输出的结构化计划
+import json  # 解析 Brain 输出的 JSON 结构化计划清单
 import os  # 环境变量与路径操作
-import re  # 提取 Brain 输出中的 json 代码块
 import sys  # 修改模块搜索路径，确保能 import 本目录下的包
 from collections.abc import Callable  # 回调类型注解
 from pathlib import Path  # 跨平台路径对象
@@ -37,6 +36,7 @@ from agent.Recon import (
     create_artifact_triage_agent,  # 文件/归档目标的侦察（triage）Agent
     create_network_recon_agent,  # 网络目标侦察 Agent
 )
+from agent.Reserve import create_reverse_agent  # 逆向分析 Agent（IDA MCP）
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
 from Tools.tooling import stream_agent_reply  # 流式获取 Agent 回复并转发事件
 
@@ -50,44 +50,68 @@ _WORKDIR_ROOT = Path(__file__).resolve().parent / "WorkDir"
 # 肯定的审批答复（其余一律视为拒绝，安全默认）
 _APPROVAL_YES = {"y", "yes", "ok", "approve", "approved", "是", "批准", "同意"}
 
-# 计划条目允许的阶段归属
-_PLAN_PHASES = {"recon", "analysis", "exploitation", "post_exploitation", "complete"}
-_JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+_PLAN_PHASES = {"recon", "analysis", "exploitation", "post_exploitation"}
 
 
 def _parse_plan_items(plan_text: str) -> list[dict[str, Any]]:
-    """从 Brain 输出中提取 ```json 代码块里的结构化计划。
+    """从 Brain 的计划文本中提取结构化计划清单（容错解析）。
 
-    容错策略：取最后一个可解析且含合法 plan 数组的代码块；
-    全部失败时返回空列表（任务继续，只是没有结构化清单）。
+    提取策略：查找文本中最后一个 ```json 代码块 → 解析 plan 数组 →
+    过滤非法条目（phase 不在枚举中、缺 content 等）→ 重新编号 id。
+    全链路失败时返回空列表，不影响任务继续。
     """
-    for candidate in reversed(_JSON_BLOCK_RE.findall(plan_text)):
-        try:
-            data = json.loads(candidate)
-        except json.JSONDecodeError:
+    if not plan_text:
+        return []
+
+    # 提取所有 ```json ... ``` 代码块，取最后一个（若多层嵌套）
+    blocks: list[str] = []
+    i = 0
+    while True:
+        start = plan_text.find("```json", i)
+        if start == -1:
+            break
+        start += len("```json")
+        end = plan_text.find("```", start)
+        if end == -1:
+            break
+        blocks.append(plan_text[start:end].strip())
+        i = end + 3
+    if not blocks:
+        return []
+
+    # 尝试解析最后一个 JSON 块
+    try:
+        data = json.loads(blocks[-1])
+    except json.JSONDecodeError:
+        return []
+
+    raw_plan = data.get("plan", [])
+    if not isinstance(raw_plan, list):
+        return []
+
+    # 过滤合法条目并重新编号
+    valid: list[dict[str, Any]] = []
+    for entry in raw_plan:
+        if not isinstance(entry, dict):
             continue
-        items = data.get("plan") if isinstance(data, dict) else None
-        if not isinstance(items, list):
+        content = str(entry.get("content", "")).strip()
+        phase = str(entry.get("phase", "")).strip()
+        if not content or phase not in _PLAN_PHASES:
             continue
-        result: list[dict[str, Any]] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            content = str(item.get("content", "")).strip()
-            phase = str(item.get("phase", "")).strip()
-            if not content or phase not in _PLAN_PHASES:
-                continue
-            result.append({
-                "id": f"p{len(result) + 1}",
-                "content": content,
-                "phase": phase,
-                "status": "pending",
-                "evidence": "",
-                "origin": "brain",
-            })
-        if result:
-            return result
-    return []
+        valid.append({
+            "id": "",  # 后续统一编号
+            "content": content,
+            "phase": phase,
+            "status": "pending",
+            "evidence": "",
+            "origin": "brain",
+        })
+
+    # 重新编号
+    for idx, item in enumerate(valid, start=1):
+        item["id"] = f"p{idx}"
+
+    return valid
 
 
 class _ApprovalBroker:
@@ -107,22 +131,50 @@ class _ApprovalBroker:
         self._event_callback = event_callback
         self._input_queue = input_queue
         self._pending: asyncio.Future[bool] | None = None
+        self._recent_inputs: list[str] = []  # 近 5 条未被审批消费的消息，用于审批挂起时回看
 
     @property
     def waiting(self) -> bool:
         """当前是否有挂起等待答复的审批请求。"""
         return self._pending is not None and not self._pending.done()
 
-    async def request(self, reason: str) -> bool:
-        """发起一次攻击阶段审批请求，返回是否批准。"""
-        if self._input_queue is None:
-            return await self._ask_cli(reason)
-        return await self._ask_api(reason)
+    def stash_input(self, user_input: str) -> None:
+        """缓存未被审批消费的用户消息（最多 5 条）。审批挂起时可用于回看。"""
+        self._recent_inputs.append(user_input)
+        if len(self._recent_inputs) > 5:
+            self._recent_inputs.pop(0)
 
-    async def _ask_cli(self, reason: str) -> bool:
+    async def request(self, reason: str, scan_summary: dict | None = None) -> bool:
+        """发起一次攻击阶段审批请求，返回是否批准。
+
+        Args:
+            reason: LLM 写的攻击理由
+            scan_summary: 可选的结构化扫描摘要（目标/侦察发现/作战计划等）
+        """
+        if self._input_queue is None:
+            return await self._ask_cli(reason, scan_summary)
+        return await self._ask_api(reason, scan_summary)
+
+    async def _ask_cli(self, reason: str, scan_summary: dict | None = None) -> bool:
         """CLI 通道：终端询问操作员（executor 中运行避免阻塞事件循环）。"""
-        print(f"\n[人工审批] Orchestrator 请求进入攻击阶段（EXPLOITATION）")
-        print(f"[人工审批] 理由：{reason}")
+        print(f"\n{'='*60}")
+        print(f"[人工审批] Orchestrator 请求进入攻击阶段（EXPLOITATION）")
+        if scan_summary:
+            target = scan_summary.get("target", "未知")
+            print(f"[目标] {target}")
+            findings = scan_summary.get("findings", [])
+            if findings:
+                print(f"[侦察发现] ({len(findings)} 条)")
+                for f in findings[-3:]:  # 最近 3 条
+                    print(f"  • [{f.get('source','?')}] {f.get('report','')[:200]}")
+            plan_items = scan_summary.get("plan_items", [])
+            if plan_items:
+                print(f"[作战计划] ({len(plan_items)} 条)")
+                for item in plan_items:
+                    emoji = {"completed": "✅", "in_progress": "🔄", "pending": "⏳"}.get(item.get("status"), "⏳")
+                    print(f"  {emoji} [{item.get('phase','?')}] {item.get('content','')}")
+        print(f"[攻击理由] {reason}")
+        print(f"{'='*60}")
         loop = asyncio.get_running_loop()
         try:
             answer = await loop.run_in_executor(
@@ -135,14 +187,22 @@ class _ApprovalBroker:
         print(f"[人工审批] 操作员{'批准' if approved else '拒绝'}了攻击阶段授权。")
         return approved
 
-    async def _ask_api(self, reason: str) -> bool:
+    async def _ask_api(self, reason: str, scan_summary: dict | None = None) -> bool:
         """API 通道：推送 approval_required 事件，挂起等待用户答复。"""
         if self.waiting:
             return False  # 防御：已有待处理审批，本次视为拒绝
+        # 推送审批事件到 SSE
+        payload: dict[str, Any] = {"reason": reason, "agent": "Orchestrator"}
+        if scan_summary:
+            payload["scan_summary"] = scan_summary
         if self._event_callback is not None:
-            self._event_callback(
-                "approval_required", reason=reason, agent="Orchestrator",
-            )
+            self._event_callback("approval_required", **payload)
+        # 回看近期缓存：若用户在审批请求到达前已发送了答复，直接消费
+        for recent in self._recent_inputs:
+            if self.feed(recent):
+                self._recent_inputs.clear()
+                return self._pending is None  # feed 已 resolve pending
+        self._recent_inputs.clear()
         loop = asyncio.get_running_loop()
         self._pending = loop.create_future()
         try:
@@ -151,13 +211,19 @@ class _ApprovalBroker:
             self._pending = None
 
     def feed(self, user_input: str) -> bool:
-        """处理 input_queue 收到的用户消息；返回 True 表示已被审批消费。"""
+        """处理 input_queue 收到的用户消息；返回 True 表示已被审批消费。
+        支持三态决策：批准 / 补充侦察（视为拒绝但语义保留）/ 拒绝。
+        """
         if not self.waiting:
             return False
-        approved = user_input.strip().lower() in _APPROVAL_YES
+        lower = user_input.strip().lower()
+        approved = lower in _APPROVAL_YES
         if self._event_callback is not None:
             self._event_callback(
-                "approval_resolved", approved=approved, agent="Orchestrator",
+                "approval_resolved",
+                approved=approved,
+                decision=user_input.strip(),
+                agent="Orchestrator",
             )
         self._pending.set_result(approved)
         return True
@@ -337,6 +403,21 @@ async def run_mission(
                 phase=mission.phase.value,
             )
 
+    def _push_target_info(extra: dict | None = None) -> None:
+        """向 SSE 订阅者推送靶机信息快照。"""
+        if event_callback is not None:
+            payload = {
+                "target": mission.target,
+                "goal": mission.goal,
+                "phase": mission.phase.value,
+                "exploitation_approved": mission.exploitation_approved,
+                "findings_count": len(mission.findings),
+                "flag": mission.flag,
+            }
+            if extra:
+                payload.update(extra)
+            event_callback("target_info", **payload)
+
     # ── 输入队列消费者（API 模式下处理用户实时指令） ──
     async def input_hook(user_input: str) -> None:
         """处理来自 API 层的用户实时输入。
@@ -359,6 +440,8 @@ async def run_mission(
                         # 若正挂起人工审批，该输入是对审批的答复
                         if approval_broker.feed(user_input):
                             continue
+                        # 缓存未被审批消费的消息（审批挂起时可回看）
+                        approval_broker.stash_input(user_input)
                         await input_hook(user_input)
                     except asyncio.TimeoutError:
                         continue  # 无新消息，继续轮询
@@ -426,12 +509,22 @@ async def run_mission(
         mission.transition(Phase.RECON, "战略计划已制定")
         store.save(mission)  # 每步都持久化，保证崩溃可恢复
         _emit_plan_updated()  # 首次推送结构化计划清单
+        _push_target_info()   # 首次推送靶机信息
         print(f"[Brain] 作战计划\n{mission.plan}\n")
 
         # ── 8. Attack 延迟创建（Recon 后可能会 reclassify）──
         # 传入当前任务携带的分类结果；若后续 Recon 触发重分类，
         # Orchestrator 会更新 mission.category_decision，Attack 据此动态加载 Skill。
-        attack = create_attack_agent(
+        attack = await create_attack_agent(
+            model,
+            analysis,
+            mission.target,
+            project_dir,
+            runtime.command_timeout,
+            category_decision=mission.category_decision,
+        )
+
+        reserve = await create_reverse_agent(
             model,
             analysis,
             mission.target,
@@ -444,7 +537,7 @@ async def run_mission(
         # 战术调度核心：持有 recon/attack/state/store 的唯一调度者，
         # 负责推进阶段、调度侦察与攻击、处理重分类、最终调用 complete_mission 收尾。
         orchestrator = create_orchestrator_agent(
-            model, recon, attack, mission, store, event_callback=event_callback,
+            model, recon, attack, reserve, mission, store, event_callback=event_callback,
             approval_callback=approval_broker.request,
         )
         # 结构化计划清单文本（Orchestrator 需要知道条目 id 才能用 update_plan 维护）
@@ -478,6 +571,9 @@ async def run_mission(
             print(f"[系统] 本轮在 {mission.phase.value} 阶段停止，任务尚未被标记完成。")
         else:
             print(f"[系统] 任务结束: success={mission.success}, flag={mission.flag or '未发现'}")
+            if mission.flag and event_callback:
+                event_callback("flag_found", flag=mission.flag)
+        _push_target_info()
         return mission
 
     finally:

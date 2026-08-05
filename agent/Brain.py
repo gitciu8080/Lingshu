@@ -32,7 +32,22 @@ BRAIN_SYS_PROMPT = """你是网络安全作战总参谋（Brain）。
 
 ## 约束
 - 不假设侦察结果，不编造服务、漏洞、凭据或 Flag。
-- 输出简洁中文计划。"""
+- 输出简洁中文计划。
+
+## 输出格式
+先输出人类可读的计划正文；正文结束后，必须附加一个 json 代码块，
+给出 4~8 条笼统的结构化计划（执行细节由 Orchestrator 在实施中细化维护）：
+
+```json
+{
+  "plan": [
+    {"content": "阶段目标描述", "phase": "recon"}
+  ]
+}
+```
+
+phase 只能取值：recon / analysis / exploitation / post_exploitation / complete。
+content 用一句话概括该步要达成什么，不要包含具体命令或参数。"""
 
 
 def create_brain_agent(model) -> Agent:

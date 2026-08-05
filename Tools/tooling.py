@@ -16,6 +16,9 @@ from agentscope.event import (
     ThinkingBlockDeltaEvent,
     ThinkingBlockEndEvent,
     ThinkingBlockStartEvent,
+    ToolCallStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
 )
 from agentscope.message import Msg
 from agentscope.permission import PermissionBehavior, PermissionDecision
@@ -69,6 +72,24 @@ async def stream_agent_reply(
         elif isinstance(evt_or_msg, ThinkingBlockEndEvent):
             print(flush=True)
             _emit("thinking_end", agent=agent_name)
+        elif isinstance(evt_or_msg, ToolCallStartEvent):
+            print(f"\n{prefix}🔧 [{evt_or_msg.tool_call_name}] ", end="", flush=True)
+            _emit("tool_call_start",
+                  agent=agent_name,
+                  tool_call_id=evt_or_msg.tool_call_id,
+                  tool_name=evt_or_msg.tool_call_name)
+        elif isinstance(evt_or_msg, ToolCallDeltaEvent):
+            print(evt_or_msg.delta, end="", flush=True)
+            _emit("tool_call_delta",
+                  agent=agent_name,
+                  tool_call_id=evt_or_msg.tool_call_id,
+                  delta=evt_or_msg.delta)
+        elif isinstance(evt_or_msg, ToolCallEndEvent):
+            print("", flush=True)
+            _emit("tool_call_end",
+                  agent=agent_name,
+                  tool_call_id=evt_or_msg.tool_call_id,
+                  tool_name=getattr(evt_or_msg, 'tool_call_name', ''))
 
     if final_msg is None:
         raise RuntimeError("Agent did not produce a final message.")
