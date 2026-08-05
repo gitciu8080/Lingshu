@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentscope.agent import Agent, ReActConfig
+from agentscope.mcp import MCPClient, StdioMCPConfig
 from agentscope.message import UserMsg
 from agentscope.tool import Toolkit
 
@@ -17,13 +18,23 @@ from Tools.tooling import AllowedFunctionTool, create_scoped_shell_tool, stream_
 ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
 你只能处理 Orchestrator 给出的单一授权目标，并且只使用提供的工具。
 
+你可以使用的工具：
+1. analysis:扫描智能体，用于独立研判。
+2. cve_search:cve漏洞网上查询工具。
+3. create_scoped_shell_tool:本地命令运行工具。
+4. ida_mcp:ida逆向工具。 
+
+
 工作原则：
 - 先调用 analysis 获取独立研判；候选 CVE 应再用 cve_search 核验。
 - 只有证据和利用条件匹配时才使用 scoped_shell 验证或利用。
+- 对于需要反编译的，可以使用 ida 的 mcp 工具。
 - 所有网络命令必须显式包含授权目标，不得访问其他地址或网段。
 - 禁止拒绝服务、破坏数据、植入持久化、清除日志或扩大目标范围。
 - 不得把 HTTP 200、命令无报错或模型推测当作利用成功；成功必须有可复核证据。
 - 你只返回结果，不改变任务状态，也不宣布整个任务完成。
+
+**关键：分析/验证完成后必须立即输出结构化报告并停止所有操作。严禁反复验证或继续调用工具。**
 
 报告必须区分：已验证事实、失败尝试、证据、当前权限、发现的 Flag（如有）和建议下一步。"""
 
@@ -86,7 +97,7 @@ def _build_skill_list(
     return skill_paths
 
 
-def create_attack_agent(
+async def create_attack_agent(
     model,
     analysis_agent: Agent,
     target: str,
@@ -119,6 +130,16 @@ def create_attack_agent(
 
     skill_list = _build_skill_list(category_decision, project_dir)
 
+    # ida_mcp = MCPClient(
+    #     name="IDA_Tool",
+    #     is_stateful=True,
+    #     mcp_config=StdioMCPConfig(
+    #         command="idalib-mcp",
+    #         args=["--stdio"],
+    #     ),
+    # )
+    # await ida_mcp.connect()
+
     toolkit = Toolkit(
         tools=[
             AllowedFunctionTool(analysis, is_read_only=True),
@@ -126,6 +147,7 @@ def create_attack_agent(
             create_scoped_shell_tool(target, project_dir, timeout),
         ],
         skills_or_loaders=skill_list,
+        # mcps=[ida_mcp],
     )
     return Agent(
         name="Attack",
