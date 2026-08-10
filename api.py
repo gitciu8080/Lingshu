@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -17,7 +16,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -29,7 +27,6 @@ from auth import (
     create_access_token,
     decode_access_token,
     get_user_by_username,
-    security,
     UserCreate,
     UserLogin,
     TokenResponse,
@@ -172,6 +169,18 @@ def _persist_target_info(session_id: str, payload: dict) -> None:
                 current_info = json.loads(existing["target_info"])
             except (json.JSONDecodeError, TypeError):
                 current_info = {}
+        # 兼容早期错误写入的嵌套结构。
+        nested_target = current_info.pop("target_info", None)
+        if isinstance(nested_target, dict):
+            current_info.update(nested_target)
+        nested_phase = current_info.pop("phase_change", None)
+        if isinstance(nested_phase, dict) and nested_phase.get("phase"):
+            current_info["phase"] = nested_phase["phase"]
+        nested_flag = current_info.pop("flag_found", None)
+        if isinstance(nested_flag, dict):
+            flag = nested_flag.get("flag") or nested_flag.get("content")
+            if flag:
+                current_info["flag"] = flag
         current_info.update(payload)
         session_store.update_session(
             session_id, target_info=json.dumps(current_info, ensure_ascii=False),
@@ -223,9 +232,25 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
         event = {"type": event_type, **payload}
         if seq is not None:
             event["seq"] = seq
-        # 靶机信息持久化
-        if event_type in ("target_info", "flag_found", "phase_change"):
-            _persist_target_info(session_id, {event_type: payload})
+        # 靶机信息采用扁平增量结构持久化，前端可直接恢复。
+        if event_type == "mission_start":
+            _persist_target_info(session_id, {
+                "target": payload.get("target", ""),
+                "goal": payload.get("goal", ""),
+                "phase": "planning",
+                "exploitation_approved": False,
+            })
+        elif event_type == "target_info":
+            _persist_target_info(session_id, {
+                key: value for key, value in payload.items()
+                if key not in {"session_id", "agent", "type"}
+            })
+        elif event_type == "phase_change":
+            _persist_target_info(session_id, {"phase": payload.get("phase", "")})
+        elif event_type == "flag_found":
+            flag = payload.get("flag") or payload.get("content")
+            if flag:
+                _persist_target_info(session_id, {"flag": flag})
         # 审批状态持久化：approval_required 时保存完整事件数据，approval_resolved 时清除
         if event_type == "approval_required":
             ctx.approval_decision_submitted = False
@@ -236,6 +261,8 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
         elif event_type == "approval_resolved":
             ctx.approval_decision_submitted = True
             session_store.update_session(session_id, pending_approval=None)
+            if payload.get("approved"):
+                _persist_target_info(session_id, {"exploitation_approved": True})
 
         # 每个浏览器连接拥有独立队列，所有订阅者收到完全相同的事件。
         for subscriber in tuple(ctx.subscribers):
@@ -325,7 +352,7 @@ async def _verify_session_owner(session_id: str, user_id: int) -> dict:
 def _save_long_term_memory(session_id, target, goal, phase, success, flag, summary):
     """保存任务到长期记忆。"""
     try:
-        from AgenticMemory import save_mission
+        from Tools.AgenticMemory import save_mission
         save_mission(
             target=target,
             goal=goal,
@@ -342,7 +369,7 @@ def _save_long_term_memory(session_id, target, goal, phase, success, flag, summa
 # ── 运行并清理 ──
 
 async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, goal: str,
-                           model_ver: str, provider: str, callback):
+                           model_ver: str, provider: str, callback, initial_context: str | None = None):
     """运行任务并处理清理逻辑。"""
     status_val = "completed"
     phase = "completed"
@@ -354,6 +381,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             target=target, goal=goal, model_ver=model_ver,
             provider=provider, event_callback=callback,
             session_id=session_id, input_queue=ctx.input_queue,
+            initial_context=initial_context,
         )
         phase = mission_state.phase.value if hasattr(mission_state.phase, 'value') else str(mission_state.phase)
         success = mission_state.success
@@ -477,10 +505,78 @@ class MissionStartRequest(BaseModel):
     goal: str = Field(default="获取 Flag", description="任务目标描述")
     provider: str = Field(default="deepseek", description="模型提供商: deepseek | qwen")
     model: str = Field(default="Min", description="思考级别: Low | Min | Max")
+    source_session_id: str | None = Field(default=None, description="重跑来源会话ID，用于注入前次任务上下文")
 
 
 class ChatMessage(BaseModel):
     content: str
+
+
+# ── 前次任务上下文构建（"再打一次"重跑用）──
+_CONTEXT_MAX_TOTAL = 4000
+_CONTEXT_FINDING_MAX = 500
+_CONTEXT_ATTACK_MAX = 300
+_CONTEXT_MAX_ITEMS = 5
+
+
+def _build_initial_context(source_session_id: str, user_id: str) -> str | None:
+    """从旧会话的 MissionState JSON 构建前次任务摘要上下文。
+
+    Returns:
+        摘要文本；会话不存在/无权访问/读失败时返回 None（静默降级）。
+    """
+    session = session_store.get_session(source_session_id)
+    if not session or session.get("user_id") != user_id:
+        return None
+    session_file = _sessions_dir / f"{source_session_id}.json"
+    if not session_file.is_file():
+        return None
+    try:
+        data = json.loads(session_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    lines: list[str] = []
+    lines.append(f"前次目标：{data.get('target', '未知')}")
+    lines.append(f"前次任务目标：{data.get('goal', '未知')}")
+    phase = data.get("phase", "未知")
+    success = data.get("success")
+    flag = data.get("flag")
+    result_desc = "成功" if success else ("失败" if success is False else "未完成（中断）")
+    lines.append(f"前次结果：{result_desc}（终态阶段: {phase}）")
+    if flag:
+        lines.append(f"前次已获取 Flag：{flag}")
+
+    findings = data.get("findings", [])[-_CONTEXT_MAX_ITEMS:]
+    if findings:
+        lines.append("")
+        lines.append("【前次侦察发现】")
+        for f in findings:
+            src = f.get("source", "?")
+            report = (f.get("report") or "")[:_CONTEXT_FINDING_MAX].strip()
+            if report:
+                lines.append(f"- [{src}] {report}")
+
+    attack_chain = data.get("attack_chain", [])[-_CONTEXT_MAX_ITEMS:]
+    if attack_chain:
+        lines.append("")
+        lines.append("【前次攻击链】")
+        for step in attack_chain:
+            obj = (step.get("objective") or "")[:120].strip()
+            report = (step.get("report") or "")[:_CONTEXT_ATTACK_MAX].strip()
+            lines.append(f"- 目标: {obj}")
+            if report:
+                lines.append(f"  结果: {report}")
+
+    summary = (data.get("summary") or "").strip()
+    if summary:
+        lines.append("")
+        lines.append(f"【前次任务总结】{summary[:1000]}")
+
+    text = "\n".join(lines)
+    if len(text) > _CONTEXT_MAX_TOTAL:
+        text = text[:_CONTEXT_MAX_TOTAL] + "\n... (上下文已截断)"
+    return text
 
 
 # ── 认证路由 ──
@@ -595,13 +691,21 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     # 构建 session-aware callback
     callback = _make_session_callback(session_id, ctx)
 
+    # "再打一次"：构建前次任务上下文（静默降级，失败不阻塞启动）
+    initial_context = None
+    if req.source_session_id:
+        initial_context = await asyncio.to_thread(
+            _build_initial_context, req.source_session_id, current_user["id"],
+        )
+
     # 推送启动事件
     callback("mission_start", target=req.target, goal=req.goal,
              provider=req.provider, model=req.model)
 
     # 创建后台任务
     task = asyncio.create_task(
-        _run_and_cleanup(session_id, ctx, req.target, req.goal, req.model, req.provider, callback)
+        _run_and_cleanup(session_id, ctx, req.target, req.goal, req.model, req.provider, callback,
+                         initial_context=initial_context)
     )
     ctx.task = task
 
@@ -694,6 +798,30 @@ async def get_session_detail(session_id: str, current_user: dict = Depends(get_c
             session["target_info"] = {}
     else:
         session["target_info"] = {}
+    target_info = session["target_info"]
+    nested_target = target_info.pop("target_info", None)
+    if isinstance(nested_target, dict):
+        target_info.update(nested_target)
+    nested_phase = target_info.pop("phase_change", None)
+    if isinstance(nested_phase, dict) and nested_phase.get("phase"):
+        target_info["phase"] = nested_phase["phase"]
+    nested_flag = target_info.pop("flag_found", None)
+    if isinstance(nested_flag, dict):
+        old_flag = nested_flag.get("flag") or nested_flag.get("content")
+        if old_flag:
+            target_info["flag"] = old_flag
+    target_info.setdefault("target", session.get("target", ""))
+    target_info.setdefault("goal", session.get("goal", ""))
+    target_info.setdefault("phase", session.get("phase", ""))
+    if session.get("flag"):
+        target_info["flag"] = session["flag"]
+    mission_state = session.get("mission_state") or {}
+    if mission_state.get("flag"):
+        target_info["flag"] = mission_state["flag"]
+    if "exploitation_approved" in mission_state:
+        target_info["exploitation_approved"] = bool(
+            mission_state["exploitation_approved"]
+        )
     return session
 
 

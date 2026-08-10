@@ -6,13 +6,17 @@ from agentscope.agent import Agent, ReActConfig
 from agentscope.message import UserMsg
 from agentscope.tool import Toolkit
 
-from AgenticMemory import get_experience_hint, save_mission
+from Tools.AgenticMemory import get_experience_hint, save_mission
 from TaskState import MissionState, MissionStore, Phase
+from Tools.Plan import (
+    create_add_plan_tool,
+    create_delete_plan_tool,
+    create_list_plan_tool,
+    create_update_plan_tool,
+    push_plan_update,
+)
+from Tools.ScopeRegistry import ScopeRegistry
 from Tools.tooling import AllowedFunctionTool, stream_agent_reply
-
-# 计划条目允许的阶段归属与状态取值
-_PLAN_PHASES = {"recon", "analysis", "exploitation", "post_exploitation", "complete"}
-_PLAN_STATUSES = {"pending", "in_progress", "completed", "failed", "skipped"}
 
 
 ORCHESTRATOR_SYS_PROMPT = """你是网络安全行动总指挥（Orchestrator）。
@@ -21,9 +25,14 @@ ORCHESTRATOR_SYS_PROMPT = """你是网络安全行动总指挥（Orchestrator）
 可用能力：
 - dispatch_recon：派遣 Recon 做纯被动信息收集（端口/服务/指纹/页面源码）。
 - dispatch_attack：派遣 Attack 做分析、验证、利用或目标达成工作。
-- dispatch_reverse：派遣 Reserve 对二进制文件执行 IDA 逆向分析（反编译、字符串提取等）。
+
 - request_exploitation_approval：首次执行验证/利用类攻击动作前，请求人工批准。
-- update_plan：维护作战计划清单——新增/细化条目，或标记条目状态。
+- request_scope_expansion：侦察中发现的靶机内网 IP 不在初始授权范围时，
+  提交证据经 ScopeAuditor 审核后纳入授权。侦察报告中出现的内网地址
+  （10.x / 172.16-31.x / 192.168.x）就是合法证据。
+  命令中直接使用未授权 IP 会被 scoped_shell 拦截，必须通过本工具正规扩容。
+- AddPlan / UpdatePlan / DeletePlan / ListPlan：维护作战计划清单——
+  新增、细化、删除条目，标记状态或查看当前清单。
 - view_mission_state：查看结构化任务状态。
 - complete_mission：仅在成功条件有证据或已达到明确失败条件时结束任务。
 
@@ -31,28 +40,35 @@ ORCHESTRATOR_SYS_PROMPT = """你是网络安全行动总指挥（Orchestrator）
 行动纪律（严格遵守顺序）：
 1. 先用 dispatch_recon 做被动侦察，Recon 只负责收集，不验证不利用。
 2. 侦察完毕后，把发现汇总成方案，明确要做什么、怎么做、预期拿到什么证据。
-3. 拿出方案后，先调用 request_exploitation_approval 请求人工批准，
+3. 侦察中若发现靶机在服务响应/日志/系统属性中暴露了内网 IP，应将相关片段
+   作为证据提交 request_scope_expansion 申请授权，获得批准后再对该 IP 发起探测。
+4. 需要经隧道或代理访问靶机内部服务时，对隧道另一端的内网地址同样要先调用
+   request_scope_expansion 扩容再连接，不得绕过授权直接发起。
+5. 拿出方案后，先调用 request_exploitation_approval 请求人工批准，
    批准前不得调用 dispatch_attack 做任何验证/利用动作。
-4. 批准后，调用 dispatch_attack 执行方案；所有攻击动作通过 Attack 执行，
+6. 批准后，调用 dispatch_attack 执行方案；所有攻击动作通过 Attack 执行，
    不要把主动探测或 payload 验证交给 Recon。
-5. 失败后基于证据选择补充侦察（回到步骤 1）或其他候选路径，禁止无依据重复。
-6. 只有获得可复核证据后才能标记成功。发现 Flag 时在 complete_mission 中明确提交。
-7. 禁止扩大目标范围、拒绝服务、数据破坏、持久化和日志清除。
-8. 不得跳过 complete_mission；若迭代耗尽，应如实报告未完成，不能伪造成功。
-9. 用 update_plan 维护计划清单：开始某项前标记 in_progress，拿到工具证据后标记
-   completed（必须在 evidence 中写明证据摘要）；侦察发现新路径时用 add 补充条目。
-   禁止无证据标记完成。"""
+7. 失败后基于证据选择补充侦察（回到步骤 1）或其他候选路径，禁止无依据重复。
+8. 只有获得可复核证据后才能标记成功。发现 Flag 时在 complete_mission 中明确提交。
+9. 禁止扩大目标范围、拒绝服务、数据破坏、持久化和日志清除。
+10. 不得跳过 complete_mission；若迭代耗尽，应如实报告未完成，不能伪造成功。
+11. 用 UpdatePlan 维护计划清单：开始某项前标记 in_progress，拿到工具证据后标记
+    completed（必须在 evidence 中写明证据摘要）；侦察发现新路径时用 AddPlan 补充条目，
+    条目失效时用 DeletePlan 移除，用 ListPlan 随时查看当前清单。
+    禁止无证据标记完成。"""
 
 
 def create_orchestrator_agent(
     model,
     recon_agent: Agent,
     attack_agent: Agent,
-    reserve_agent:Agent,
+    reserve_agent: Agent,
     mission: MissionState,
     store: MissionStore,
     event_callback: Callable[[str, dict[str, Any]], None] | None = None,
     approval_callback: Callable[[str, dict | None], Awaitable[bool]] | None = None,
+    scope_registry: ScopeRegistry | None = None,
+    scope_auditor: Agent | None = None,
 ) -> Agent:
     async def dispatch_recon(focus: str = "全面但低影响的信息收集") -> str:
         """派遣 Recon 对本次授权目标进行信息收集。
@@ -211,107 +227,87 @@ def create_orchestrator_agent(
             "调整方案后重新申请批准，或调用 complete_mission 如实报告任务无法继续。"
         )
 
+    async def request_scope_expansion(ip_or_cidr: str, evidence: str, reason: str = "") -> str:
+        """请求将内网 IP 或网段纳入授权范围，经 ScopeAuditor 审核后生效。
+
+        Args:
+            ip_or_cidr: 待授权的 IP 地址（如 10.42.3.240）或网段（如 10.42.0.0/16）。
+            evidence: 证据原文，必须包含该 IP 在侦察/攻击报告中的出现位置
+                      （如 "Jolokia remoteAddr=10.42.3.240"）。
+            reason: 补充说明为何需要访问该 IP（可选）。
+        """
+        if scope_registry is None:
+            return "[拒绝] 授权范围注册表不可用，无法扩容"
+        if scope_auditor is None:
+            return "[拒绝] ScopeAuditor 未配置，无法审核扩容请求"
+
+        import ipaddress
+        # 基础格式校验
+        try:
+            if "/" in ip_or_cidr:
+                ipaddress.ip_network(ip_or_cidr, strict=False)
+            else:
+                ipaddress.ip_address(ip_or_cidr)
+        except ValueError:
+            return f"[拒绝] 无效的 IP/CIDR 格式: {ip_or_cidr}"
+
+        # 已授权直接返回
+        if "/" not in ip_or_cidr and scope_registry.is_ip_allowed(ip_or_cidr):
+            return f"[已授权] {ip_or_cidr} 已在授权范围内，无需重复申请"
+
+        # 收集近期证据供 ScopeAuditor 审核
+        recent_reports = []
+        for f in mission.findings[-5:]:
+            recent_reports.append(f"[{f.get('source','?')}] {f.get('report','')[:800]}")
+        for a in mission.attack_chain[-3:]:
+            recent_reports.append(f"[Attack:{a.get('objective','?')}] {a.get('report','')[:800]}")
+        context = "\n---\n".join(recent_reports) if recent_reports else "（暂无侦察/攻击报告）"
+
+        # 调用 ScopeAuditor 审核
+        audit_prompt = (
+            f"授权目标：{mission.target}\n"
+            f"待审核 IP/网段：{ip_or_cidr}\n"
+            f"提交证据：{evidence}\n"
+            f"申请理由：{reason or '（无）'}\n\n"
+            f"近期侦察/攻击报告（证据上下文）：\n{context}\n\n"
+            f"请审核是否批准将 {ip_or_cidr} 纳入授权范围。"
+        )
+        result = await stream_agent_reply(
+            scope_auditor,
+            UserMsg(name="Orchestrator", content=audit_prompt),
+            prefix="[ScopeAuditor] ",
+            on_event=event_callback,
+        )
+        verdict = result.get_text_content() or "REJECTED\n（无输出）"
+
+        approved = verdict.strip().upper().startswith("APPROVED")
+        mission.record(
+            "Orchestrator",
+            "scope_expansion",
+            ip_or_cidr=ip_or_cidr,
+            evidence=evidence[:200],
+            auditor_verdict=verdict[:200],
+            approved=approved,
+        )
+
+        if approved:
+            if "/" in ip_or_cidr:
+                msg = scope_registry.add_network(ip_or_cidr, evidence, approved_by="ScopeAuditor")
+            else:
+                msg = scope_registry.add_ip(ip_or_cidr, evidence, approved_by="ScopeAuditor")
+            # 持久化授权范围
+            mission.authorized_scope = scope_registry.snapshot()
+            store.save(mission)
+            if event_callback:
+                event_callback("scope_updated", **mission.authorized_scope)
+            return f"{msg}\nScopeAuditor 意见：{verdict.split(chr(10), 1)[1] if chr(10) in verdict else verdict}"
+        else:
+            store.save(mission)
+            return f"[拒绝] ScopeAuditor 拒绝了扩容请求。\n意见：{verdict}"
+
     def view_mission_state() -> dict:
         """查看当前结构化任务状态。"""
         return mission.to_dict()
-
-    def _push_plan_update() -> None:
-        """向 SSE 订阅者推送计划清单全量快照。"""
-        if event_callback is not None:
-            event_callback(
-                "plan_updated",
-                items=mission.plan_items,
-                phase=mission.phase.value,
-            )
-
-    def _find_plan_item(item_id: str) -> dict | None:
-        return next(
-            (it for it in mission.plan_items if it.get("id") == item_id), None,
-        )
-
-    def update_plan(
-        action: str,
-        item_id: str = "",
-        content: str = "",
-        phase: str = "",
-        status: str = "",
-        evidence: str = "",
-    ) -> str:
-        """维护作战计划清单：新增、细化或标记条目状态。
-
-        Args:
-            action: add（新增条目）/ update（修改条目内容或阶段归属）/ mark（标记条目状态）。
-            item_id: update/mark 的目标条目 id（如 p2）。
-            content: add/update 时的条目描述。
-            phase: add/update 时的阶段归属：recon/analysis/exploitation/post_exploitation/complete。
-            status: mark 时的目标状态：in_progress/completed/failed/skipped。
-            evidence: 标记 completed 时必填的工具证据摘要。
-        """
-        action = action.strip().lower()
-        items = mission.plan_items
-
-        if action == "add":
-            if not content.strip():
-                return "[拒绝] add 必须提供 content（条目描述）"
-            if phase not in _PLAN_PHASES:
-                return f"[拒绝] 非法 phase: {phase or '(空)'}，可选: {sorted(_PLAN_PHASES)}"
-            max_n = 0
-            for it in items:
-                suffix = str(it.get("id", ""))[1:]
-                if str(it.get("id", "")).startswith("p") and suffix.isdigit():
-                    max_n = max(max_n, int(suffix))
-            new_item = {
-                "id": f"p{max_n + 1}",
-                "content": content.strip(),
-                "phase": phase,
-                "status": "pending",
-                "evidence": "",
-                "origin": "orchestrator",
-            }
-            items.append(new_item)
-            mission.record("Orchestrator", "plan_item_added", item=new_item)
-
-        elif action == "update":
-            target = _find_plan_item(item_id)
-            if target is None:
-                return f"[拒绝] 未找到计划条目: {item_id or '(空)'}"
-            if not content.strip() and not phase:
-                return "[拒绝] update 至少需提供 content 或 phase 之一"
-            if phase and phase not in _PLAN_PHASES:
-                return f"[拒绝] 非法 phase: {phase}，可选: {sorted(_PLAN_PHASES)}"
-            if content.strip():
-                target["content"] = content.strip()
-            if phase:
-                target["phase"] = phase
-            mission.record(
-                "Orchestrator", "plan_item_updated",
-                item_id=item_id, content=target["content"], phase=target["phase"],
-            )
-
-        elif action == "mark":
-            target = _find_plan_item(item_id)
-            if target is None:
-                return f"[拒绝] 未找到计划条目: {item_id or '(空)'}"
-            if status not in _PLAN_STATUSES:
-                return f"[拒绝] 非法 status: {status or '(空)'}，可选: {sorted(_PLAN_STATUSES)}"
-            # 防伪造闸门：标完成必须附工具证据
-            if status == "completed" and not evidence.strip():
-                return "[拒绝] 标记 completed 必须在 evidence 中写明工具证据摘要"
-            target["status"] = status
-            if evidence.strip():
-                target["evidence"] = evidence.strip()
-            mission.record(
-                "Orchestrator", "plan_item_marked",
-                item_id=item_id, status=status, evidence=target.get("evidence", ""),
-            )
-
-        else:
-            return f"[拒绝] 非法 action: {action or '(空)'}，可选: add/update/mark"
-
-        store.save(mission)
-        _push_plan_update()
-        summary = ", ".join(f"{it['id']}({it['status']})" for it in items)
-        return f"[已更新] 计划清单共 {len(items)} 项: {summary}"
 
     def complete_mission(success: bool, summary: str, flag: str = "") -> str:
         """结束任务并保存长期经验。
@@ -335,7 +331,7 @@ def create_orchestrator_agent(
             elif item.get("status") == "pending":
                 item["status"] = "skipped"
         store.save(mission)
-        _push_plan_update()
+        push_plan_update(mission, event_callback)
         save_mission(
             target=mission.target,
             goal=mission.goal,
@@ -353,9 +349,13 @@ def create_orchestrator_agent(
         AllowedFunctionTool(dispatch_attack, is_concurrency_safe=False),
         AllowedFunctionTool(dispatch_reverse, is_concurrency_safe=False),
         AllowedFunctionTool(view_mission_state, is_read_only=True),
-        AllowedFunctionTool(update_plan, is_concurrency_safe=False),
+        create_add_plan_tool(mission, store, event_callback, default_origin="orchestrator"),
+        create_update_plan_tool(mission, store, event_callback),
+        create_delete_plan_tool(mission, store, event_callback),
+        create_list_plan_tool(mission),
         AllowedFunctionTool(complete_mission, is_concurrency_safe=False),
         AllowedFunctionTool(request_exploitation_approval, is_concurrency_safe=False),
+        AllowedFunctionTool(request_scope_expansion, is_concurrency_safe=False),
     ]
     prompt = ORCHESTRATOR_SYS_PROMPT
     experience_hint = get_experience_hint()

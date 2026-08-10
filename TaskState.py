@@ -83,7 +83,12 @@ class MissionState:
     # 持久化后即使崩溃恢复也不会重复询问
     exploitation_approved: bool = False
 
-    # 作战计划清单：Brain 首次规划（笼统条目），Orchestrator 经 update_plan 维护
+    # 动态授权范围快照（ScopeRegistry.snapshot() 的输出），
+    # 崩溃恢复时用于重建 ScopeRegistry
+    authorized_scope: dict[str, Any] = field(default_factory=dict)
+
+    # 作战计划清单：Brain 经 AddPlan 登记（笼统条目），
+    # Orchestrator 经 AddPlan/UpdatePlan/DeletePlan/ListPlan 维护（Tools/Plan.py）
     # 每项: {id, content, phase, status, evidence, origin}
     #   status: pending | in_progress | completed | failed | skipped
     #   origin: brain | orchestrator

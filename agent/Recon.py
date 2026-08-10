@@ -11,6 +11,7 @@ from pathlib import Path
 from agentscope.agent import Agent, ReActConfig
 from agentscope.tool import Toolkit
 from Tools.CVE_Search import create_cve_search_tool
+from Tools.ScopeRegistry import ScopeRegistry
 from Tools.tooling import create_scoped_shell_tool
 
 # ---------------------------------------------------------------------------
@@ -47,9 +48,10 @@ def create_network_recon_agent(
     target: str,
     project_dir: str | Path,
     timeout: int,
+    scope_registry: ScopeRegistry | None = None,
 ) -> Agent:
     toolkit = Toolkit(
-        tools=[create_scoped_shell_tool(target, project_dir, timeout), create_cve_search_tool()],
+        tools=[create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry), create_cve_search_tool()],
     )
     return Agent(
         name="NetworkRecon",

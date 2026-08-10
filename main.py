@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse  # 命令行参数解析
 import asyncio  # 异步事件循环，驱动整个多智能体任务
-import json  # 解析 Brain 输出的 JSON 结构化计划清单
 import os  # 环境变量与路径操作
 import sys  # 修改模块搜索路径，确保能 import 本目录下的包
 from collections.abc import Callable  # 回调类型注解
@@ -37,6 +36,9 @@ from agent.Recon import (
     create_network_recon_agent,  # 网络目标侦察 Agent
 )
 from agent.Reserve import create_reverse_agent  # 逆向分析 Agent（IDA MCP）
+from agent.ScopeAuditor import create_scope_auditor_agent  # IP 授权审核 Agent
+from Tools.Plan import create_add_plan_tool  # Brain 登记计划条目的工具
+from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
 from Tools.tooling import stream_agent_reply  # 流式获取 Agent 回复并转发事件
 
@@ -49,69 +51,6 @@ _WORKDIR_ROOT = Path(__file__).resolve().parent / "WorkDir"
 
 # 肯定的审批答复（其余一律视为拒绝，安全默认）
 _APPROVAL_YES = {"y", "yes", "ok", "approve", "approved", "是", "批准", "同意"}
-
-_PLAN_PHASES = {"recon", "analysis", "exploitation", "post_exploitation"}
-
-
-def _parse_plan_items(plan_text: str) -> list[dict[str, Any]]:
-    """从 Brain 的计划文本中提取结构化计划清单（容错解析）。
-
-    提取策略：查找文本中最后一个 ```json 代码块 → 解析 plan 数组 →
-    过滤非法条目（phase 不在枚举中、缺 content 等）→ 重新编号 id。
-    全链路失败时返回空列表，不影响任务继续。
-    """
-    if not plan_text:
-        return []
-
-    # 提取所有 ```json ... ``` 代码块，取最后一个（若多层嵌套）
-    blocks: list[str] = []
-    i = 0
-    while True:
-        start = plan_text.find("```json", i)
-        if start == -1:
-            break
-        start += len("```json")
-        end = plan_text.find("```", start)
-        if end == -1:
-            break
-        blocks.append(plan_text[start:end].strip())
-        i = end + 3
-    if not blocks:
-        return []
-
-    # 尝试解析最后一个 JSON 块
-    try:
-        data = json.loads(blocks[-1])
-    except json.JSONDecodeError:
-        return []
-
-    raw_plan = data.get("plan", [])
-    if not isinstance(raw_plan, list):
-        return []
-
-    # 过滤合法条目并重新编号
-    valid: list[dict[str, Any]] = []
-    for entry in raw_plan:
-        if not isinstance(entry, dict):
-            continue
-        content = str(entry.get("content", "")).strip()
-        phase = str(entry.get("phase", "")).strip()
-        if not content or phase not in _PLAN_PHASES:
-            continue
-        valid.append({
-            "id": "",  # 后续统一编号
-            "content": content,
-            "phase": phase,
-            "status": "pending",
-            "evidence": "",
-            "origin": "brain",
-        })
-
-    # 重新编号
-    for idx, item in enumerate(valid, start=1):
-        item["id"] = f"p{idx}"
-
-    return valid
 
 
 class _ApprovalBroker:
@@ -296,6 +235,7 @@ async def run_mission(
     event_callback: Callable[[str, dict[str, Any]], None] | None = None,
     session_id: str = "",
     input_queue: asyncio.Queue | None = None,
+    initial_context: str | None = None,
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
@@ -318,6 +258,7 @@ async def run_mission(
         event_callback: 可选事件回调，用于向外部（如 UI）转发 Agent 事件
         session_id: 会话标识符，由 API 层分配；CLI 模式下默认为空字符串
         input_queue: 用户消息输入队列，支持对话式交互；CLI 模式下默认为 None
+        initial_context: 前次任务上下文摘要（"再打一次"重跑时由 API 层注入）
 
     Returns:
         最终任务状态 MissionState（含 plan / flag / success 等）
@@ -391,17 +332,20 @@ async def run_mission(
     mission.record("system", "mission_created", model=f"{provider}/{model_ver}")
     store.save(mission)
 
+    # ── 动态授权范围注册表 ──
+    scope_registry = ScopeRegistry()
+    # 从持久化恢复（崩溃恢复场景）
+    if mission.authorized_scope:
+        scope_registry.restore(mission.authorized_scope)
+    # 注册初始目标
+    if target_spec.host:
+        scope_registry.add_base_target(target_spec.host)
+    # 持久化初始快照
+    mission.authorized_scope = scope_registry.snapshot()
+    store.save(mission)
+
     # ── 人工审批协调器（首次进入攻击阶段前的人工闸门） ──
     approval_broker = _ApprovalBroker(event_callback, input_queue)
-
-    def _emit_plan_updated() -> None:
-        """向 SSE 订阅者推送作战计划清单全量快照（API 模式）。"""
-        if event_callback is not None:
-            event_callback(
-                "plan_updated",
-                items=mission.plan_items,
-                phase=mission.phase.value,
-            )
 
     def _push_target_info(extra: dict | None = None) -> None:
         """向 SSE 订阅者推送靶机信息快照。"""
@@ -454,7 +398,12 @@ async def run_mission(
         # ── 5. 模型与基础 Agent ──
         # 创建共享的 LLM 模型实例（temperature=0.7 兼顾稳定与发散）
         model = create_model(provider=provider, Ver=model_ver, temperature=0.7, config=runtime)
-        brain = create_brain_agent(model)  # 战略规划 Agent（不调用工具）
+        # Brain 通过 AddPlan 工具登记结构化计划条目（origin="brain"），
+        # 每次登记都会持久化并推送 plan_updated 事件到前端。
+        brain = create_brain_agent(
+            model,
+            tools=[create_add_plan_tool(mission, store, event_callback, default_origin="brain")],
+        )
         analysis = create_analysis_agent(model)  # 漏洞研判专家（纯推理）
 
         # ── 6. Recon / Triage 路由 ──
@@ -464,6 +413,7 @@ async def run_mission(
         if target_spec.kind == "network":
             recon = create_network_recon_agent(
                 model, target_str, project_dir, runtime.command_timeout,
+                scope_registry=scope_registry,
             )
         else:
             recon = create_artifact_triage_agent(
@@ -485,15 +435,22 @@ async def run_mission(
         )
         if category_decision.secondary:
             plan_prompt += f"候选题型：{', '.join(category_decision.secondary)}\n"
+        if initial_context:
+            plan_prompt += (
+                f"\n## 前次任务上下文（同一目标重跑，供参考以避开失败路径）\n"
+                f"{initial_context}\n"
+            )
         plan_prompt += (
             "\n你的任务：\n"
             "基于上述事实制定可审计的阶段计划。\n"
+            "先用 AddPlan 工具逐条登记结构化计划条目，再输出计划正文。\n"
             "若证据不足，请在计划中加入「重新分类检查点」。\n"
             "若你认为题型需要修正，请输出结构化建议（proposed_category + reason）。\n"
             "不得擅自修改正式题型，修正需由 Orchestrator 审批。"
         )
 
-        # 流式调用 Brain，实时打印前缀 [Brain] 并转发事件
+        # 流式调用 Brain，实时打印前缀 [Brain] 并转发事件。
+        # Brain 通过 AddPlan 工具直接登记 plan_items（每次登记即持久化并推送前端）。
         plan_result = await stream_agent_reply(
             brain,
             UserMsg(name="user", content=plan_prompt),
@@ -502,13 +459,10 @@ async def run_mission(
         )
         # 保存计划文本（无输出时回退到内置四阶段计划）
         mission.plan = plan_result.get_text_content() or "使用内置四阶段计划"
-        # 提取 Brain 输出的结构化计划清单（容错：解析失败则为空列表）
-        mission.plan_items = _parse_plan_items(mission.plan)
         mission.record("Brain", "plan_created", plan_items_count=len(mission.plan_items))
         # 状态机：PLANNING → RECON（非法转型会被状态机拒绝）
         mission.transition(Phase.RECON, "战略计划已制定")
         store.save(mission)  # 每步都持久化，保证崩溃可恢复
-        _emit_plan_updated()  # 首次推送结构化计划清单
         _push_target_info()   # 首次推送靶机信息
         print(f"[Brain] 作战计划\n{mission.plan}\n")
 
@@ -522,6 +476,7 @@ async def run_mission(
             project_dir,
             runtime.command_timeout,
             category_decision=mission.category_decision,
+            scope_registry=scope_registry,
         )
 
         reserve = await create_reverse_agent(
@@ -531,20 +486,40 @@ async def run_mission(
             project_dir,
             runtime.command_timeout,
             category_decision=mission.category_decision,
+            scope_registry=scope_registry,
         )
+
+        scope_auditor = create_scope_auditor_agent(model)
 
         # ── 9. Orchestrator 主循环 ──
         # 战术调度核心：持有 recon/attack/state/store 的唯一调度者，
         # 负责推进阶段、调度侦察与攻击、处理重分类、最终调用 complete_mission 收尾。
         orchestrator = create_orchestrator_agent(
-            model, recon, attack, reserve, mission, store, event_callback=event_callback,
+            model=model,
+            recon_agent=recon,
+            attack_agent=attack,
+            reserve_agent=reserve,
+            mission=mission,
+            store=store,
+            event_callback=event_callback,
             approval_callback=approval_broker.request,
+            scope_registry=scope_registry,
+            scope_auditor=scope_auditor,
         )
-        # 结构化计划清单文本（Orchestrator 需要知道条目 id 才能用 update_plan 维护）
+        # 结构化计划清单文本（Orchestrator 需要知道条目 id 才能用 UpdatePlan 等工具维护）
         plan_items_text = "\n".join(
             f"  {item['id']} [{item['phase']}] {item['content']}"
             for item in mission.plan_items
-        ) or "  （Brain 未给出结构化计划，可用 update_plan 自行建立清单）"
+        ) or "  （Brain 未登记结构化计划，可用 AddPlan 自行建立清单）"
+        orch_context = ""
+        if initial_context:
+            orch_context = (
+                f"\n\n## 前次任务上下文（同一目标重跑，供参考以避开失败路径）\n"
+                f"{initial_context}\n"
+                f"若前次已取得可利用通道（如已确认的 RCE/文件读取），应直接复用并精简命令，"
+                f"避免重复完整攻击链。"
+            )
+            mission.record("system", "context_injected", source="rerun")
         final_result = await stream_agent_reply(
             orchestrator,
             UserMsg(
@@ -552,8 +527,9 @@ async def run_mission(
                 content=(
                     f"执行以下已授权任务。\n目标：{mission.target}\n目标要求：{mission.goal}\n\n"
                     f"Brain 计划：\n{mission.plan}\n\n"
-                    f"结构化计划清单（执行中用 update_plan 维护状态）：\n{plan_items_text}\n\n"
+                    f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
                     "从侦察开始，以工具证据推进；结束时必须调用 complete_mission。"
+                    f"{orch_context}"
                 ),
             ),
             prefix="[Orchestrator] ",

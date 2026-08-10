@@ -1,11 +1,13 @@
-"""Brain：只负责战略规划，不执行工具。"""
+"""Brain：只负责战略规划，通过 AddPlan 工具登记结构化计划。"""
 from agentscope.agent import Agent, ReActConfig
+from agentscope.tool import Toolkit
 
 
 BRAIN_SYS_PROMPT = """你是网络安全作战总参谋（Brain）。
 
 ## 职责
-为已获授权安全测试制定阶段性计划。不调用工具、不执行扫描或攻击。
+为已获授权安全测试制定阶段性计划。除 AddPlan 登记计划条目外，
+不调用其他工具、不执行扫描或攻击。
 
 ## 输入信息
 你将收到：
@@ -35,25 +37,18 @@ BRAIN_SYS_PROMPT = """你是网络安全作战总参谋（Brain）。
 - 输出简洁中文计划。
 
 ## 输出格式
-先输出人类可读的计划正文；正文结束后，必须附加一个 json 代码块，
-给出 4~8 条笼统的结构化计划（执行细节由 Orchestrator 在实施中细化维护）：
-
-```json
-{
-  "plan": [
-    {"content": "阶段目标描述", "phase": "recon"}
-  ]
-}
-```
-
-phase 只能取值：recon / analysis / exploitation / post_exploitation / complete。
-content 用一句话概括该步要达成什么，不要包含具体命令或参数。"""
+先用 AddPlan 工具逐条登记 4~8 条笼统的结构化计划（执行细节由 Orchestrator
+在实施中细化维护），每条调用一次：id 从 1 开始递增，content 用一句话概括
+该步要达成什么（不要包含具体命令或参数），phase 只能取值：
+recon / analysis / exploitation / post_exploitation / complete。
+全部登记完成后，再输出人类可读的计划正文。"""
 
 
-def create_brain_agent(model) -> Agent:
+def create_brain_agent(model, tools: list | None = None) -> Agent:
     return Agent(
         name="Brain",
         system_prompt=BRAIN_SYS_PROMPT,
         model=model,
-        react_config=ReActConfig(max_iters=3),
+        toolkit=Toolkit(tools=tools or []),
+        react_config=ReActConfig(max_iters=15),
     )

@@ -6,9 +6,12 @@ import ipaddress
 import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from agentscope.agent import Agent
+
+if TYPE_CHECKING:
+    from Tools.ScopeRegistry import ScopeRegistry
 from agentscope.event import (
     TextBlockDeltaEvent,
     TextBlockEndEvent,
@@ -145,7 +148,11 @@ def _parse_target(target: str) -> tuple[str | None, str | None]:
     return None, target
 
 
-def _validate_scoped_command(command: str, target: str) -> None:
+def _validate_scoped_command(
+    command: str,
+    target: str,
+    registry: ScopeRegistry | None = None,
+) -> None:
     if not command.strip() or len(command) > 12000 or "\x00" in command:
         raise ValueError("命令为空、过长或包含非法字符")
     if any(pattern.search(command) for pattern in _DENIED):
@@ -154,28 +161,52 @@ def _validate_scoped_command(command: str, target: str) -> None:
     target_ip, target_id = _parse_target(target)
 
     # ── IP 白名单检查 ──
-    allowed_ips = {"127.0.0.1", "0.0.0.0"}
-    if target_ip:
-        allowed_ips.add(target_ip)
-    foreign_ips: set[str] = set()
-    for candidate in _IPV4_RE.findall(command):
-        try:
-            normalized = str(ipaddress.ip_address(candidate))
-        except ValueError:
-            continue
-        if normalized not in allowed_ips:
-            foreign_ips.add(normalized)
-    if foreign_ips:
-        raise PermissionError(f"命令包含授权范围外 IP: {', '.join(sorted(foreign_ips))}")
+    # 优先使用 ScopeRegistry（语义级，支持动态扩容），
+    # 无 registry 时回退到旧的静态 allowed_ips 集合（向后兼容）。
+    if registry is not None:
+        foreign_ips: set[str] = set()
+        for candidate in _IPV4_RE.findall(command):
+            try:
+                normalized = str(ipaddress.ip_address(candidate))
+            except ValueError:
+                continue
+            if not registry.is_ip_allowed(normalized):
+                foreign_ips.add(normalized)
+        if foreign_ips:
+            raise PermissionError(
+                f"命令包含授权范围外 IP: {', '.join(sorted(foreign_ips))}。"
+                f"如需探测内网主机，请先由 Orchestrator 调用 request_scope_expansion 审核授权。"
+            )
+    else:
+        allowed_ips = {"127.0.0.1", "0.0.0.0"}
+        if target_ip:
+            allowed_ips.add(target_ip)
+        foreign_ips = set()
+        for candidate in _IPV4_RE.findall(command):
+            try:
+                normalized = str(ipaddress.ip_address(candidate))
+            except ValueError:
+                continue
+            if normalized not in allowed_ips:
+                foreign_ips.add(normalized)
+        if foreign_ips:
+            raise PermissionError(f"命令包含授权范围外 IP: {', '.join(sorted(foreign_ips))}")
 
     # ── 网络工具目标检查 ──
     if _NETWORK_TOOLS.search(command):
-        # 命令需要包含 target_id（IP 或 hostname）或原始 target 字符串
-        if target_id not in command and target not in command:
-            raise PermissionError("网络命令必须显式包含本次授权目标")
+        if target_id in command or target in command:
+            return
+        if registry is not None and registry.is_any_target_in_command(command):
+            return
+        raise PermissionError("网络命令必须显式包含本次授权目标")
 
 
-def create_scoped_shell_tool(target: str, cwd: str | Path, timeout: int) -> AllowedFunctionTool:
+def create_scoped_shell_tool(
+    target: str,
+    cwd: str | Path,
+    timeout: int,
+    registry: ScopeRegistry | None = None,
+) -> AllowedFunctionTool:
     """创建仅允许触达指定目标的 Shell 工具。"""
     workdir = str(Path(cwd).resolve())
 
@@ -185,7 +216,7 @@ def create_scoped_shell_tool(target: str, cwd: str | Path, timeout: int) -> Allo
         Args:
             command: 要执行的 shell 命令；所有网络命令必须显式包含授权目标。
         """
-        _validate_scoped_command(command, target)
+        _validate_scoped_command(command, target, registry)
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=workdir,
