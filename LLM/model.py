@@ -13,10 +13,10 @@ from config import RuntimeConfig
 
 
 def DeepSeek(
-    Ver: str = "Min",
-    think: bool = True,
-    temperature: float = 0.7,
-    config: RuntimeConfig | None = None,
+        Ver: str = "Min",
+        think: bool = True,
+        temperature: float = 0.7,
+        config: RuntimeConfig | None = None,
 ) -> DeepSeekChatModel:
     """创建 AgentScope 2.x 原生 DeepSeek 模型。
 
@@ -27,8 +27,13 @@ def DeepSeek(
         config: 运行时配置。
     """
     runtime = config or RuntimeConfig.from_env()
-    _think = think and Ver != "Low"  # Low 级别关闭思考
-    _max_tokens = 8192 if Ver == "Max" else 4096
+    _reasoning_effort="Low"
+    if Ver == "Low":
+        _reasoning_effort="Low"
+    elif Ver == "Min":
+        _reasoning_effort="high"
+    else:
+        _reasoning_effort="max"
     return DeepSeekChatModel(
         credential=DeepSeekCredential(
             api_key=SecretStr(runtime.get_api_key("deepseek")),
@@ -36,9 +41,9 @@ def DeepSeek(
         ),
         model=runtime.model_name(Ver, provider="deepseek"),
         parameters=DeepSeekChatModel.Parameters(
-            thinking_enable=_think,
+            thinking_enable=1,
             temperature=temperature,
-            max_tokens=_max_tokens,
+            reasoning_effort=_reasoning_effort,
         ),
         stream=True,
         max_retries=3,
@@ -47,9 +52,9 @@ def DeepSeek(
 
 
 def Qwen(
-    Ver: str = "Min",
-    temperature: float = 0.7,
-    config: RuntimeConfig | None = None,
+        Ver: str = "Min",
+        temperature: float = 0.7,
+        config: RuntimeConfig | None = None,
 ) -> OpenAIChatModel:
     """创建 Qwen 模型（llama.cpp OpenAI 兼容 API）。
 
@@ -92,10 +97,10 @@ def Qwen(
 
 
 def create_model(
-    provider: str = "deepseek",
-    Ver: str = "Min",
-    temperature: float = 0.7,
-    config: RuntimeConfig | None = None,
+        provider: str = "deepseek",
+        Ver: str = "Min",
+        temperature: float = 0.7,
+        config: RuntimeConfig | None = None,
 ):
     """统一的模型工厂入口。
 
@@ -111,4 +116,3 @@ def create_model(
     if provider == "qwen":
         return Qwen(Ver=Ver, temperature=temperature, config=config)
     return DeepSeek(Ver=Ver, think=True, temperature=temperature, config=config)
-

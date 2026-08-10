@@ -61,7 +61,7 @@ class RuntimeConfig:
 
     # ── Qwen (llama.cpp OpenAI 兼容) ──
     qwen_api_key: str = ""
-    qwen_base_url: str = "http://10.8.128.108:8200/v1"
+    qwen_base_url: str = "http://10.8.128.100:8200/v1"
     qwen_model: str = "/mnt/nvme0n1p1/llama.cppModels/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 
     command_timeout: int = 300

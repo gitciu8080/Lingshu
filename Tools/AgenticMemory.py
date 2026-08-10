@@ -8,7 +8,7 @@ from datetime import datetime
 
 # 记忆文件路径
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-_MEMORY_FILE = os.path.join(_PROJECT_ROOT, ".LongMemory", "agentic_memory.json")
+_MEMORY_FILE = os.path.join(_PROJECT_ROOT, "../.LongMemory", "agentic_memory.json")
 
 
 def _load():

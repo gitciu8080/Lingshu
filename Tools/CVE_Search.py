@@ -87,3 +87,5 @@ def create_cve_search_tool() -> AllowedFunctionTool:
         is_read_only=True,
         is_concurrency_safe=True,
     )
+
+

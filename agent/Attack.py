@@ -12,6 +12,7 @@ from agentscope.message import UserMsg
 from agentscope.tool import Toolkit
 
 from Tools.CVE_Search import cve_search
+from Tools.ScopeRegistry import ScopeRegistry
 from Tools.tooling import AllowedFunctionTool, create_scoped_shell_tool, stream_agent_reply
 
 
@@ -22,7 +23,8 @@ ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
 1. analysis:扫描智能体，用于独立研判。
 2. cve_search:cve漏洞网上查询工具。
 3. create_scoped_shell_tool:本地命令运行工具。
-4. ida_mcp:ida逆向工具。 
+4. dispatch_reverse：派遣 Reserve 对二进制文件执行 IDA 逆向分析（反编译、字符串提取等）
+
 
 
 工作原则：
@@ -104,6 +106,7 @@ async def create_attack_agent(
     project_dir: str | Path,
     timeout: int,
     category_decision: dict | None = None,
+    scope_registry: ScopeRegistry | None = None,
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -128,6 +131,9 @@ async def create_attack_agent(
         )
         return result.get_text_content() or "[Analysis] 未返回文本结果"
 
+
+
+
     skill_list = _build_skill_list(category_decision, project_dir)
 
     # ida_mcp = MCPClient(
@@ -144,7 +150,7 @@ async def create_attack_agent(
         tools=[
             AllowedFunctionTool(analysis, is_read_only=True),
             AllowedFunctionTool(cve_search, is_read_only=True),
-            create_scoped_shell_tool(target, project_dir, timeout),
+            create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry),
         ],
         skills_or_loaders=skill_list,
         # mcps=[ida_mcp],

@@ -68,7 +68,7 @@
   /* ── 登录界面 ── */
   .login-page { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: linear-gradient(135deg, #ffffff 0%, #f0f3f6 50%, #ffffff 100%); display: flex; align-items: center; justify-content: center; z-index: 1000; overflow: hidden; }
   .login-page::before { content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: radial-gradient(circle at 20% 30%, rgba(9,105,218,0.1) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(137,87,229,0.1) 0%, transparent 50%); pointer-events: none; }
-  .login-container { position: relative; width: 420px; padding: 40px; background: rgba(255,255,255,0.95); border: 1px solid var(--border-light); border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.15); backdrop-filter: blur(10px); }
+  .login-container { position: relative; width: 420px; max-width: calc(100vw - 24px); padding: 40px; background: rgba(255,255,255,0.95); border: 1px solid var(--border-light); border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.15); backdrop-filter: blur(10px); }
   :root[data-theme="dark"] .login-page { background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #0d1117 100%); }
   :root[data-theme="dark"] .login-page::before { background: radial-gradient(circle at 20% 30%, rgba(88,166,255,0.08) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(188,140,255,0.08) 0%, transparent 50%); }
   :root[data-theme="dark"] .login-container { background: rgba(22,27,34,0.95); border-color: #30363d; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
@@ -109,11 +109,12 @@
   /* ── 会话侧边栏 ── */
   .sidebar { width: 240px; flex-shrink: 0; background: var(--sidebar-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
   .sidebar-header { padding: 16px 16px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-  .sidebar-brand { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+  .sidebar-brand { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; min-width: 0; }
   .sidebar-brand .brand-icon { font-size: 22px; }
   .sidebar-brand h1 { font-size: 17px; font-weight: 700; background: linear-gradient(135deg, var(--accent), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-  .sidebar-brand .user-badge { margin-left: auto; font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  .sidebar-brand .user-badge { margin-left: auto; min-width: 0; max-width: 128px; font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sidebar-brand .user-badge:hover { color: var(--accent); }
+  .sidebar-brand .user-badge #userName { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .btn-theme-toggle { width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-bg); color: var(--text-dim); font-size: 14px; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; }
   .btn-theme-toggle:hover { background: var(--sidebar-bg); color: var(--accent); border-color: var(--accent); }
   .btn-new-session { width: 100%; padding: 9px 14px; border: 1px dashed var(--border-light); border-radius: 8px; background: rgba(9,105,218,0.06); color: var(--accent); font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 6px; }
@@ -146,8 +147,8 @@
   /* ── 中间聊天面板 ── */
   .main-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
   .panel-header { display: flex; align-items: center; padding: 10px 20px; background: var(--panel-bg); border-bottom: 1px solid var(--border); flex-shrink: 0; gap: 12px; }
-  .panel-header .target-name { font-size: 15px; font-weight: 700; color: var(--text); }
-  .phase-tag { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; }
+  .panel-header .target-name { min-width: 0; flex: 1; font-size: 15px; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .phase-tag { display: inline-flex; flex-shrink: 0; align-items: center; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; }
   .phase-tag.planning { background: rgba(9,105,218,0.15); color: var(--accent); }
   .phase-tag.recon { background: rgba(154,103,0,0.15); color: var(--gold); }
   .phase-tag.analysis { background: rgba(188,76,0,0.15); color: var(--orange); }
@@ -156,13 +157,15 @@
   .phase-tag.failed { background: rgba(101,109,118,0.15); color: var(--text-dim); }
   .phase-tag.cancelled { background: rgba(101,109,118,0.15); color: var(--text-dim); }
   .phase-tag.idle { background: rgba(101,109,118,0.1); color: var(--text-dim); }
-  .panel-header .header-actions { margin-left: auto; display: flex; gap: 8px; }
+  .panel-header .header-actions { display: flex; flex-shrink: 0; gap: 8px; }
   .panel-header .header-actions button { background: var(--border); color: var(--text); border: none; padding: 5px 12px; border-radius: 5px; font-family: inherit; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
   .panel-header .header-actions button:hover { background: var(--border-light); }
   .panel-header .header-actions .btn-stop { background: rgba(207,34,46,0.15); color: var(--red); border: 1px solid rgba(207,34,46,0.3); }
   .panel-header .header-actions .btn-stop:hover { background: rgba(207,34,46,0.3); }
   .panel-header .header-actions .btn-cancel { color: var(--gold); }
   .panel-header .header-actions .btn-delete { color: var(--red); }
+  .panel-header .header-actions .btn-rerun { color: var(--green); background: rgba(26,127,55,0.12); border: 1px solid rgba(26,127,55,0.25); }
+  .panel-header .header-actions .btn-rerun:hover { background: rgba(26,127,55,0.22); }
   .panel-header .btn-toggle-log { background: none; border: 1px solid var(--border-light); color: var(--text-dim); padding: 4px 10px; border-radius: 5px; font-family: inherit; font-size: 11px; cursor: pointer; transition: all 0.2s; display: none; }
   .panel-header .btn-toggle-log:hover { border-color: var(--accent); color: var(--accent); }
 
@@ -171,21 +174,22 @@
   .chat-empty { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; color: var(--text-dim); }
   .chat-empty .empty-icon { font-size: 48px; opacity: 0.3; }
   .chat-empty .empty-text { font-size: 14px; }
-  .msg-row { display: flex; max-width: 100%; }
+  .msg-row { display: flex; max-width: 100%; min-width: 0; }
   .msg-row.user { justify-content: flex-end; }
   .msg-row.agent { justify-content: flex-start; }
   .msg-row.system { justify-content: center; }
-  .msg-bubble { max-width: 70%; padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.6; word-break: break-word; white-space: pre-wrap; position: relative; }
+  .msg-bubble { min-width: 0; max-width: min(78%, 920px); padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; position: relative; }
   .msg-bubble.user-bubble { background: var(--bubble-user); color: #fff; border-bottom-right-radius: 4px; }
   .msg-bubble.agent-bubble { background: var(--bubble-agent); border: 1px solid var(--border); color: var(--text); border-bottom-left-radius: 4px; }
   .msg-bubble .agent-label { font-size: 10px; font-weight: 700; margin-bottom: 4px; display: inline-block; padding: 1px 6px; border-radius: 4px; letter-spacing: 0.5px; }
+  .msg-bubble .agent-label { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: top; }
   .msg-bubble .agent-label.brain { color: var(--brain-color); background: rgba(137,87,229,0.12); }
   .msg-bubble .agent-label.recon { color: var(--recon-color); background: rgba(9,105,218,0.12); }
   .msg-bubble .agent-label.attack { color: var(--attack-color); background: rgba(207,34,46,0.12); }
   .msg-bubble .agent-label.analysis { color: var(--analysis-color); background: rgba(188,76,0,0.12); }
   .msg-bubble .agent-label.orchestrator { color: var(--orchestrator-color); background: rgba(26,127,55,0.12); }
   .msg-bubble .agent-label.system { color: var(--system-color); background: rgba(101,109,118,0.12); }
-  .msg-bubble .agent-content { margin-top: 4px; }
+  .msg-bubble .agent-content { margin-top: 4px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
   .msg-bubble .agent-content.thinking { color: var(--text-dim); font-style: italic; }
 
   /* Markdown 渲染样式 */
@@ -213,10 +217,11 @@
   :root[data-theme="dark"] .agent-content .md-inline { background: #30363d; color: #e6edf3; }
   :root[data-theme="dark"] .agent-content .md-json-block summary { background: rgba(88,166,255,0.12); }
   :root[data-theme="dark"] .agent-content pre { background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 8px 10px; color: #e6edf3; overflow-x: auto; white-space: pre-wrap; margin: 6px 0; font-size: 12px; line-height: 1.5; }
-  .msg-system { font-size: 12px; color: var(--text-dim); text-align: center; padding: 6px 0; }
+  .msg-system { max-width: 88%; font-size: 12px; color: var(--text-dim); text-align: center; padding: 6px 0; overflow-wrap: anywhere; }
   .phase-divider { display: flex; align-items: center; gap: 10px; padding: 8px 0; color: var(--text-dim); font-size: 11px; }
   .phase-divider::before, .phase-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
   .phase-divider span { white-space: nowrap; font-weight: 600; }
+  .phase-divider span { max-width: 80%; overflow: hidden; text-overflow: ellipsis; }
 
   /* ── 输入区域 ── */
   .input-area { padding: 12px 20px; background: var(--panel-bg); border-top: 1px solid var(--border); display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0; }
@@ -228,8 +233,13 @@
   .input-area .send-btn:disabled { background: var(--border); color: var(--text-dim); cursor: not-allowed; }
 
   /* ── 右侧 Agent 日志面板 ── */
-  .agent-log-panel { width: 380px; flex-shrink: 0; background: #f6f8fa; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; transition: width 0.3s ease, min-width 0.3s ease; }
-  .agent-log-panel.collapsed { width: 0; min-width: 0; border-left: none; overflow: hidden; }
+  .agent-log-panel { width: 380px; min-width: 280px; max-width: 65vw; flex-shrink: 0; position: relative; background: #f6f8fa; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: visible; transition: width 0.3s ease, min-width 0.3s ease; }
+  .agent-log-panel.collapsed { width: 0 !important; min-width: 0; border-left: none; overflow: hidden; }
+  .agent-log-panel.resizing { transition: none; }
+  .right-panel-resizer { position: absolute; left: -5px; top: 0; bottom: 0; width: 10px; z-index: 20; cursor: col-resize; touch-action: none; }
+  .right-panel-resizer::after { content: ''; position: absolute; left: 4px; top: 0; bottom: 0; width: 2px; background: transparent; transition: background 0.15s, box-shadow 0.15s; }
+  .right-panel-resizer:hover::after, .agent-log-panel.resizing .right-panel-resizer::after { background: var(--accent); box-shadow: 0 0 0 2px rgba(9,105,218,0.12); }
+  body.resizing-right-panel { cursor: col-resize; user-select: none; }
   .agent-log-header { display: flex; align-items: center; padding: 10px 14px; background: var(--panel-bg); border-bottom: 1px solid var(--border); flex-shrink: 0; gap: 6px; }
   .agent-log-header .log-title { font-size: 13px; font-weight: 700; color: var(--text); margin-right: auto; }
   /* ── Agent 2x2 网格面板 ── */
@@ -274,6 +284,13 @@
   .modal-error { color: var(--red); font-size: 12px; margin-top: 8px; display: none; }
   .modal-error.show { display: block; }
 
+  /* ── 重跑信息区块（"再打一次"）── */
+  .rerun-box { border: 1px solid rgba(154,103,0,0.3); background: rgba(154,103,0,0.06); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; }
+  .rerun-box .rerun-title { font-size: 12px; font-weight: 700; color: var(--gold); margin-bottom: 6px; }
+  .rerun-box .rerun-summary { font-size: 12px; color: var(--text-dim); line-height: 1.6; max-height: 96px; overflow-y: auto; white-space: pre-wrap; margin-bottom: 10px; }
+  .rerun-box .rerun-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
+  .rerun-box .rerun-check input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+
   /* ── 文件上传区域 ── */
   .upload-zone { border: 2px dashed var(--border-light); border-radius: 8px; padding: 20px; text-align: center; cursor: pointer; transition: all 0.2s; background: rgba(246,248,250,0.5); }
   .upload-zone:hover, .upload-zone.dragover { border-color: var(--accent); background: rgba(9,105,218,0.06); }
@@ -314,8 +331,8 @@
   :root[data-theme="dark"] .approval-overlay { background: rgba(0,0,0,0.7); }
 
   /* ── 右侧面板 Tab 切换 ── */
-  .right-panel-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; background: var(--panel-bg); }
-  .right-panel-tab { flex: 1; padding: 8px 0; text-align: center; font-size: 11px; font-weight: 600; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; user-select: none; }
+  .right-panel-tabs { display: flex; min-width: 0; border-bottom: 1px solid var(--border); flex-shrink: 0; background: var(--panel-bg); overflow: hidden; }
+  .right-panel-tab { flex: 1; min-width: 0; padding: 8px 4px; text-align: center; font-size: 11px; font-weight: 600; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; user-select: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .right-panel-tab:hover { color: var(--text); background: rgba(0,0,0,0.03); }
   .right-panel-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
   .right-panel-tab-content { display: none; flex: 1; overflow: hidden; }
@@ -326,7 +343,7 @@
   /* ── 工具调用记录面板 ── */
   .tool-log-panel { flex: 1; overflow-y: auto; padding: 8px 10px; }
   .tool-entry { margin-bottom: 6px; padding: 8px 10px; background: rgba(246,248,250,0.6); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
-  .tool-entry .tool-entry-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .tool-entry .tool-entry-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; min-width: 0; }
   .tool-entry .tool-agent { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 3px; letter-spacing: 0.3px; }
   .tool-entry .tool-agent.brain { color: var(--brain-color); background: rgba(137,87,229,0.12); }
   .tool-entry .tool-agent.recon { color: var(--recon-color); background: rgba(9,105,218,0.12); }
@@ -334,17 +351,18 @@
   .tool-entry .tool-agent.analysis { color: var(--analysis-color); background: rgba(188,76,0,0.12); }
   .tool-entry .tool-agent.orchestrator { color: var(--orchestrator-color); background: rgba(26,127,55,0.12); }
   .tool-entry .tool-agent.system { color: var(--system-color); background: rgba(101,109,118,0.12); }
-  .tool-entry .tool-name { font-weight: 700; color: var(--accent); font-size: 11px; padding: 1px 6px; background: rgba(9,105,218,0.1); border-radius: 3px; }
+  .tool-entry .tool-name { min-width: 0; max-width: 45%; font-weight: 700; color: var(--accent); font-size: 11px; padding: 1px 6px; background: rgba(9,105,218,0.1); border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tool-entry .tool-raw-name { min-width: 0; flex: 1; color: var(--text-dim); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tool-entry .tool-args { font-size: 11px; color: var(--text); font-family: 'JetBrains Mono', monospace; word-break: break-all; line-height: 1.4; white-space: pre-wrap; max-height: 80px; overflow-y: auto; }
   .tool-entry .tool-time { font-size: 9px; color: var(--text-dim); margin-top: 4px; }
 
   /* ── 靶机信息面板 ── */
   .target-info-panel { flex: 1; overflow-y: auto; padding: 12px; }
   .ti-card { background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-  .ti-row { display: flex; padding: 5px 0; border-bottom: 1px solid rgba(175,184,193,0.3); font-size: 12px; }
+  .ti-row { display: flex; min-width: 0; padding: 5px 0; border-bottom: 1px solid rgba(175,184,193,0.3); font-size: 12px; }
   .ti-row:last-child { border-bottom: none; }
   .ti-label { color: var(--text-dim); min-width: 80px; flex-shrink: 0; }
-  .ti-value { color: var(--text); word-break: break-all; }
+  .ti-value { min-width: 0; flex: 1; color: var(--text); overflow-wrap: anywhere; word-break: break-word; }
   .ti-flag-box { background: linear-gradient(135deg, rgba(207,34,46,0.08), rgba(154,103,0,0.08)); border: 1px solid var(--gold); border-radius: 8px; padding: 14px; text-align: center; animation: flagPulse 2s infinite; }
   @keyframes flagPulse { 0%,100% { box-shadow: 0 0 8px rgba(154,103,0,0.1); } 50% { box-shadow: 0 0 20px rgba(154,103,0,0.3); } }
   .ti-flag-label { font-size: 14px; font-weight: 700; color: var(--gold); margin-bottom: 8px; }
@@ -358,7 +376,8 @@
   .approval-card .approval-header { padding: 20px 24px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
   .approval-card .approval-header h2 { font-size: 16px; font-weight: 700; color: var(--gold); display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .approval-card .approval-header .approval-meta { font-size: 11px; color: var(--text-dim); display: flex; gap: 16px; flex-wrap: wrap; }
-  .approval-card .approval-header .approval-meta span { display: flex; align-items: center; gap: 4px; }
+  .approval-card .approval-header .approval-meta span { display: flex; min-width: 0; max-width: 100%; align-items: center; gap: 4px; }
+  .approval-card .approval-header .approval-meta strong { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
   .approval-card .approval-scroll { flex: 1; overflow-y: auto; padding: 16px 24px; }
   /* 扫描摘要卡片 */
   .scan-section { margin-bottom: 14px; }
@@ -369,7 +388,7 @@
   .scan-card .scan-card-row .scan-label { color: var(--text-dim); flex-shrink: 0; min-width: 48px; }
   .scan-card .scan-card-row .scan-value { color: var(--text); word-break: break-all; }
   /* 发现列表 */
-  .finding-item { padding: 6px 10px; background: rgba(9,105,218,0.05); border-left: 3px solid var(--recon-color); border-radius: 0 4px 4px 0; margin-bottom: 4px; font-size: 12px; color: var(--text); line-height: 1.5; }
+  .finding-item { padding: 6px 10px; background: rgba(9,105,218,0.05); border-left: 3px solid var(--recon-color); border-radius: 0 4px 4px 0; margin-bottom: 4px; font-size: 12px; color: var(--text); line-height: 1.5; overflow-wrap: anywhere; }
   .finding-item .finding-source { font-size: 10px; color: var(--recon-color); font-weight: 600; margin-right: 6px; padding: 1px 5px; background: rgba(9,105,218,0.1); border-radius: 3px; }
   .finding-more { font-size: 11px; color: var(--text-dim); font-style: italic; padding: 4px 10px; }
   /* 迷你计划条目 */
@@ -380,11 +399,19 @@
   .mini-plan-item .mp-phase.ph-analysis { color: var(--orange); background: rgba(188,76,0,0.12); }
   .mini-plan-item .mp-phase.ph-exploitation { color: var(--red); background: rgba(207,34,46,0.12); }
   .mini-plan-item .mp-phase.ph-planning { color: var(--accent); background: rgba(9,105,218,0.12); }
-  .mini-plan-item .mp-content { flex: 1; color: var(--text); }
+  .mini-plan-item .mp-content { flex: 1; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
   .mini-plan-item.mp-completed .mp-content { text-decoration: line-through; color: var(--text-dim); }
   /* 攻击理由 */
   .reason-block { padding: 12px 14px; background: rgba(154,103,0,0.08); border: 1px solid rgba(154,103,0,0.2); border-radius: 8px; font-size: 13px; line-height: 1.7; color: var(--text); white-space: pre-wrap; word-break: break-word; }
   .reason-block .reason-label { font-size: 10px; font-weight: 700; color: var(--gold); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  .markdown-rendered { min-width: 0; overflow-wrap: anywhere; }
+  .markdown-rendered .md-h1 { display: block; margin: 8px 0 5px; padding-bottom: 3px; border-bottom: 1px solid var(--border); font-size: 15px; font-weight: 700; }
+  .markdown-rendered .md-h2 { display: block; margin: 7px 0 4px; font-size: 14px; font-weight: 700; }
+  .markdown-rendered .md-h3 { display: block; margin: 6px 0 3px; font-size: 13px; font-weight: 600; }
+  .markdown-rendered .md-hr { border: none; border-top: 1px solid var(--border); margin: 7px 0; }
+  .markdown-rendered .md-code { display: block; max-width: 100%; margin: 6px 0; padding: 7px 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--input-bg); overflow-x: auto; white-space: pre-wrap; }
+  .markdown-rendered .md-inline { padding: 1px 4px; border-radius: 3px; background: rgba(175,184,193,0.35); }
+  .markdown-rendered ul { margin: 4px 0; padding-left: 18px; }
   /* 审批操作按钮 */
   .approval-card .approval-footer { padding: 16px 24px; border-top: 1px solid var(--border); flex-shrink: 0; }
   .approval-card .approval-actions { display: flex; flex-direction: column; gap: 8px; }
@@ -420,7 +447,7 @@
   .plan-item .plan-tag.phase-planning { color: var(--accent); background: rgba(9,105,218,0.15); }
   .plan-item .plan-tag.origin-brain { color: var(--brain-color); background: rgba(137,87,229,0.12); }
   .plan-item .plan-tag.origin-orchestrator { color: var(--orchestrator-color); background: rgba(26,127,55,0.12); }
-  .plan-item .plan-evidence { font-size: 11px; color: var(--text-dim); margin-top: 4px; padding: 4px 8px; background: rgba(246,248,250,0.6); border-radius: 4px; border-left: 2px solid var(--border-light); }
+  .plan-item .plan-evidence { font-size: 11px; color: var(--text-dim); margin-top: 4px; padding: 4px 8px; background: rgba(246,248,250,0.6); border-radius: 4px; border-left: 2px solid var(--border-light); overflow-wrap: anywhere; }
   .plan-item:hover { background: rgba(0,0,0,0.02); }
   /* 暗色主题 */
   :root[data-theme="dark"] .plan-item:hover { background: rgba(255,255,255,0.03); }
@@ -445,17 +472,21 @@
   /* ── 移动端 ── */
   .hamburger { display: none; position: fixed; top: 10px; left: 10px; z-index: 800; width: 36px; height: 36px; border: none; border-radius: 6px; background: var(--panel-bg); color: var(--text); font-size: 18px; cursor: pointer; align-items: center; justify-content: center; }
   @media (max-width: 1100px) {
-    .agent-log-panel { width: 0; min-width: 0; border-left: none; }
-    .agent-log-panel.expanded { width: 380px; border-left: 1px solid var(--border); }
+    .agent-log-panel { width: 0 !important; min-width: 0; border-left: none; }
+    .agent-log-panel.expanded { width: min(380px, 100vw) !important; border-left: 1px solid var(--border); }
     .panel-header .btn-toggle-log { display: inline-flex; }
+    .right-panel-resizer { display: none; }
   }
   @media (max-width: 768px) {
     .sidebar { position: fixed; left: -280px; top: 0; bottom: 0; z-index: 700; transition: left 0.3s ease; width: 240px; }
     .sidebar.open { left: 0; }
     .hamburger { display: flex; }
     .panel-header { padding-left: 50px; }
-    .agent-log-panel { position: fixed; right: -400px; top: 0; bottom: 0; z-index: 700; transition: right 0.3s ease; width: 380px; border-left: 1px solid var(--border); }
+    .agent-log-panel { position: fixed; right: -400px; top: 0; bottom: 0; z-index: 700; transition: right 0.3s ease; border-left: 1px solid var(--border); }
     .agent-log-panel.expanded { right: 0; }
+    .msg-bubble { max-width: 90%; }
+    .modal-card { width: calc(100vw - 24px); padding: 20px; }
+    .modal-card .form-row { flex-direction: column; gap: 0; }
   }
 </style>
 </head>
@@ -500,7 +531,7 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
       <div class="sidebar-brand"><span class="brand-icon">🛡️</span><h1>灵枢</h1><div style="display:flex;gap:6px;align-items:center;margin-left:auto;"><button class="btn-theme-toggle" id="btnThemeToggle" onclick="toggleTheme()" title="切换主题">🌙</button><span class="user-badge" id="userBadge" onclick="handleLogout()" title="点击退出">👤 <span id="userName"></span> | 退出</span></div></div>
-      <button class="btn-new-session" onclick="openNewSessionModal()">＋ 新建会话</button>
+      <button class="btn-new-session" onclick="resetRerunState(); openNewSessionModal()">＋ 新建会话</button>
     </div>
     <div class="sidebar-search"><span class="search-icon">🔍</span><input type="text" id="searchInput" placeholder="搜索目标..." oninput="filterSessions()"></div>
     <div class="session-list" id="sessionList"></div>
@@ -526,6 +557,7 @@
 
   <!-- 右：工具调用 / 靶机信息 / 作战计划 面板 -->
   <aside class="agent-log-panel" id="agentLogPanel">
+    <div class="right-panel-resizer" id="rightPanelResizer" title="拖拽调整面板宽度"></div>
     <div class="right-panel-tabs">
       <div class="right-panel-tab active" data-panel="toolLog" onclick="switchRightTab('toolLog')">🔧 工具调用</div>
       <div class="right-panel-tab" data-panel="targetInfo" onclick="switchRightTab('targetInfo')">🎯 靶机信息</div>
@@ -566,7 +598,7 @@
 <!-- ── 新建会话模态框 ── -->
 <div class="modal-overlay" id="newSessionModal">
   <div class="modal-card">
-    <h2>🎯 新建安全测试会话</h2>
+    <h2 id="newSessionModalTitle">🎯 新建安全测试会话</h2>
     <div class="form-group"><label>目标</label><input type="text" id="modalTarget" placeholder="IP / 主机名 / 文件路径"></div>
     <div class="form-group"><label>任务目标</label><input type="text" id="modalGoal" placeholder="获取 Flag" value="获取 Flag"></div>
     <div class="form-row">
@@ -593,6 +625,15 @@
         <div class="progress-bar"><div class="fill" id="uploadProgressFill"></div></div>
         <div class="progress-text" id="uploadProgressText">上传中...</div>
       </div>
+    </div>
+    <!-- 重跑信息区块（"再打一次"时显示） -->
+    <div class="rerun-box" id="rerunInfoBox" style="display:none">
+      <div class="rerun-title">↻ 上次任务结果</div>
+      <div class="rerun-summary" id="rerunSummary"></div>
+      <label class="rerun-check">
+        <input type="checkbox" id="rerunWithContext" checked>
+        <span>携带上次任务上下文（侦察发现 / 攻击链摘要），避免重复失败路径</span>
+      </label>
     </div>
     <div class="modal-error" id="modalError"></div>
     <div class="modal-actions">
@@ -628,7 +669,7 @@
       <div class="scan-section">
         <div class="scan-section-title">⚔️ 攻击理由</div>
         <div class="reason-block">
-          <div id="approvalReason">等待理由...</div>
+          <div class="markdown-rendered" id="approvalReason">等待理由...</div>
         </div>
       </div>
     </div>
@@ -702,7 +743,7 @@ function sessionItemHtml(s, isLive) {
   const actionBtns = `<div class="action-btns"><button class="btn-sb-delete" onclick="event.stopPropagation();deleteSession('${s.id}')" title="${deleteTitle}">×</button></div>`;
   return `<div class="session-item${isCurrent ? ' active' : ''}" onclick="doSwitchSession('${s.id}')" data-id="${s.id}">
     <div class="dot ${dotClass}"></div>
-    <div class="session-info"><div class="session-target">${escapeHtml(target)}</div><div class="session-meta">${formatTime(s.created_at)}</div></div>
+    <div class="session-info"><div class="session-target" title="${escapeHtml(target)}">${escapeHtml(target)}</div><div class="session-meta">${formatTime(s.created_at)}</div></div>
     ${statusIcon ? `<span class="session-status-icon" style="color:${s.success ? 'var(--green)' : s.success === false ? 'var(--red)' : 'var(--text-dim)'}">${statusIcon}</span>` : ''}
     ${actionBtns}
   </div>`;
@@ -715,7 +756,10 @@ App.onHighlightSession = (id) => {
 };
 
 App.onUpdatePanelHeader = (s) => {
-  document.getElementById('panelTarget').textContent = s.target || s.title || '未知';
+  const targetName = s.target || s.title || '未知';
+  const targetEl = document.getElementById('panelTarget');
+  targetEl.textContent = targetName;
+  targetEl.title = targetName;
   const phaseEl = document.getElementById('panelPhase');
   const phase = s.phase || 'idle';
   phaseEl.textContent = phaseLabel(phase);
@@ -724,6 +768,7 @@ App.onUpdatePanelHeader = (s) => {
   const isLive = s.is_live === true;
   actions.innerHTML = '';
   if (isLive) actions.innerHTML += `<button class="btn-stop" onclick="cancelSession('${s.id}')" title="停止当前任务">⏹ 停止</button>`;
+  if (!isLive) actions.innerHTML += `<button class="btn-rerun" onclick="rerunSession('${s.id}')" title="使用相同配置创建新任务">↻ 再打一次</button>`;
   actions.innerHTML += `<button class="btn-delete" onclick="deleteSession('${s.id}')">🗑 删除</button>`;
   actions.innerHTML += `<button class="btn-toggle-log" id="btnToggleLog" onclick="toggleAgentLogPanel()">📋 面板</button>`;
 };
@@ -750,6 +795,7 @@ App.onClearChat = (resetToEmpty) => {
   if (toolPanel) toolPanel.innerHTML = '<div class="plan-empty">暂无工具调用记录</div>';
   // 清空作战计划面板
   renderPlanItems([], '');
+  resetTargetInfo();
   if (resetToEmpty) {
     area.innerHTML = '<div class="chat-empty" id="chatEmpty"><div class="empty-icon">🛡️</div><div class="empty-text">选择或创建一个会话开始对话</div></div>';
     document.getElementById('panelTarget').textContent = '未选择会话';
@@ -832,6 +878,10 @@ const TOOL_NAME_CN = {
   'dispatch_reverse': '派遣逆向',
   'view_mission_state': '查看任务状态',
   'update_plan': '更新作战计划',
+  'UpdatePlan': 'Plan工具',
+  'AddPlan': 'Plan工具',
+  'DeletePlan': 'Plan工具',
+  'ListPlan': 'Plan工具',
   'complete_mission': '完成任务',
   'request_exploitation_approval': '请求攻击审批',
   'mcp__IDA_Tool__idb_open': 'IDA调用',
@@ -855,7 +905,7 @@ App.onToolCallStart = (data) => {
   const now = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const agentClass = getAgentClass(data.agent);
   const cnName = getToolChineseName(data.tool_name);
-  entry.innerHTML = `<div class="tool-entry-header"><span class="tool-agent ${agentClass}">${escapeHtml(data.agent || 'system')}</span><span style="color:var(--text-dim);font-size:11px">→</span><span class="tool-name" title="${escapeHtml(data.tool_name || '?')}">${escapeHtml(cnName)}</span><span style="color:var(--text-dim);font-size:9px">${escapeHtml(data.tool_name || '')}</span></div><div class="tool-args"></div><div class="tool-time">${now}</div>`;
+  entry.innerHTML = `<div class="tool-entry-header"><span class="tool-agent ${agentClass}">${escapeHtml(data.agent || 'system')}</span><span style="color:var(--text-dim);font-size:11px">→</span><span class="tool-name" title="${escapeHtml(data.tool_name || '?')}">${escapeHtml(cnName)}</span><span class="tool-raw-name" title="${escapeHtml(data.tool_name || '')}">${escapeHtml(data.tool_name || '')}</span></div><div class="tool-args"></div><div class="tool-time">${now}</div>`;
   panel.appendChild(entry);
   panel.scrollTop = panel.scrollHeight;
 };
@@ -885,12 +935,18 @@ App.onPlanUpdated = (items, phase) => {
 // ── 靶机信息更新 ──
 App.onTargetInfo = (data) => {
   const el = (id) => document.getElementById(id);
-  const set = (id, val) => { const e = el(id); if (e) e.textContent = val || '--'; };
+  const set = (id, val) => {
+    if (val === undefined || val === null) return;
+    const e = el(id);
+    if (e) e.textContent = val === '' ? '--' : val;
+  };
   set('tiTarget', data.target);
   set('tiGoal', data.goal);
-  set('tiPhase', phaseLabel(data.phase));
-  set('tiApproved', data.exploitation_approved ? '✅ 已批准' : '⏳ 待审批');
-  set('tiFindings', (data.findings_count || 0) + ' 条');
+  if (data.phase !== undefined) set('tiPhase', phaseLabel(data.phase));
+  if (data.exploitation_approved !== undefined) {
+    set('tiApproved', data.exploitation_approved ? '✅ 已批准' : '⏳ 待审批');
+  }
+  if (data.findings_count !== undefined) set('tiFindings', data.findings_count + ' 条');
   if (data.flag) {
     const box = el('tiFlagBox');
     if (box) box.style.display = '';
@@ -902,6 +958,80 @@ function toggleAgentLogPanel() {
   const panel = document.getElementById('agentLogPanel');
   panel.classList.toggle('collapsed');
   panel.classList.toggle('expanded');
+}
+
+// ── 右侧面板拖拽调宽 ──
+const RIGHT_PANEL_WIDTH_KEY = 'lingshu_right_panel_width';
+const RIGHT_PANEL_DEFAULT_WIDTH = 380;
+const RIGHT_PANEL_MIN_WIDTH = 280;
+
+function rightPanelMaxWidth() {
+  const sidebar = document.getElementById('sidebar');
+  const sidebarWidth = sidebar?.getBoundingClientRect().width || 240;
+  return Math.max(
+    RIGHT_PANEL_MIN_WIDTH,
+    Math.min(window.innerWidth * 0.65, window.innerWidth - sidebarWidth - 360),
+  );
+}
+
+function setRightPanelWidth(width, persist = false) {
+  const panel = document.getElementById('agentLogPanel');
+  if (!panel || window.innerWidth <= 1100) return;
+  const clamped = Math.round(
+    Math.min(rightPanelMaxWidth(), Math.max(RIGHT_PANEL_MIN_WIDTH, width)),
+  );
+  panel.style.width = clamped + 'px';
+  if (persist) localStorage.setItem(RIGHT_PANEL_WIDTH_KEY, String(clamped));
+}
+
+function initRightPanelResize() {
+  const panel = document.getElementById('agentLogPanel');
+  const handle = document.getElementById('rightPanelResizer');
+  if (!panel || !handle) return;
+
+  const saved = Number(localStorage.getItem(RIGHT_PANEL_WIDTH_KEY));
+  setRightPanelWidth(
+    Number.isFinite(saved) && saved > 0 ? saved : RIGHT_PANEL_DEFAULT_WIDTH,
+  );
+
+  handle.addEventListener('pointerdown', (event) => {
+    if (window.innerWidth <= 1100 || panel.classList.contains('collapsed')) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = panel.getBoundingClientRect().width;
+    panel.classList.add('resizing');
+    document.body.classList.add('resizing-right-panel');
+    handle.setPointerCapture(event.pointerId);
+
+    const onMove = (moveEvent) => {
+      setRightPanelWidth(startWidth + startX - moveEvent.clientX);
+    };
+    const onEnd = () => {
+      handle.removeEventListener('pointermove', onMove);
+      handle.removeEventListener('pointerup', onEnd);
+      handle.removeEventListener('pointercancel', onEnd);
+      panel.classList.remove('resizing');
+      document.body.classList.remove('resizing-right-panel');
+      localStorage.setItem(
+        RIGHT_PANEL_WIDTH_KEY,
+        String(Math.round(panel.getBoundingClientRect().width)),
+      );
+    };
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onEnd);
+    handle.addEventListener('pointercancel', onEnd);
+  });
+
+  handle.addEventListener('dblclick', () => {
+    setRightPanelWidth(RIGHT_PANEL_DEFAULT_WIDTH, true);
+  });
+
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 1100) {
+      const width = Number(localStorage.getItem(RIGHT_PANEL_WIDTH_KEY)) || RIGHT_PANEL_DEFAULT_WIDTH;
+      setRightPanelWidth(width);
+    }
+  });
 }
 
 // ── Agent 输出现在统一走聊天面板 ──
@@ -1146,7 +1276,22 @@ function mdRender(text) {
 }
 
 // 模态框
+let rerunSourceSessionId = null;  // "再打一次"来源会话（重跑时非 null）
+
+function resetRerunState() {
+  rerunSourceSessionId = null;
+  document.getElementById('newSessionModalTitle').textContent = '🎯 新建安全测试会话';
+  document.getElementById('rerunInfoBox').style.display = 'none';
+  document.getElementById('rerunWithContext').checked = true;
+}
+
 function openNewSessionModal() {
+  if (!rerunSourceSessionId) {
+    // 全新会话：重置弹窗为默认状态
+    document.getElementById('newSessionModalTitle').textContent = '🎯 新建安全测试会话';
+    document.getElementById('rerunInfoBox').style.display = 'none';
+    document.getElementById('rerunWithContext').checked = true;
+  }
   document.getElementById('newSessionModal').classList.add('visible');
   document.getElementById('modalTarget').focus();
   document.getElementById('modalError').classList.remove('show');
@@ -1260,9 +1405,13 @@ async function startNewSession() {
         finalTarget = finalTarget ? finalTarget + ' ' + filePath : filePath;
       }
     }
-    const sessionId = await App.startNewSession(finalTarget, goal, model, provider);
+    // "再打一次"：是否携带上次上下文（复选框勾选且存在来源会话）
+    const withContext = document.getElementById('rerunWithContext').checked;
+    const sourceSessionId = withContext ? rerunSourceSessionId : null;
+    const sessionId = await App.startNewSession(finalTarget, goal, model, provider, sourceSessionId);
     closeNewSessionModal();
     document.getElementById('modalTarget').value = '';
+    rerunSourceSessionId = null;
     await doSwitchSession(sessionId);
   } catch (e) {
     showError(errorEl, e.message);
@@ -1300,6 +1449,40 @@ async function deleteSession(id) {
   if (!confirm(msg)) return;
   try { await App.deleteSession(id); }
   catch (e) { alert('删除失败: ' + e.message); }
+}
+
+async function rerunSession(id) {
+  try {
+    const resp = await App.authFetch(`/api/session/${id}`);
+    if (!resp.ok) throw new Error('无法读取原任务配置');
+    const session = await resp.json();
+
+    // 记录来源会话，预填弹窗
+    rerunSourceSessionId = id;
+    document.getElementById('newSessionModalTitle').textContent = '↻ 再次执行任务（可修改靶机链接）';
+    document.getElementById('modalTarget').value = session.target || '';
+    document.getElementById('modalGoal').value = session.goal || '获取 Flag';
+    document.getElementById('modalModel').value = session.model || 'Min';
+    document.getElementById('modalProvider').value = session.provider || 'deepseek';
+    document.getElementById('rerunWithContext').checked = true;
+
+    // 填充上次任务结果摘要
+    const ms = session.mission_state || {};
+    const lines = [];
+    const phase = ms.phase || session.phase || '未知';
+    const statusText = ms.success === true ? '✅ 成功' : (ms.success === false ? '❌ 失败' : '⏸ 未完成（中断）');
+    lines.push(`阶段：${phase}　结果：${statusText}`);
+    if (ms.flag) lines.push(`Flag：${ms.flag}`);
+    if (ms.summary) lines.push(ms.summary.slice(0, 200));
+    else if (ms.findings) lines.push(`侦察发现 ${ms.findings.length} 条，攻击步骤 ${(ms.attack_chain || []).length} 条`);
+    document.getElementById('rerunSummary').textContent = lines.join('\n');
+    document.getElementById('rerunInfoBox').style.display = 'block';
+
+    // 打开弹窗（保留 rerunSourceSessionId，不重置为默认状态）
+    openNewSessionModal();
+  } catch (e) {
+    App.onRenderSystemMessage?.('重新创建任务失败: ' + e.message);
+  }
 }
 
 // 滚动控制
@@ -1373,8 +1556,8 @@ function _renderFindings(findings, findingsCount) {
   let html = '';
   for (const f of display) {
     const source = escapeHtml(f.source || '?');
-    const report = escapeHtml((f.report || '').substring(0, 300));
-    html += `<div class="finding-item"><span class="finding-source">${source}</span>${report}</div>`;
+    const report = mdRender(String(f.report || '').substring(0, 300));
+    html += `<div class="finding-item"><span class="finding-source">${source}</span><div class="markdown-rendered">${report}</div></div>`;
   }
   if (more > 0) {
     html += `<div class="finding-more">... 还有 ${more} 条更早的发现</div>`;
@@ -1399,7 +1582,7 @@ function _renderMiniPlan(planItems) {
     html += `<div class="mini-plan-item${cls}">`;
     html += `<span class="mp-status">${emoji}</span>`;
     html += `<span class="mp-phase ${phCls}">${escapeHtml(item.phase || 'planning')}</span>`;
-    html += `<span class="mp-content">${escapeHtml(item.content || '')}</span>`;
+    html += `<span class="mp-content">${mdRender(item.content || '')}</span>`;
     html += `</div>`;
   }
   list.innerHTML = html;
@@ -1413,7 +1596,7 @@ function showApprovalModal(event) {
   document.getElementById('approvalTarget').textContent = summary.target || '--';
   document.getElementById('approvalPhase').textContent = phaseLabel(summary.phase) || '--';
   document.getElementById('approvalAgent').textContent = event.agent || 'Orchestrator';
-  document.getElementById('approvalReason').textContent = event.reason || '未提供理由';
+  document.getElementById('approvalReason').innerHTML = mdRender(event.reason || '未提供理由');
 
   _renderFindings(summary.findings, summary.findings_count);
   _renderMiniPlan(summary.plan_items);
@@ -1524,16 +1707,28 @@ function restoreTargetInfo(targetInfo) {
   if (!targetInfo || typeof targetInfo !== 'object') return;
   const el = (id) => document.getElementById(id);
   const set = (id, val) => { const e = el(id); if (e) e.textContent = val || '--'; };
+  const flagBox = el('tiFlagBox');
+  if (flagBox) flagBox.style.display = 'none';
   set('tiTarget', targetInfo.target);
   set('tiGoal', targetInfo.goal);
   set('tiPhase', targetInfo.phase ? phaseLabel(targetInfo.phase) : null);
   set('tiApproved', targetInfo.exploitation_approved ? '✅ 已批准' : '⏳ 待审批');
   set('tiFindings', (targetInfo.findings_count || 0) + ' 条');
   if (targetInfo.flag) {
-    const box = el('tiFlagBox');
-    if (box) box.style.display = '';
+    if (flagBox) flagBox.style.display = '';
     set('tiFlag', targetInfo.flag);
   }
+}
+
+function resetTargetInfo() {
+  ['tiTarget', 'tiGoal', 'tiPhase', 'tiApproved', 'tiFlag'].forEach(id => {
+    const element = document.getElementById(id);
+    if (element) element.textContent = '--';
+  });
+  const findings = document.getElementById('tiFindings');
+  if (findings) findings.textContent = '0 条';
+  const flagBox = document.getElementById('tiFlagBox');
+  if (flagBox) flagBox.style.display = 'none';
 }
 
 // ── 待处理审批恢复 ──
@@ -1553,6 +1748,7 @@ async function restorePendingApproval(sessionId) {
 
 // ── 启动 ──
 initTheme();
+initRightPanelResize();
 App.checkAuth();
 </script>
 </body>

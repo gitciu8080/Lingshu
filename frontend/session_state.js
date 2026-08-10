@@ -184,11 +184,13 @@ class LingShuState {
   }
 
   /** 创建并启动新会话 */
-  async startNewSession(target, goal, model, provider) {
+  async startNewSession(target, goal, model, provider, sourceSessionId = null) {
+    const body = { target, goal, model, provider };
+    if (sourceSessionId) body.source_session_id = sourceSessionId;
     const resp = await this.authFetch('/api/session/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ target, goal, model, provider }),
+      body: JSON.stringify(body),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || '启动失败');
