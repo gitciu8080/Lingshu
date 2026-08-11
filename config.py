@@ -58,11 +58,16 @@ class RuntimeConfig:
     deepseek_model_low: str = "deepseek-v4-flash"       # 低推理（chat 已弃用合并为 flash）
     deepseek_model_min: str = "deepseek-v4-flash"       # 默认
     deepseek_model_max: str = "deepseek-v4-pro"         # 深度推理
+    deepseek_web_search: bool = False                   # Responses API 服务端联网搜索开关
+    deepseek_responses_models: tuple[str, ...] = ("deepseek-v4-flash",)  # 支持 Responses API 的模型（联网搜索仅此 API 可用）
 
     # ── Qwen (llama.cpp OpenAI 兼容) ──
     qwen_api_key: str = ""
     qwen_base_url: str = "http://10.8.128.100:8200/v1"
     qwen_model: str = "/mnt/nvme0n1p1/llama.cppModels/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+    # llama.cpp repeat_penalty：>1.0 惩罚重复 token，越高抑制越强。
+    # 默认调高以抑制 Qwen 输出残缺/重复的 <tool_call> 标签等抽风行为。
+    qwen_repeat_penalty: float = 1.3
 
     command_timeout: int = 300
 
@@ -76,12 +81,25 @@ class RuntimeConfig:
             deepseek_model_low=os.getenv("DEEPSEEK_MODEL_LOW", "deepseek-v4-flash"),
             deepseek_model_min=os.getenv("DEEPSEEK_MODEL_MIN", "deepseek-v4-flash"),
             deepseek_model_max=os.getenv("DEEPSEEK_MODEL_MAX", "deepseek-v4-pro"),
+            deepseek_web_search=os.getenv("DEEPSEEK_WEB_SEARCH", "0").strip().lower()
+            in ("1", "true", "yes", "on"),
+            deepseek_responses_models=tuple(
+                m.strip()
+                for m in os.getenv(
+                    "DEEPSEEK_RESPONSES_MODELS", "deepseek-v4-flash",
+                ).split(",")
+                if m.strip()
+            ),
             # Qwen
             qwen_api_key=os.getenv("QWEN_API_KEY", "sk-placeholder").strip(),
             qwen_base_url=os.getenv("QWEN_BASE_URL", "http://10.8.128.108:8200/v1").rstrip("/"),
             qwen_model=os.getenv(
                 "QWEN_MODEL",
                 "/mnt/nvme0n1p1/llama.cppModels/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+            ),
+            # repeat_penalty 限制在 [1.0, 2.0]，防止误配置导致输出乱码
+            qwen_repeat_penalty=max(
+                1.0, min(float(os.getenv("QWEN_REPEAT_PENALTY", "1.3")), 2.0),
             ),
             # 通用
             command_timeout=max(10, min(int(os.getenv("LINGSHU_COMMAND_TIMEOUT", "300")), 600)),

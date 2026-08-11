@@ -94,6 +94,10 @@ class MissionState:
     #   origin: brain | orchestrator
     plan_items: list[dict[str, Any]] = field(default_factory=list)
 
+    # NSSCTF Agent Arena 提交结果（由 Orchestrator 的 submit_nss_flag 工具写入）：
+    # {attempt_id, flag, correct, remaining_wrong_attempts}
+    nss_submit: dict[str, Any] | None = None
+
     def record(self, actor: str, action: str, **details: Any) -> None:
         self.updated_at = _now()
         self.events.append(
@@ -123,10 +127,23 @@ class MissionState:
         self.findings.append({"timestamp": _now(), "source": source, "report": report})
         self.record("Orchestrator", "finding_added", source=source)
 
-    def add_attack_step(self, objective: str, report: str) -> None:
-        self.attack_chain.append(
-            {"timestamp": _now(), "objective": objective, "report": report},
-        )
+    def add_attack_step(
+        self,
+        objective: str,
+        report: str,
+        service: str = "",
+        cve: str = "",
+    ) -> None:
+        step: dict[str, Any] = {
+            "timestamp": _now(),
+            "objective": objective,
+            "report": report,
+        }
+        if service:
+            step["service"] = service
+        if cve:
+            step["cve"] = cve
+        self.attack_chain.append(step)
         self.record("Orchestrator", "attack_step_added", objective=objective)
 
     def to_dict(self) -> dict[str, Any]:

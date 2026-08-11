@@ -21,6 +21,7 @@ from typing import Any  # 通用任意类型注解
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agentscope.message import UserMsg  # AgentScope 用户消息封装
+from agentscope.types import ReplyFinishedReason
 
 from config import RuntimeConfig  # 运行时配置（API Key、超时等，从环境变量读取）
 from LLM.model import create_model  # 创建 LLM 模型实例（deepseek / qwen）
@@ -37,10 +38,18 @@ from agent.Recon import (
 )
 from agent.Reserve import create_reverse_agent  # 逆向分析 Agent（IDA MCP）
 from agent.ScopeAuditor import create_scope_auditor_agent  # IP 授权审核 Agent
-from Tools.Plan import create_add_plan_tool  # Brain 登记计划条目的工具
+from Tools.Plan import create_add_plan_tool, push_plan_update  # Brain 登记计划条目的工具
 from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
-from Tools.tooling import stream_agent_reply  # 流式获取 Agent 回复并转发事件
+from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
+    AgentMaxIterationsError,
+    bind_agent_tasks,
+    bind_process_tracker,
+    cancel_agent_tasks,
+    reset_agent_tasks,
+    reset_process_tracker,
+    stream_agent_reply,
+)
 
 
 # ── 工作目录规划 ──
@@ -51,6 +60,40 @@ _WORKDIR_ROOT = Path(__file__).resolve().parent / "WorkDir"
 
 # 肯定的审批答复（其余一律视为拒绝，安全默认）
 _APPROVAL_YES = {"y", "yes", "ok", "approve", "approved", "是", "批准", "同意"}
+
+# 各角色基础迭代预算（按目标类型）——P2 自适应预算的基准表。
+# 网络渗透任务涉及扫描/枚举/利用，预算最高；单文件取证相对收敛。
+_ROLE_BASE_BUDGET = {
+    "network": {"recon": 26, "attack": 28, "reserve": 22, "brain": 16},
+    "archive": {"recon": 22, "attack": 28, "reserve": 28, "brain": 16},
+    "single_file": {"recon": 16, "attack": 24, "reserve": 24, "brain": 14},
+    "directory": {"recon": 22, "attack": 28, "reserve": 26, "brain": 16},
+}
+
+# 思考级别迭代加成：Max 深度推理多给，Low 快速收敛少给
+_THINK_BONUS = {"Low": -4, "Min": 0, "Max": 4}
+_ITER_BUDGET_MIN, _ITER_BUDGET_MAX = 12, 40
+
+
+def _iter_budget(
+    kind: str,
+    role: str,
+    model_ver: str = "Min",
+    plan_items: int = 0,
+) -> int:
+    """按目标类型 + 思考级别 + 计划复杂度自适应计算 Agent 的 ReAct 迭代预算。
+
+    Args:
+        kind: 目标类型（network/archive/single_file/directory）。
+        role: 角色（recon/attack/reserve/brain）。
+        model_ver: 思考级别（Low/Min/Max）。
+        plan_items: 已登记的结构化计划条目数（Brain 运行前为 0）。
+    """
+    base = _ROLE_BASE_BUDGET.get(kind, _ROLE_BASE_BUDGET["directory"])[role]
+    # 计划越复杂给越多迭代（每 2 条计划 +2 轮，封顶 +8）
+    plan_bonus = min(plan_items, 8) * 2
+    think = _THINK_BONUS.get(model_ver, 0)
+    return max(_ITER_BUDGET_MIN, min(_ITER_BUDGET_MAX, base + plan_bonus + think))
 
 
 class _ApprovalBroker:
@@ -236,6 +279,9 @@ async def run_mission(
     session_id: str = "",
     input_queue: asyncio.Queue | None = None,
     initial_context: str | None = None,
+    agent_tasks: set[asyncio.Task[Any]] | None = None,
+    steering_state: dict[str, Any] | None = None,
+    nss_context: dict[str, Any] | None = None,
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
@@ -259,6 +305,8 @@ async def run_mission(
         session_id: 会话标识符，由 API 层分配；CLI 模式下默认为空字符串
         input_queue: 用户消息输入队列，支持对话式交互；CLI 模式下默认为 None
         initial_context: 前次任务上下文摘要（"再打一次"重跑时由 API 层注入）
+        agent_tasks: 当前会话活跃的 Agent reply task 注册表
+        steering_state: 运行时追加指令共享状态 {"pending": str|None, "processed": bool}
 
     Returns:
         最终任务状态 MissionState（含 plan / flag / success 等）
@@ -363,13 +411,12 @@ async def run_mission(
             event_callback("target_info", **payload)
 
     # ── 输入队列消费者（API 模式下处理用户实时指令） ──
-    async def input_hook(user_input: str) -> None:
-        """处理来自 API 层的用户实时输入。
+    steering = steering_state if steering_state else {"pending": None, "processed": False}
 
-        当前为占位实现：记录日志；后续迭代将转发给 Orchestrator
-        以支持对话式交互（如中途调整目标、追加指令等）。
-        """
-        print(f"[系统] 收到用户输入: {user_input}")
+    async def input_hook(user_input: str) -> None:
+        """运行时追加指令入口：写入 steering_state 供主循环消费。"""
+        steering["pending"] = user_input
+        steering["processed"] = False
 
     consumer_task: asyncio.Task | None = None
     if input_queue is not None:
@@ -394,6 +441,9 @@ async def run_mission(
 
         consumer_task = asyncio.create_task(_poll_input_queue())
 
+    process_tracker, process_tracker_token = bind_process_tracker()
+    active_agent_tasks = agent_tasks if agent_tasks is not None else set()
+    agent_tasks_token = bind_agent_tasks(active_agent_tasks)
     try:
         # ── 5. 模型与基础 Agent ──
         # 创建共享的 LLM 模型实例（temperature=0.7 兼顾稳定与发散）
@@ -403,6 +453,7 @@ async def run_mission(
         brain = create_brain_agent(
             model,
             tools=[create_add_plan_tool(mission, store, event_callback, default_origin="brain")],
+            max_iters=_iter_budget(target_spec.kind, "brain", model_ver),
         )
         analysis = create_analysis_agent(model)  # 漏洞研判专家（纯推理）
 
@@ -414,10 +465,12 @@ async def run_mission(
             recon = create_network_recon_agent(
                 model, target_str, project_dir, runtime.command_timeout,
                 scope_registry=scope_registry,
+                max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
             )
         else:
             recon = create_artifact_triage_agent(
                 model, workdir, project_dir, runtime.command_timeout,
+                max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
             )
 
         # ── 7. Brain 战略规划（包含分类结果）──
@@ -477,6 +530,7 @@ async def run_mission(
             runtime.command_timeout,
             category_decision=mission.category_decision,
             scope_registry=scope_registry,
+            max_iters=_iter_budget(target_spec.kind, "attack", model_ver, len(mission.plan_items)),
         )
 
         reserve = await create_reverse_agent(
@@ -487,6 +541,7 @@ async def run_mission(
             runtime.command_timeout,
             category_decision=mission.category_decision,
             scope_registry=scope_registry,
+            max_iters=_iter_budget(target_spec.kind, "reserve", model_ver, len(mission.plan_items)),
         )
 
         scope_auditor = create_scope_auditor_agent(model)
@@ -505,6 +560,8 @@ async def run_mission(
             approval_callback=approval_broker.request,
             scope_registry=scope_registry,
             scope_auditor=scope_auditor,
+            steering_state=steering,
+            nss_context=nss_context,
         )
         # 结构化计划清单文本（Orchestrator 需要知道条目 id 才能用 UpdatePlan 等工具维护）
         plan_items_text = "\n".join(
@@ -520,22 +577,102 @@ async def run_mission(
                 f"避免重复完整攻击链。"
             )
             mission.record("system", "context_injected", source="rerun")
-        final_result = await stream_agent_reply(
-            orchestrator,
-            UserMsg(
-                name="user",
-                content=(
-                    f"执行以下已授权任务。\n目标：{mission.target}\n目标要求：{mission.goal}\n\n"
-                    f"Brain 计划：\n{mission.plan}\n\n"
-                    f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
-                    "从侦察开始，以工具证据推进；结束时必须调用 complete_mission。"
-                    f"{orch_context}"
-                ),
-            ),
-            prefix="[Orchestrator] ",
-            on_event=event_callback,
+        # ── Orchestrator 主循环（steering 由 dispatcher 层 + 此处兜底处理） ──
+        orch_content = (
+            f"执行以下已授权任务。\n目标：{mission.target}\n目标要求：{mission.goal}\n\n"
+            f"Brain 计划：\n{mission.plan}\n\n"
+            f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
+            "从侦察开始，以工具证据推进；结束时必须调用 complete_mission。"
+            f"{orch_context}"
         )
-        print(f"\n[系统] Orchestrator 最终响应:\n{final_result.get_text_content() or '未返回文本结果'}\n")
+        # P5 熔断重试预算：Orchestrator 输出残缺 <tool_call>/空回答时重新注入
+        malformed_retry_budget = 2
+        while True:
+            try:
+                final_result = await stream_agent_reply(
+                    orchestrator,
+                    UserMsg(name="user", content=orch_content),
+                    prefix="[Orchestrator] ",
+                    on_event=event_callback,
+                )
+                # AgentScope 可能以 INTERRUPTED 正常返回（取消被并发工具路径
+                # 吞掉时），还原为 CancelledError 走统一清理与 cancelled 终态。
+                if (
+                    getattr(final_result, "finished_reason", None)
+                    == ReplyFinishedReason.INTERRUPTED
+                ):
+                    raise asyncio.CancelledError()
+                # P5：残缺工具调用/空回答熔断——模型输出未闭合 <tool_call> 标签
+                # 或整段为空时，AgentScope 会当作文本直接结束，导致任务无进展。
+                txt = final_result.get_text_content() or ""
+                stripped = txt.strip()
+                if (
+                    malformed_retry_budget > 0
+                    and (
+                        not stripped
+                        or stripped == "<tool_call>"
+                        or stripped == "<tool_call></tool_call>"
+                        or stripped.startswith("<tool_call>") and stripped.endswith("</tool_call>") and len(stripped) < 40
+                    )
+                ):
+                    malformed_retry_budget -= 1
+                    orch_content = (
+                        "你上一条回复只输出了残缺的 <tool_call> 标签，未实际调用工具。"
+                        "请直接调用 dispatch_recon / dispatch_attack 等工具推进任务，"
+                        "或调用 complete_mission 如实收尾。"
+                    )
+                    continue
+                break
+            except AgentMaxIterationsError as exc:
+                # P1：Orchestrator 自身超迭代 → 确定性收敛 FAILED，避免静默失败
+                mission.record("system", "orchestrator_max_iters_exceeded", error=str(exc))
+                if mission.phase not in {Phase.COMPLETED, Phase.FAILED}:
+                    mission.success = False
+                    mission.summary = (
+                        f"Orchestrator 在 {mission.phase.value} 阶段达到最大迭代次数，"
+                        f"未能完成任务。原因：{exc}"
+                    )
+                    mission.transition(
+                        Phase.FAILED, "Orchestrator 达到最大迭代次数，任务未完成",
+                    )
+                    for item in mission.plan_items:
+                        if item.get("status") == "in_progress":
+                            item["status"] = "failed"
+                        elif item.get("status") == "pending":
+                            item["status"] = "skipped"
+                    store.save(mission)
+                    push_plan_update(mission, event_callback)
+                print(f"[系统] Orchestrator 超迭代，任务已收敛为失败：{exc}")
+                final_result = None
+                break
+            except asyncio.CancelledError:
+                # 区分三种中断来源：
+                #  1) 用户中途指令（steering，pending 未消费）→ 注入后重启 reply
+                #  2) steering 已被 dispatch_* 工具快速路径消费但 Orchestrator
+                #     自身 reply 仍被打断 → 仅恢复，继续推进
+                #  3) 真正的停止请求 → re-raise 让外层 finally 处理清理
+                pending = steering.get("pending")
+                if pending and not steering.get("processed"):
+                    # 兜底注入：dispatch 工具未消费（Orchestrator 不在工具内），
+                    # 主循环直接把指令作为新一轮输入。
+                    steering["processed"] = True
+                    steering["pending"] = None
+                    orch_content = (
+                        f"[用户中途指令] {pending}\n\n"
+                        f"请基于已有侦察证据和此指令调整行动方向。"
+                        f"无需重复已完成的侦察步骤。"
+                    )
+                    continue
+                if steering.get("processed"):
+                    # 指令已被 dispatch 工具消费并注入，仅恢复 Orchestrator 执行。
+                    orch_content = (
+                        f"继续执行当前任务，基于已有证据推进，"
+                        f"结束前必须调用 complete_mission。"
+                    )
+                    continue
+                raise
+        if final_result is not None:
+            print(f"\n[系统] Orchestrator 最终响应:\n{final_result.get_text_content() or '未返回文本结果'}\n")
 
         # ── 10. 结果收尾 ──
         # 检查任务是否到达终态（COMPLETED / FAILED）：
@@ -553,6 +690,12 @@ async def run_mission(
         return mission
 
     finally:
+        # AgentScope 官方方式：取消直接承载 reply_stream 的 task。
+        await cancel_agent_tasks(active_agent_tasks)
+        reset_agent_tasks(agent_tasks_token)
+        # 停止本任务启动的所有命令及后台子进程，避免取消后继续运行。
+        await process_tracker.terminate_all()
+        reset_process_tracker(process_tracker_token)
         # 确保输入队列消费者在任务结束（无论正常/异常）后都被清理
         if consumer_task is not None and not consumer_task.done():
             consumer_task.cancel()

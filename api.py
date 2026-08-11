@@ -45,7 +45,16 @@ class SessionContext:
     task: asyncio.Task | None = None
     subscribers: set[asyncio.Queue] = field(default_factory=set)
     stream_buffers: dict[str, str] = field(default_factory=dict)
+    tool_buffers: dict[str, dict[str, str]] = field(default_factory=dict)
     approval_decision_submitted: bool = False
+    agent_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    # 运行时追加指令状态（非审批用户消息 → 中断 Agent → 注入后恢复）
+    steering_state: dict[str, Any] = field(default_factory=lambda: {"pending": None, "processed": False})
+    # 用户已点击停止：AgentScope 可能吞掉 CancelledError 使 run_mission 正常返回，
+    # 此标记确保 _run_and_cleanup 终态强制收敛为 cancelled 而非 failed。
+    cancel_requested: bool = False
+    # 上一条已处理的用户消息内容（P4：忽略前端双击等产生的连续重复指令）
+    last_user_content: str = ""
 
 # 活跃会话注册表：session_id → SessionContext
 _active_sessions: dict[str, SessionContext] = {}
@@ -101,6 +110,8 @@ _PERSIST_EVENT_TYPES = frozenset({
     "tool_call_start", "tool_call_end",
     # 靶机信息事件
     "target_info", "flag_found",
+    # NSSCTF 在线提交结果
+    "nss_submit",
 })
 
 # 系统级事件（role="system"），其余持久化事件 role="agent"
@@ -139,15 +150,25 @@ def _persist_event(session_id: str, event_type: str, payload: dict) -> int | Non
             "phase": payload.get("phase", ""),
         }, ensure_ascii=False)
     elif event_type == "tool_call_start":
-        content = payload.get("tool_name", "")
+        content = json.dumps({
+            "tool_call_id": payload.get("tool_call_id", ""),
+            "tool_name": payload.get("tool_name", ""),
+        }, ensure_ascii=False)
     elif event_type == "tool_call_end":
-        content = payload.get("tool_name", "")
+        content = json.dumps({
+            "tool_call_id": payload.get("tool_call_id", ""),
+            "tool_name": payload.get("tool_name", ""),
+            "full_args": payload.get("full_args", ""),
+        }, ensure_ascii=False)
     elif event_type == "approval_required":
         # 保存完整事件数据（含 scan_summary、plan_items、reason），供断线重连时恢复审批弹窗
         content = json.dumps(payload, ensure_ascii=False)
     elif event_type == "approval_resolved":
         # 保存审批结果，供前端恢复时判断是否已审批
         content = json.dumps({"approved": payload.get("approved", False), "decision": payload.get("decision", "")}, ensure_ascii=False)
+    elif event_type == "nss_submit":
+        # 保存 NSSCTF 提交结果，供历史回放
+        content = json.dumps(payload, ensure_ascii=False)
     else:
         content = payload.get("content", payload.get("message", ""))
     # 系统事件 role="system"，Agent 流式/消息事件 role="agent"
@@ -226,6 +247,32 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             key = f"{event_type.removesuffix('_start')}:{agent}"
             ctx.stream_buffers[key] = ""
 
+        # 工具参数按调用 ID 累积，结束时一次性持久化完整快照。
+        if event_type == "tool_call_start":
+            tool_call_id = payload.get("tool_call_id", "")
+            if tool_call_id:
+                ctx.tool_buffers[tool_call_id] = {
+                    "agent": payload.get("agent", ""),
+                    "tool_name": payload.get("tool_name", ""),
+                    "full_args": "",
+                }
+        elif event_type == "tool_call_delta":
+            tool_call_id = payload.get("tool_call_id", "")
+            if tool_call_id:
+                tool = ctx.tool_buffers.setdefault(tool_call_id, {
+                    "agent": payload.get("agent", ""),
+                    "tool_name": "",
+                    "full_args": "",
+                })
+                tool["full_args"] += payload.get("delta") or ""
+        elif event_type == "tool_call_end":
+            tool_call_id = payload.get("tool_call_id", "")
+            tool = ctx.tool_buffers.pop(tool_call_id, None)
+            if tool:
+                payload["full_args"] = tool.get("full_args", "")
+                if not payload.get("tool_name"):
+                    payload["tool_name"] = tool.get("tool_name", "")
+
         payload["session_id"] = session_id
         # 先持久化再广播，确保刷新/重连可以从数据库补偿事件。
         seq = _persist_event(session_id, event_type, payload)
@@ -289,13 +336,17 @@ def _message_to_event(message: dict) -> dict:
         event["full_text"] = content
     elif event_type == "phase_change":
         event["phase"] = content
-    elif event_type in ("approval_required", "approval_resolved", "plan_updated"):
+    elif event_type in ("approval_required", "approval_resolved", "plan_updated", "nss_submit"):
         try:
             event.update(json.loads(content))
         except (json.JSONDecodeError, TypeError):
             event["content"] = content
-    elif event_type == "tool_call_start":
-        event["tool_name"] = content
+    elif event_type in ("tool_call_start", "tool_call_end"):
+        try:
+            event.update(json.loads(content))
+        except (json.JSONDecodeError, TypeError):
+            # 兼容旧记录：content 仅保存工具名称。
+            event["tool_name"] = content
     elif event_type == "error":
         event["message"] = content
     else:
@@ -314,6 +365,10 @@ async def _session_event_generator(
     # 注册订阅和读取补偿消息之间不 await，不会产生事件丢失窗口。
     catchup = session_store.get_messages(session_id, after_seq=after_seq, limit=5000)
     stream_snapshot = dict(ctx.stream_buffers)
+    tool_snapshot = {
+        tool_call_id: dict(tool)
+        for tool_call_id, tool in ctx.tool_buffers.items()
+    }
     try:
         for message in catchup:
             yield f"data: {json.dumps(_message_to_event(message), ensure_ascii=False)}\n\n"
@@ -324,6 +379,16 @@ async def _session_event_generator(
                 "stream_type": stream_type,
                 "agent": agent,
                 "full_text": full_text,
+                "session_id": session_id,
+            }
+            yield f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+        for tool_call_id, tool in tool_snapshot.items():
+            snapshot = {
+                "type": "tool_call_snapshot",
+                "tool_call_id": tool_call_id,
+                "tool_name": tool.get("tool_name", ""),
+                "agent": tool.get("agent", ""),
+                "full_args": tool.get("full_args", ""),
                 "session_id": session_id,
             }
             yield f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
@@ -369,7 +434,8 @@ def _save_long_term_memory(session_id, target, goal, phase, success, flag, summa
 # ── 运行并清理 ──
 
 async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, goal: str,
-                           model_ver: str, provider: str, callback, initial_context: str | None = None):
+                           model_ver: str, provider: str, callback, initial_context: str | None = None,
+                           nss_context: dict | None = None):
     """运行任务并处理清理逻辑。"""
     status_val = "completed"
     phase = "completed"
@@ -382,15 +448,25 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             provider=provider, event_callback=callback,
             session_id=session_id, input_queue=ctx.input_queue,
             initial_context=initial_context,
+            agent_tasks=ctx.agent_tasks,
+            steering_state=ctx.steering_state,
+            nss_context=nss_context,
         )
-        phase = mission_state.phase.value if hasattr(mission_state.phase, 'value') else str(mission_state.phase)
-        success = mission_state.success
-        flag = mission_state.flag
-        summary = mission_state.summary or ""
-        if mission_state.success:
-            status_val = "completed"
+        # AgentScope 的 reply_stream 可能吞掉 CancelledError 而正常返回，
+        # 此时必须按用户停止意图收敛终态为 cancelled（而非 failed）。
+        if ctx.cancel_requested:
+            status_val = "cancelled"
+            phase = "cancelled"
+            callback("mission_cancelled", message="任务已被用户取消", agent="system")
         else:
-            status_val = "failed"
+            phase = mission_state.phase.value if hasattr(mission_state.phase, 'value') else str(mission_state.phase)
+            success = mission_state.success
+            flag = mission_state.flag
+            summary = mission_state.summary or ""
+            if mission_state.success:
+                status_val = "completed"
+            else:
+                status_val = "failed"
     except asyncio.CancelledError:
         status_val = "cancelled"
         phase = "cancelled"
@@ -400,6 +476,14 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
         phase = "failed"
         callback("error", message=f"任务异常：{exc}", agent="system")
     finally:
+        # 异常或取消时也固化尚未收到 end 的工具参数，避免历史缺失。
+        for tool_call_id, tool in tuple(ctx.tool_buffers.items()):
+            callback(
+                "tool_call_end",
+                agent=tool.get("agent", ""),
+                tool_call_id=tool_call_id,
+                tool_name=tool.get("tool_name", ""),
+            )
         callback("mission_end", message="任务已结束", status=status_val)
         await asyncio.to_thread(
             lambda: session_store.update_session(
@@ -437,6 +521,9 @@ _AUTH_SKIP_PATHS = (
     "/",
     "/index.html",
     "/session_state.js",
+    "/iconpark-icons.js",
+    "/logo2.png",
+    "/logored.png",
     "/uploads",
     "/docs",
     "/openapi.json",
@@ -506,6 +593,7 @@ class MissionStartRequest(BaseModel):
     provider: str = Field(default="deepseek", description="模型提供商: deepseek | qwen")
     model: str = Field(default="Min", description="思考级别: Low | Min | Max")
     source_session_id: str | None = Field(default=None, description="重跑来源会话ID，用于注入前次任务上下文")
+    nss_context: dict | None = Field(default=None, description="NSSCTF Arena 上下文（attempt_id/token/api_base），供 Orchestrator 在线提交 Flag")
 
 
 class ChatMessage(BaseModel):
@@ -647,6 +735,36 @@ async def session_state_js():
     return Response(status_code=404)
 
 
+@app.get("/iconpark-icons.js")
+async def iconpark_icons_js():
+    js_path = _PROJECT_ROOT / "frontend" / "iconpark-icons.js"
+    if js_path.is_file():
+        return FileResponse(
+            js_path,
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
+    return Response(status_code=404)
+
+
+@app.get("/logo2.png")
+async def light_logo():
+    return FileResponse(
+        _PROJECT_ROOT / "logo2.png",
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/logored.png")
+async def dark_logo():
+    return FileResponse(
+        _PROJECT_ROOT / "logored.png",
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 # ══════════════════════════════════════════════════
 #  新版多会话 API
 # ══════════════════════════════════════════════════
@@ -705,7 +823,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     # 创建后台任务
     task = asyncio.create_task(
         _run_and_cleanup(session_id, ctx, req.target, req.goal, req.model, req.provider, callback,
-                         initial_context=initial_context)
+                         initial_context=initial_context, nss_context=req.nss_context)
     )
     ctx.task = task
 
@@ -732,18 +850,30 @@ async def session_stream(
 
 @app.post("/api/session/{session_id}/message")
 async def send_message(session_id: str, msg: ChatMessage, current_user: dict = Depends(get_current_user)):
-    """向指定会话发送用户消息。"""
+    """向指定会话发送用户消息——支持审批决策和运行时追加指令（steering）。"""
     await _verify_session_owner(session_id, current_user["id"])
     ctx = _active_sessions.get(session_id)
     if ctx is None:
         raise HTTPException(status_code=404, detail="会话不存在或已结束")
-    if msg.content.strip() in {"批准", "补充侦察", "拒绝"}:
+
+    content = msg.content.strip()
+
+    # ── 审批决策 ──
+    if content in {"批准", "补充侦察", "拒绝"}:
         session = await asyncio.to_thread(session_store.get_session, session_id)
         if ctx.approval_decision_submitted or not session.get("pending_approval"):
             return {"status": "approval_already_resolved"}
         ctx.approval_decision_submitted = True
+    else:
+        # P4：忽略与上一条完全相同的连续重复指令（前端双击/重试导致），
+        # 避免重复注入 steering、重复取消 Agent 任务。
+        if ctx.last_user_content == content:
+            return {"status": "duplicate", "message": "已忽略与上一条相同的重复消息"}
+        ctx.last_user_content = content
+
+    # 持久化消息
     seq = await asyncio.to_thread(
-        session_store.add_message, session_id, "user", msg.content,
+        session_store.add_message, session_id, "user", content,
     )
     event = {
         "type": "user_message",
@@ -753,6 +883,19 @@ async def send_message(session_id: str, msg: ChatMessage, current_user: dict = D
     }
     for subscriber in tuple(ctx.subscribers):
         subscriber.put_nowait(event.copy())
+
+    # ── 运行时追加指令（非审批消息 + 会话活跃 → 中断 Agent 并注入） ──
+    if ctx.task and not ctx.task.done() and content not in {"批准", "补充侦察", "拒绝"}:
+        ctx.steering_state["pending"] = content
+        ctx.steering_state["processed"] = False
+        # 取消所有 Agent reply task（含 Orchestrator 自身）：让主循环感知中断后
+        # 将用户指令作为新一轮输入注入。dispatch_* 工具内的 _check_steering 是
+        # 快速路径（若中断恰好落在工具内则就地注入），主循环负责兜底注入。
+        for agent_task in tuple(ctx.agent_tasks):
+            if not agent_task.done():
+                agent_task.cancel()
+        return {"status": "steering", "message": "指令已注入，当前操作将被中断"}
+
     await ctx.input_queue.put(msg.content)
     return {"status": "sent"}
 
@@ -851,6 +994,11 @@ async def get_pending_approval(
     session = await asyncio.to_thread(session_store.get_session, session_id)
     if not session or not session.get("pending_approval"):
         return {"pending": False}
+    if session.get("status") != "active" or session_id not in _active_sessions:
+        await asyncio.to_thread(
+            session_store.update_session, session_id, pending_approval=None,
+        )
+        return {"pending": False}
     # 解析并返回完整事件数据
     try:
         payload = json.loads(session["pending_approval"])
@@ -872,13 +1020,19 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
     await _verify_session_owner(session_id, current_user["id"])
     # 如果会话仍在运行，先取消并等待
     ctx = _active_sessions.get(session_id)
+    if ctx:
+        deleted_event = {"type": "session_deleted", "session_id": session_id}
+        for subscriber in tuple(ctx.subscribers):
+            subscriber.put_nowait(deleted_event.copy())
+        # 防止任务取消过程继续向旧浏览器广播审批等迟到事件。
+        ctx.subscribers.clear()
+        _active_sessions.pop(session_id, None)
     if ctx and ctx.task and not ctx.task.done():
         ctx.task.cancel()
         try:
             await ctx.task
         except (asyncio.CancelledError, Exception):
             pass
-        _active_sessions.pop(session_id, None)
     # 删除 DB 记录
     await asyncio.to_thread(session_store.delete_session, session_id)
     # 删除 JSON 文件
@@ -890,13 +1044,40 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
 
 @app.post("/api/session/{session_id}/cancel")
 async def cancel_session(session_id: str, current_user: dict = Depends(get_current_user)):
-    """取消正在运行的会话。"""
+    """取消正在运行的会话（立即生效，进程清理在后台完成）。
+
+    立即返回：发出取消信号 + 移出活跃会话 + 标记 DB 状态。
+    后台任务自身的 finally 会继续清理 shell 进程组并最终落库。
+    """
     await _verify_session_owner(session_id, current_user["id"])
     ctx = _active_sessions.get(session_id)
     if ctx is None or ctx.task is None or ctx.task.done():
         raise HTTPException(status_code=404, detail="会话不存在或已结束")
+
+    # 0) 记录停止意图：AgentScope 可能吞掉 CancelledError，
+    #    _run_and_cleanup 据此将终态强制收敛为 cancelled。
+    ctx.cancel_requested = True
+
+    # 1) 按 AgentScope 官方机制，直接取消承载 reply_stream 的 task。
+    for agent_task in tuple(ctx.agent_tasks):
+        if not agent_task.done():
+            agent_task.cancel()
+
+    # 2) 同时取消外层任务，打断阶段调度和非 Agent 等待。
     ctx.task.cancel()
-    return {"status": "cancelled"}
+
+    # 3) 立即移出活跃会话，前端刷新即可看到 is_live=false
+    _active_sessions.pop(session_id, None)
+
+    # 4) 快速落库为已取消（后台 finally 会再次幂等更新）
+    await asyncio.to_thread(
+        session_store.update_session,
+        session_id,
+        status="cancelled",
+        phase="cancelled",
+        pending_approval=None,
+    )
+    return {"status": "cancelled", "message": "停止请求已生效，正在后台清理任务进程"}
 
 
 # ══════════════════════════════════════════════════

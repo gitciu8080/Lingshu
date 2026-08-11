@@ -53,6 +53,7 @@ async def create_reverse_agent(
     timeout: int,
     category_decision: dict | None = None,
     scope_registry: ScopeRegistry | None = None,
+    max_iters: int = 20,
 ) -> Agent:
     async def analysis(service_info: str) -> str:
         """委托 Analysis 专家研判真实证据。
@@ -93,5 +94,5 @@ async def create_reverse_agent(
         system_prompt=RESERVE_SYS_PROMPT,
         model=model,
         toolkit=toolkit,
-        react_config=ReActConfig(max_iters=20),
+        react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
     )
