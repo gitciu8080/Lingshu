@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from agentscope.agent import Agent, ReActConfig
 from agentscope.tool import Toolkit
+from agent.experts import SCOPE_AUDITOR_EXPERT
 
 SCOPE_AUDITOR_SYS_PROMPT = """你是授权范围审核专家（ScopeAuditor）。
 你的唯一职责是审核 Orchestrator 提交的 IP/网段扩容请求，防止未授权目标被纳入攻击范围。
@@ -33,7 +34,7 @@ SCOPE_AUDITOR_SYS_PROMPT = """你是授权范围审核专家（ScopeAuditor）�
 def create_scope_auditor_agent(model) -> Agent:
     """创建 IP 审核 Agent（无工具，纯推理）。"""
     return Agent(
-        name="ScopeAuditor",
+        name=SCOPE_AUDITOR_EXPERT,
         system_prompt=SCOPE_AUDITOR_SYS_PROMPT,
         model=model,
         toolkit=Toolkit(tools=[]),

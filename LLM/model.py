@@ -9,14 +9,26 @@ DeepSeek 走 Responses API（联网搜索工具仅在该 API 下可用），
 通过 web_search 参数（或环境变量 DEEPSEEK_WEB_SEARCH）开启/关闭
 服务端内置联网搜索。
 """
-from typing import Literal, Union
+from typing import Any, AsyncGenerator, Literal, Union
 
 from pydantic import Field, SecretStr
 
 from agentscope.credential import DeepSeekCredential, OpenAICredential
 from agentscope.model import DeepSeekChatModel, OpenAIResponseModel, OpenAIChatModel
+from agentscope.model import ChatResponse
 
 from config import RuntimeConfig
+
+
+class _ResponseEventAlias:
+    """Expose a compatible event type while preserving the original payload."""
+
+    def __init__(self, event: Any, event_type: str) -> None:
+        self._event = event
+        self.type = event_type
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._event, name)
 
 
 class DeepSeekResponsesModel(OpenAIResponseModel):
@@ -68,6 +80,29 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
             **kwargs,
         )
         self.web_search_enabled = web_search
+
+    async def _parse_stream_response(
+        self,
+        start_datetime,
+        response,
+    ) -> AsyncGenerator[ChatResponse, None]:
+        """Accept DeepSeek's current reasoning_text streaming event name."""
+
+        async def normalized_events():
+            async for event in response:
+                if event.type == "response.reasoning_text.delta":
+                    yield _ResponseEventAlias(
+                        event,
+                        "response.reasoning_summary_text.delta",
+                    )
+                else:
+                    yield event
+
+        async for chunk in super()._parse_stream_response(
+            start_datetime,
+            normalized_events(),
+        ):
+            yield chunk
 
     def _format_tools(
         self,

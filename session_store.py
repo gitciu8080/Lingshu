@@ -45,9 +45,23 @@ def init_sessions_db():
                 content TEXT NOT NULL,
                 event_type TEXT DEFAULT '',
                 agent_name TEXT DEFAULT '',
+                source_id TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (session_id) REFERENCES sessions(id),
                 UNIQUE(session_id, seq)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_stream_snapshots (
+                session_id TEXT NOT NULL,
+                reply_id TEXT NOT NULL,
+                block_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                stream_type TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (session_id, block_id),
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
             )
         """)
         # CREATE TABLE IF NOT EXISTS 不会给旧表补列，显式执行幂等迁移。
@@ -63,6 +77,13 @@ def init_sessions_db():
                 conn.execute(
                     f"ALTER TABLE sessions ADD COLUMN {column} {definition}"
                 )
+        message_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(session_messages)").fetchall()
+        }
+        if "source_id" not in message_columns:
+            conn.execute(
+                "ALTER TABLE session_messages ADD COLUMN source_id TEXT DEFAULT ''"
+            )
         conn.commit()
     finally:
         conn.close()
@@ -162,6 +183,7 @@ def delete_session(session_id: str) -> None:
     """删除会话及其所有关联消息。"""
     conn = get_db()
     try:
+        conn.execute("DELETE FROM session_stream_snapshots WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM session_messages WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         conn.commit()
@@ -175,6 +197,7 @@ def add_message(
     content: str,
     event_type: str = '',
     agent_name: str = '',
+    source_id: str = '',
 ) -> int:
     """追加一条消息到会话，自动计算 seq，返回 seq 值。
 
@@ -190,9 +213,10 @@ def add_message(
         ).fetchone()
         next_seq = (row[0] or 0) + 1
         conn.execute(
-            """INSERT INTO session_messages (session_id, seq, role, content, event_type, agent_name)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (session_id, next_seq, role, content, event_type, agent_name),
+            """INSERT INTO session_messages
+               (session_id, seq, role, content, event_type, agent_name, source_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, next_seq, role, content, event_type, agent_name, source_id),
         )
         conn.commit()
         return next_seq
@@ -219,5 +243,95 @@ def get_messages(
             (session_id, after_seq, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def upsert_stream_snapshot(
+    session_id: str,
+    reply_id: str,
+    block_id: str,
+    agent_name: str,
+    stream_type: str,
+    content: str,
+) -> None:
+    """Persist the latest content of an unfinished text/thinking block."""
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT INTO session_stream_snapshots
+               (session_id, reply_id, block_id, agent_name, stream_type, content, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(session_id, block_id) DO UPDATE SET
+                 reply_id = excluded.reply_id,
+                 agent_name = excluded.agent_name,
+                 stream_type = excluded.stream_type,
+                 content = excluded.content,
+                 updated_at = excluded.updated_at""",
+            (
+                session_id,
+                reply_id,
+                block_id,
+                agent_name,
+                stream_type,
+                content,
+                datetime.now().isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_stream_snapshot(session_id: str, block_id: str) -> None:
+    conn = get_db()
+    try:
+        conn.execute(
+            "DELETE FROM session_stream_snapshots WHERE session_id = ? AND block_id = ?",
+            (session_id, block_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_stream_snapshots(session_id: str) -> list[dict]:
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM session_stream_snapshots
+               WHERE session_id = ? ORDER BY updated_at ASC""",
+            (session_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_history_snapshot(
+    session_id: str,
+    after_seq: int = 0,
+    limit: int = 200,
+) -> tuple[list[dict], list[dict]]:
+    """Read completed messages and unfinished blocks from one DB snapshot."""
+    conn = get_db()
+    try:
+        conn.execute("BEGIN")
+        messages = conn.execute(
+            """SELECT * FROM session_messages
+               WHERE session_id = ? AND seq > ?
+               ORDER BY seq ASC LIMIT ?""",
+            (session_id, after_seq, limit),
+        ).fetchall()
+        snapshots = conn.execute(
+            """SELECT * FROM session_stream_snapshots
+               WHERE session_id = ? ORDER BY updated_at ASC""",
+            (session_id,),
+        ).fetchall()
+        conn.commit()
+        return [dict(row) for row in messages], [dict(row) for row in snapshots]
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()

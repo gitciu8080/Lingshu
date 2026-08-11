@@ -23,6 +23,7 @@ from Tools.tooling import (
     AllowedFunctionTool,
     stream_agent_reply,
 )
+from agent.experts import ORCHESTRATOR_EXPERT
 
 
 ORCHESTRATOR_SYS_PROMPT = """你是网络安全行动总指挥（Orchestrator）。
@@ -530,7 +531,7 @@ def create_orchestrator_agent(
         create_query_memory_tool(),
     ]
     return Agent(
-        name="Orchestrator",
+        name=ORCHESTRATOR_EXPERT,
         system_prompt=ORCHESTRATOR_SYS_PROMPT,
         model=model,
         toolkit=Toolkit(tools=tools),

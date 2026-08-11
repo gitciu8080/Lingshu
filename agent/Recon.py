@@ -13,6 +13,7 @@ from agentscope.tool import Toolkit
 from Tools.CVE_Search import create_cve_search_tool
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.tooling import create_scoped_shell_tool
+from agent.experts import ARTIFACT_TRIAGE_EXPERT, NETWORK_RECON_EXPERT
 
 # ---------------------------------------------------------------------------
 # NetworkReconAgent — 网络扫描
@@ -55,7 +56,7 @@ def create_network_recon_agent(
         tools=[create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry), create_cve_search_tool()],
     )
     return Agent(
-        name="NetworkRecon",
+        name=NETWORK_RECON_EXPERT,
         system_prompt=NETWORK_RECON_SYS_PROMPT,
         model=model,
         toolkit=toolkit,
@@ -99,7 +100,7 @@ def create_artifact_triage_agent(
         tools=[create_scoped_shell_tool(str(workdir), project_dir, timeout)],
     )
     return Agent(
-        name="ArtifactTriage",
+        name=ARTIFACT_TRIAGE_EXPERT,
         system_prompt=ARTIFACT_TRIAGE_SYS_PROMPT,
         model=model,
         toolkit=toolkit,
