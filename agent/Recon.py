@@ -49,6 +49,7 @@ def create_network_recon_agent(
     project_dir: str | Path,
     timeout: int,
     scope_registry: ScopeRegistry | None = None,
+    max_iters: int = 20,
 ) -> Agent:
     toolkit = Toolkit(
         tools=[create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry), create_cve_search_tool()],
@@ -58,7 +59,7 @@ def create_network_recon_agent(
         system_prompt=NETWORK_RECON_SYS_PROMPT,
         model=model,
         toolkit=toolkit,
-        react_config=ReActConfig(max_iters=20),
+        react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
     )
 
 
@@ -91,6 +92,7 @@ def create_artifact_triage_agent(
     workdir: str | Path,
     project_dir: str | Path,
     timeout: int,
+    max_iters: int = 20,
 ) -> Agent:
     """创建文件分析 Agent，工作目录约束在 workdir 内。"""
     toolkit = Toolkit(
@@ -101,7 +103,7 @@ def create_artifact_triage_agent(
         system_prompt=ARTIFACT_TRIAGE_SYS_PROMPT,
         model=model,
         toolkit=toolkit,
-        react_config=ReActConfig(max_iters=20),
+        react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
     )
 
 

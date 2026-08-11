@@ -44,11 +44,11 @@ recon / analysis / exploitation / post_exploitation / complete。
 全部登记完成后，再输出人类可读的计划正文。"""
 
 
-def create_brain_agent(model, tools: list | None = None) -> Agent:
+def create_brain_agent(model, tools: list | None = None, max_iters: int = 15) -> Agent:
     return Agent(
         name="Brain",
         system_prompt=BRAIN_SYS_PROMPT,
         model=model,
         toolkit=Toolkit(tools=tools or []),
-        react_config=ReActConfig(max_iters=15),
+        react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
     )

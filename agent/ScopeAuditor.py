@@ -37,5 +37,5 @@ def create_scope_auditor_agent(model) -> Agent:
         system_prompt=SCOPE_AUDITOR_SYS_PROMPT,
         model=model,
         toolkit=Toolkit(tools=[]),
-        react_config=ReActConfig(max_iters=3),
+        react_config=ReActConfig(max_iters=3, interruption_raise_cancelled_error=True),
     )

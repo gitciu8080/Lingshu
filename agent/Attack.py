@@ -107,6 +107,7 @@ async def create_attack_agent(
     timeout: int,
     category_decision: dict | None = None,
     scope_registry: ScopeRegistry | None = None,
+    max_iters: int = 20,
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -117,6 +118,7 @@ async def create_attack_agent(
         project_dir: 项目根目录。
         timeout: 命令超时秒数。
         category_decision: 题型分类决策（v0.2.0 新增）。为 None 时仅加载 writeup。
+        max_iters: ReAct 最大推理迭代次数，由调用方按任务复杂度分配。
     """
     async def analysis(service_info: str) -> str:
         """请求 Analysis 专家研判真实服务证据。
@@ -160,5 +162,5 @@ async def create_attack_agent(
         system_prompt=ATTACK_SYS_PROMPT,
         model=model,
         toolkit=toolkit,
-        react_config=ReActConfig(max_iters=20),
+        react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
     )

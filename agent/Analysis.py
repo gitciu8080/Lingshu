@@ -15,7 +15,7 @@ def create_analysis_agent(model) -> Agent:
         name="Analysis",
         system_prompt=ANALYSIS_SYS_PROMPT,
         model=model,
-        react_config=ReActConfig(max_iters=3),
+        react_config=ReActConfig(max_iters=3, interruption_raise_cancelled_error=True),
         toolkit=Toolkit(tools=[
             create_cve_search_tool(),
         ])

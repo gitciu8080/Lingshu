@@ -1,4 +1,6 @@
 """Orchestrator：唯一可以修改任务状态的战术决策核心。"""
+import asyncio
+import httpx
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -6,7 +8,7 @@ from agentscope.agent import Agent, ReActConfig
 from agentscope.message import UserMsg
 from agentscope.tool import Toolkit
 
-from Tools.AgenticMemory import get_experience_hint, save_mission
+from Tools.AgenticMemory import create_query_memory_tool, save_mission
 from TaskState import MissionState, MissionStore, Phase
 from Tools.Plan import (
     create_add_plan_tool,
@@ -16,7 +18,11 @@ from Tools.Plan import (
     push_plan_update,
 )
 from Tools.ScopeRegistry import ScopeRegistry
-from Tools.tooling import AllowedFunctionTool, stream_agent_reply
+from Tools.tooling import (
+    AgentMaxIterationsError,
+    AllowedFunctionTool,
+    stream_agent_reply,
+)
 
 
 ORCHESTRATOR_SYS_PROMPT = """你是网络安全行动总指挥（Orchestrator）。
@@ -33,8 +39,13 @@ ORCHESTRATOR_SYS_PROMPT = """你是网络安全行动总指挥（Orchestrator）
   命令中直接使用未授权 IP 会被 scoped_shell 拦截，必须通过本工具正规扩容。
 - AddPlan / UpdatePlan / DeletePlan / ListPlan：维护作战计划清单——
   新增、细化、删除条目，标记状态或查看当前清单。
+- QueryMemory：按服务名查询长期记忆中的历史攻击经验（已知 CVE / 相关任务），
+  侦察确认服务指纹后可参考复用；服务名留空则查看近期任务概览。
 - view_mission_state：查看结构化任务状态。
 - complete_mission：仅在成功条件有证据或已达到明确失败条件时结束任务。
+- submit_nss_flag：向 NSSCTF Agent Arena 提交 Flag 并获取判定结果
+  （仅由 NSSCTF 竞技场发起的任务可用）。发现候选 Flag 时优先用它在线校验：
+  正确 → 以 success=true 结束；错误 → 根据剩余次数调整思路继续。
 
 
 行动纪律（严格遵守顺序）：
@@ -49,6 +60,8 @@ ORCHESTRATOR_SYS_PROMPT = """你是网络安全行动总指挥（Orchestrator）
 6. 批准后，调用 dispatch_attack 执行方案；所有攻击动作通过 Attack 执行，
    不要把主动探测或 payload 验证交给 Recon。
 7. 失败后基于证据选择补充侦察（回到步骤 1）或其他候选路径，禁止无依据重复。
+   制定方案前可先 QueryMemory 查询历史经验：确认了服务/版本指纹时，按服务名
+   检索已知 CVE 与历史攻击链，命中则作为候选路径依据，未命中则回归当前证据。
 8. 只有获得可复核证据后才能标记成功。发现 Flag 时在 complete_mission 中明确提交。
 9. 禁止扩大目标范围、拒绝服务、数据破坏、持久化和日志清除。
 10. 不得跳过 complete_mission；若迭代耗尽，应如实报告未完成，不能伪造成功。
@@ -69,43 +82,100 @@ def create_orchestrator_agent(
     approval_callback: Callable[[str, dict | None], Awaitable[bool]] | None = None,
     scope_registry: ScopeRegistry | None = None,
     scope_auditor: Agent | None = None,
+    steering_state: dict[str, Any] | None = None,
+    nss_context: dict[str, Any] | None = None,
 ) -> Agent:
+    steering = steering_state if steering_state else {"pending": None, "processed": False}
+
+    def _check_steering() -> str | None:
+        """入口检查 + 中断后检查：消费待处理的用户指令。"""
+        pending = steering.get("pending")
+        if pending and not steering.get("processed"):
+            steering["processed"] = True
+            steering["pending"] = None
+            return (
+                f"[用户指令] {pending}\n\n"
+                f"请基于已有侦察证据和此指令调整行动方向。"
+                f"无需重复已完成的侦察步骤。"
+            )
+        return None
+
     async def dispatch_recon(focus: str = "全面但低影响的信息收集") -> str:
         """派遣 Recon 对本次授权目标进行信息收集。
 
         Args:
             focus: 本轮需要补齐的具体信息或扫描重点。
         """
+        # 入口检查：是否有待处理的用户指令（无需等待子 Agent 取消）
+        msg = _check_steering()
+        if msg is not None:
+            return msg
         if mission.phase not in {Phase.RECON, Phase.ANALYSIS, Phase.EXPLOITATION}:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Recon"
         if mission.phase != Phase.RECON:
             mission.transition(Phase.RECON, f"需要补充侦察: {focus}")
         mission.record("Orchestrator", "dispatch_recon", focus=focus)
         store.save(mission)
-        result = await stream_agent_reply(
-            recon_agent,
-            UserMsg(
-                name="Orchestrator",
-                content=f"授权目标：{mission.target}\n本轮重点：{focus}\n收集到足够证据后立即输出最终报告，禁止继续调用工具。",
-            ),
-            prefix="[Recon] ",
-            on_event=event_callback,
-        )
-        report = result.get_text_content() or "[Recon] 未返回文本结果"
+        try:
+            result = await stream_agent_reply(
+                recon_agent,
+                UserMsg(
+                    name="Orchestrator",
+                    content=f"授权目标：{mission.target}\n本轮重点：{focus}\n收集到足够证据后立即输出最终报告，禁止继续调用工具。",
+                ),
+                prefix="[Recon] ",
+                on_event=event_callback,
+            )
+            report = result.get_text_content() or "[Recon] 未返回文本结果"
+        except AgentMaxIterationsError as exc:
+            mission.record("Orchestrator", "recon_max_iters_exceeded", error=str(exc))
+            store.save(mission)
+            return (
+                f"[Recon 超迭代] {exc}。"
+                f"请缩小本轮 focus 范围重新调度，或改用其他路径。"
+            )
+        except asyncio.CancelledError:
+            # 不在此处消费 steering：统一由主循环捕获 CancelledError 后注入，
+            # 避免指令被消费但 Orchestrator reply 又被取消导致指令丢失。
+            raise
         mission.add_finding("Recon", report)
         mission.transition(Phase.ANALYSIS, "收到新的侦察证据")
         store.save(mission)
         return f"[Recon 侦察报告]\n{report}"
 
-    async def dispatch_attack(target_info: str, objective: str = "漏洞分析") -> str:
+    async def dispatch_attack(
+        target_info: str,
+        objective: str = "漏洞分析",
+        service: str = "",
+        cve: str = "",
+    ) -> str:
         """派遣 Attack 分析或验证当前授权目标。
 
         Args:
             target_info: 来自 Recon 的服务、版本、端口和响应证据。
             objective: 本轮目标，如漏洞分析、漏洞验证、获取初始访问或寻找 Flag。
+            service: 侦察已确认的服务名（如 "Apache 2.4.49"），供长期记忆登记；未知留空。
+            cve: 已确认的 CVE 编号（如 "CVE-2021-41773"），未确认不得填写。
         """
+        msg = _check_steering()
+        if msg is not None:
+            return msg
         if mission.phase not in {Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION}:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Attack"
+        # P3 去重：与最近一次已执行目标完全相同且无新证据 → 拒绝，堵住迭代黑洞
+        last_step = mission.attack_chain[-1] if mission.attack_chain else None
+        if last_step and last_step.get("objective", "").strip() == objective.strip():
+            mission.record(
+                "Orchestrator",
+                "attack_duplicate_rejected",
+                objective=objective,
+            )
+            store.save(mission)
+            return (
+                "[拒绝] 该 Attack 目标与最近一次完全相同，且无新证据。"
+                "请基于最新侦察/攻击结果调整 target_info 或 objective，"
+                "或先补充侦察收集新证据后再调度。"
+            )
         lower = objective.lower()
         exploitation = any(
             word in lower or word in objective
@@ -125,21 +195,33 @@ def create_orchestrator_agent(
                 mission.transition(Phase.POST_EXPLOITATION, f"开始执行: {objective}")
         mission.record("Orchestrator", "dispatch_attack", objective=objective)
         store.save(mission)
-        result = await stream_agent_reply(
-            attack_agent,
-            UserMsg(
-                name="Orchestrator",
-                content=(
-                    f"授权目标：{mission.target}\n本轮目标：{objective}\n\n"
-                    f"真实目标信息：\n{target_info}\n\n"
-                    "完成分析/验证后立即输出最终报告，禁止继续调用工具。"
+        try:
+            result = await stream_agent_reply(
+                attack_agent,
+                UserMsg(
+                    name="Orchestrator",
+                    content=(
+                        f"授权目标：{mission.target}\n本轮目标：{objective}\n\n"
+                        f"真实目标信息：\n{target_info}\n\n"
+                        "完成分析/验证后立即输出最终报告，禁止继续调用工具。"
+                    ),
                 ),
-            ),
-            prefix="[Attack] ",
-            on_event=event_callback,
-        )
-        report = result.get_text_content() or "[Attack] 未返回文本结果"
-        mission.add_attack_step(objective, report)
+                prefix="[Attack] ",
+                on_event=event_callback,
+            )
+            report = result.get_text_content() or "[Attack] 未返回文本结果"
+        except AgentMaxIterationsError as exc:
+            # 超迭代：写入失败步骤（保审计 + 供 P3 去重），返回明确结果
+            mission.add_attack_step(objective, f"[Attack 超迭代] {exc}，本轮未产出有效结果")
+            store.save(mission)
+            return (
+                f"[Attack 超迭代] {exc}。"
+                f"请基于已有证据调整 objective 或补充侦察，避免重复调度。"
+            )
+        except asyncio.CancelledError:
+            # 不在此处消费 steering：统一由主循环捕获 CancelledError 后注入。
+            raise
+        mission.add_attack_step(objective, report, service, cve)
         store.save(mission)
         return f"[Attack 报告]\n{report}"
 
@@ -150,6 +232,9 @@ def create_orchestrator_agent(
             binary_path: 待分析二进制文件的绝对路径（如 /WorkDir/uploads/target.exe）。
             objective: 本轮分析目标，如反编译提取算法、寻找 Flag、分析恶意行为。
         """
+        msg = _check_steering()
+        if msg is not None:
+            return msg
         if mission.phase not in {Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION}:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Reserve"
         lower = objective.lower()
@@ -158,22 +243,35 @@ def create_orchestrator_agent(
                 mission.transition(Phase.EXPLOITATION, f"逆向进入利用阶段: {objective}")
         mission.record("Orchestrator", "dispatch_reverse", binary_path=binary_path, objective=objective)
         store.save(mission)
-        result = await stream_agent_reply(
-            reserve_agent,
-            UserMsg(
-                name="Orchestrator",
-                content=(
-                    f"授权目标：{mission.target}\n"
-                    f"二进制文件：{binary_path}\n"
-                    f"本轮目标：{objective}\n\n"
-                    "若 IDA 尚未启动，先用 scoped_shell 执行 idat 加载文件。\n"
-                    "分析完成后立即输出最终报告，禁止继续调用工具。"
+        try:
+            result = await stream_agent_reply(
+                reserve_agent,
+                UserMsg(
+                    name="Orchestrator",
+                    content=(
+                        f"授权目标：{mission.target}\n"
+                        f"二进制文件：{binary_path}\n"
+                        f"本轮目标：{objective}\n\n"
+                        "若 IDA 尚未启动，先用 scoped_shell 执行 idat 加载文件。\n"
+                        "分析完成后立即输出最终报告，禁止继续调用工具。"
+                    ),
                 ),
-            ),
-            prefix="[Reserve] ",
-            on_event=event_callback,
-        )
-        report = result.get_text_content() or "[Reserve] 未返回文本结果"
+                prefix="[Reserve] ",
+                on_event=event_callback,
+            )
+            report = result.get_text_content() or "[Reserve] 未返回文本结果"
+        except AgentMaxIterationsError as exc:
+            mission.record("Orchestrator", "reverse_max_iters_exceeded", error=str(exc))
+            store.save(mission)
+            return (
+                f"[Reserve 超迭代] {exc}。"
+                f"请缩小分析目标后重新调度，或改用其他路径。"
+            )
+        except asyncio.CancelledError:
+            msg = _check_steering()
+            if msg is not None:
+                return msg
+            raise
         mission.add_finding("Reserve", report)
         store.save(mission)
         return f"[Reserve 逆向报告]\n{report}"
@@ -343,6 +441,78 @@ def create_orchestrator_agent(
         )
         return f"[任务已结束] success={mission.success}, flag={mission.flag or '未发现'}"
     
+    async def submit_nss_flag(flag: str) -> str:
+        """向 NSSCTF Agent Arena 提交 Flag 并获取判定结果。
+
+        仅当任务由 NSSCTF Arena 发起（携带 nss_context）时可用。
+        Args:
+            flag: 候选 Flag（如 NSSCTF{...}）。
+        """
+        if not nss_context:
+            mission.record("Orchestrator", "nss_submit_unavailable", flag=flag)
+            store.save(mission)
+            return "[不可用] 当前任务未接入 NSSCTF Arena，无法提交。请在 complete_mission 中报告 Flag。"
+        attempt_id = nss_context.get("attempt_id")
+        token = nss_context.get("token", "")
+        api_base = nss_context.get("api_base", "https://www.nssctf.cn/api")
+        if not attempt_id:
+            return "[不可用] 缺少 attempt_id，无法提交。"
+
+        candidate = (flag or "").strip()
+        if not candidate:
+            return "[拒绝] Flag 不能为空。"
+        if not candidate.startswith("NSSCTF{") and not candidate.startswith("flag"):
+            mission.record("Orchestrator", "nss_submit_format_warning", flag=candidate)
+            store.save(mission)
+            return (
+                f"[警告] Flag '{candidate}' 不符合常见格式（NSSCTF{...}），"
+                f"请确认候选值，确认无误后再提交。"
+            )
+
+        payload = {"flag": candidate}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        url = f"{api_base}/skill/agent/arena/attempt/{attempt_id}/submit/"
+        try:
+            resp = await httpx.AsyncClient(timeout=60.0).post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json().get("data", {})
+        except Exception as exc:
+            mission.record("Orchestrator", "nss_submit_error", flag=candidate, error=str(exc))
+            store.save(mission)
+            return f"[提交失败] 请求异常: {exc}"
+
+        correct = bool(data.get("correct"))
+        remaining = data.get("remaining_wrong_attempts")
+        mission.nss_submit = {
+            "attempt_id": attempt_id,
+            "flag": candidate,
+            "correct": correct,
+            "remaining_wrong_attempts": remaining,
+            "api_base": api_base,
+        }
+        mission.record(
+            "Orchestrator", "nss_submit",
+            flag=candidate, correct=correct, remaining_wrong_attempts=remaining,
+        )
+        store.save(mission)
+        if event_callback:
+            event_callback("nss_submit", **mission.nss_submit)
+        if correct:
+            mission.flag = candidate
+            mission.success = True
+            store.save(mission)
+            return (
+                f"[提交成功] ✅ NSSCTF 判定 Flag 正确！attempt_id={attempt_id}。"
+                f"剩余错误次数: {remaining}。可调用 complete_mission 以成功状态结束任务。"
+            )
+        return (
+            f"[提交失败] ❌ NSSCTF 判定 Flag 错误。剩余错误次数: {remaining}。"
+            f"请分析失败原因，重新尝试或调用 complete_mission 如实收尾。"
+        )
+
 
     tools = [
         AllowedFunctionTool(dispatch_recon, is_concurrency_safe=False),
@@ -356,15 +526,19 @@ def create_orchestrator_agent(
         AllowedFunctionTool(complete_mission, is_concurrency_safe=False),
         AllowedFunctionTool(request_exploitation_approval, is_concurrency_safe=False),
         AllowedFunctionTool(request_scope_expansion, is_concurrency_safe=False),
+        AllowedFunctionTool(submit_nss_flag, is_concurrency_safe=False),
+        create_query_memory_tool(),
     ]
-    prompt = ORCHESTRATOR_SYS_PROMPT
-    experience_hint = get_experience_hint()
-    if experience_hint:
-        prompt += f"\n\n{experience_hint}"
     return Agent(
         name="Orchestrator",
-        system_prompt=prompt,
+        system_prompt=ORCHESTRATOR_SYS_PROMPT,
         model=model,
         toolkit=Toolkit(tools=tools),
-        react_config=ReActConfig(max_iters=30),
+        react_config=ReActConfig(max_iters=30, interruption_raise_cancelled_error=True),
     )
+
+# 超过 20轮自动提出窗口显示是否迭代
+
+# 审核多方案选择，默认第一个，给用户选择
+
+#

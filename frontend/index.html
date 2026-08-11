@@ -4,61 +4,70 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>灵枢 — 多智能体安全测试控制台</title>
+<script src="/iconpark-icons.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
     --bg: #ffffff;
-    --sidebar-bg: #f6f8fa;
+    --sidebar-bg: #f7f7f7;
     --panel-bg: #ffffff;
-    --border: #d0d7de;
-    --border-light: #e3e8ed;
-    --text: #1f2328;
-    --text-dim: #656d76;
-    --accent: #0969da;
+    --border: #d6d6d6;
+    --border-light: #e9e9e9;
+    --text: #111111;
+    --text-dim: #626262;
+    --accent: #e31918;
     --green: #1a7f37;
-    --red: #cf222e;
-    --gold: #9a6700;
+    --red: #e31918;
+    --gold: #8f1716;
     --purple: #8957e5;
-    --orange: #bc4c00;
+    --orange: #7d1211;
     --input-bg: #ffffff;
     --success: #1a7f37;
-    --danger: #cf222e;
-    --bubble-user: #0969da;
-    --bubble-agent: #f0f3f6;
+    --danger: #e31918;
+    --bubble-user: #e31918;
+    --bubble-agent: #f5f5f5;
     --brain-color: #8957e5;
     --recon-color: #0969da;
     --attack-color: #cf222e;
     --analysis-color: #bc4c00;
     --orchestrator-color: #1a7f37;
     --system-color: #656d76;
+    --accent-glow: rgba(227,25,24,0.18);
   }
   :root[data-theme="dark"] {
-    --bg: #0d1117;
-    --sidebar-bg: #161b22;
-    --panel-bg: #0d1117;
-    --border: #30363d;
-    --border-light: #21262d;
-    --text: #e6edf3;
-    --text-dim: #8b949e;
-    --accent: #58a6ff;
+    --bg: #050505;
+    --sidebar-bg: #0b0b0b;
+    --panel-bg: #080808;
+    --border: #303030;
+    --border-light: #202020;
+    --text: #ffffff;
+    --text-dim: #a6a6a6;
+    --accent: #ff302f;
     --green: #3fb950;
-    --red: #f85149;
-    --gold: #d29922;
+    --red: #ff302f;
+    --gold: #ff6867;
     --purple: #bc8cff;
-    --orange: #f0883e;
-    --input-bg: #161b22;
+    --orange: #ff7473;
+    --input-bg: #101010;
     --success: #3fb950;
-    --danger: #f85149;
-    --bubble-user: #1f6feb;
-    --bubble-agent: #161b22;
+    --danger: #ff302f;
+    --bubble-user: #d81716;
+    --bubble-agent: #111111;
     --brain-color: #bc8cff;
     --recon-color: #58a6ff;
     --attack-color: #f85149;
     --analysis-color: #f0883e;
     --orchestrator-color: #3fb950;
     --system-color: #8b949e;
+    --accent-glow: rgba(255,48,47,0.32);
   }
   html, body { height: 100%; font-family: -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'WenQuanYi Micro Hei', sans-serif; background: var(--bg); color: var(--text); overflow: hidden; }
+  .ip-icon-wrap { display: inline-flex; width: 1em; height: 1em; flex: 0 0 auto; align-items: center; justify-content: center; color: currentColor; vertical-align: -0.14em; }
+  .ip-icon { display: block; width: 1em; height: 1em; color: currentColor; }
+  .ip-icon-wrap[data-icon="Loading"] .ip-icon { animation: iconParkSpin 0.9s linear infinite; }
+  @keyframes iconParkSpin { to { transform: rotate(360deg); } }
+  ::selection { background: rgba(227,25,24,0.24); color: var(--text); }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   ::-webkit-scrollbar { width: 5px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -66,14 +75,19 @@
   ::-webkit-scrollbar-thumb:hover { background: #afb8c1; }
 
   /* ── 登录界面 ── */
-  .login-page { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: linear-gradient(135deg, #ffffff 0%, #f0f3f6 50%, #ffffff 100%); display: flex; align-items: center; justify-content: center; z-index: 1000; overflow: hidden; }
-  .login-page::before { content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: radial-gradient(circle at 20% 30%, rgba(9,105,218,0.1) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(137,87,229,0.1) 0%, transparent 50%); pointer-events: none; }
+  .login-page { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: linear-gradient(135deg, #ffffff 0%, #f4f4f4 50%, #ffffff 100%); display: flex; align-items: center; justify-content: center; z-index: 1000; overflow: hidden; }
+  .login-page::before { content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: radial-gradient(circle at 20% 30%, rgba(227,25,24,0.1) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(0,0,0,0.06) 0%, transparent 50%); pointer-events: none; }
   .login-container { position: relative; width: 420px; max-width: calc(100vw - 24px); padding: 40px; background: rgba(255,255,255,0.95); border: 1px solid var(--border-light); border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.15); backdrop-filter: blur(10px); }
-  :root[data-theme="dark"] .login-page { background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #0d1117 100%); }
-  :root[data-theme="dark"] .login-page::before { background: radial-gradient(circle at 20% 30%, rgba(88,166,255,0.08) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(188,140,255,0.08) 0%, transparent 50%); }
-  :root[data-theme="dark"] .login-container { background: rgba(22,27,34,0.95); border-color: #30363d; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+  :root[data-theme="dark"] .login-page { background: linear-gradient(135deg, #020202 0%, #0b0b0b 50%, #020202 100%); }
+  :root[data-theme="dark"] .login-page::before { background: radial-gradient(circle at 20% 30%, rgba(255,48,47,0.14) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(255,255,255,0.035) 0%, transparent 50%); }
+  :root[data-theme="dark"] .login-container { background: rgba(8,8,8,0.95); border-color: #303030; box-shadow: 0 8px 36px rgba(0,0,0,0.7), 0 0 18px rgba(255,48,47,0.08); }
   .login-header { text-align: center; margin-bottom: 32px; }
-  .login-header .logo { font-size: 48px; margin-bottom: 12px; filter: drop-shadow(0 0 10px rgba(9,105,218,0.5)); }
+  .login-header .logo { width: 92px; height: 92px; margin: 0 auto 12px; filter: drop-shadow(0 0 10px rgba(207,34,46,0.22)); }
+  .theme-logo { display: inline-flex; align-items: center; justify-content: center; overflow: hidden; flex-shrink: 0; }
+  .theme-logo img { display: block; width: 100%; height: 100%; object-fit: contain; transform: scale(1.25) translateX(-5.2%); transform-origin: center; }
+  .theme-logo .logo-dark { display: none; }
+  :root[data-theme="dark"] .theme-logo .logo-light { display: none; }
+  :root[data-theme="dark"] .theme-logo .logo-dark { display: block; }
   .login-header h1 { font-size: 28px; font-weight: 700; background: linear-gradient(135deg, var(--accent), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; }
   .login-header .subtitle { font-size: 12px; color: var(--text-dim); letter-spacing: 2px; text-transform: uppercase; }
   .login-tabs { display: flex; margin-bottom: 24px; border-bottom: 1px solid var(--border-light); }
@@ -90,10 +104,10 @@
   .login-form .input-wrapper .toggle-password { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); cursor: pointer; color: var(--text-dim); font-size: 16px; transition: color 0.2s; }
   .login-form .input-wrapper .toggle-password:hover { color: var(--accent); }
   .login-btn { width: 100%; padding: 14px; border: none; border-radius: 6px; font-family: inherit; font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px; }
-  .login-btn.login { background: linear-gradient(135deg, var(--accent), #0969da); color: #fff; box-shadow: 0 4px 12px rgba(9,105,218,0.3); }
-  .login-btn.login:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(9,105,218,0.4); }
-  .login-btn.register { background: linear-gradient(135deg, var(--green), #2da44e); color: #fff; box-shadow: 0 4px 12px rgba(26,127,55,0.3); }
-  .login-btn.register:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(26,127,55,0.4); }
+  .login-btn.login { background: linear-gradient(135deg, #e31918, #a70e0d); color: #fff; box-shadow: 0 4px 12px rgba(227,25,24,0.25); }
+  .login-btn.login:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(227,25,24,0.38); }
+  .login-btn.register { background: linear-gradient(135deg, #1c1c1c, #000000); color: #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.22); }
+  .login-btn.register:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(227,25,24,0.24); }
   .login-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
   .login-error { color: var(--red); font-size: 13px; text-align: center; margin-top: 16px; display: none; }
   .login-error.show { display: block; }
@@ -110,7 +124,7 @@
   .sidebar { width: 240px; flex-shrink: 0; background: var(--sidebar-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
   .sidebar-header { padding: 16px 16px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
   .sidebar-brand { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; min-width: 0; }
-  .sidebar-brand .brand-icon { font-size: 22px; }
+  .sidebar-brand .brand-icon { width: 30px; height: 30px; border-radius: 7px; }
   .sidebar-brand h1 { font-size: 17px; font-weight: 700; background: linear-gradient(135deg, var(--accent), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
   .sidebar-brand .user-badge { margin-left: auto; min-width: 0; max-width: 128px; font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sidebar-brand .user-badge:hover { color: var(--accent); }
@@ -172,7 +186,7 @@
   /* ── 对话消息区域 ── */
   .chat-area { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 6px; background: var(--bg); }
   .chat-empty { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; color: var(--text-dim); }
-  .chat-empty .empty-icon { font-size: 48px; opacity: 0.3; }
+  .chat-empty .empty-icon { width: 82px; height: 82px; opacity: 0.24; border-radius: 16px; }
   .chat-empty .empty-text { font-size: 14px; }
   .msg-row { display: flex; max-width: 100%; min-width: 0; }
   .msg-row.user { justify-content: flex-end; }
@@ -353,7 +367,21 @@
   .tool-entry .tool-agent.system { color: var(--system-color); background: rgba(101,109,118,0.12); }
   .tool-entry .tool-name { min-width: 0; max-width: 45%; font-weight: 700; color: var(--accent); font-size: 11px; padding: 1px 6px; background: rgba(9,105,218,0.1); border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tool-entry .tool-raw-name { min-width: 0; flex: 1; color: var(--text-dim); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tool-entry .tool-args { font-size: 11px; color: var(--text); font-family: 'JetBrains Mono', monospace; word-break: break-all; line-height: 1.4; white-space: pre-wrap; max-height: 80px; overflow-y: auto; }
+  .tool-entry .tool-args { position: relative; margin-top: 6px; padding: 8px 9px; max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; background: var(--input-bg); color: var(--text); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+  .tool-entry .tool-args:empty { display: none; }
+  .tool-entry .tool-args.pending { padding-top: 22px; font-family: 'JetBrains Mono', monospace; white-space: pre-wrap; word-break: break-word; }
+  .tool-entry .tool-args.pending::before { content: '接收中'; position: absolute; top: 4px; left: 8px; color: var(--text-dim); font-family: inherit; font-size: 9px; letter-spacing: 0.6px; }
+  .tool-arg-row { display: grid; grid-template-columns: minmax(72px, 30%) minmax(0, 1fr); gap: 8px; align-items: start; padding: 5px 0; border-bottom: 1px solid var(--border-light); }
+  .tool-arg-row:last-child { border-bottom: none; }
+  .tool-arg-row.block { display: block; }
+  .tool-arg-key { color: var(--accent); font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700; overflow-wrap: anywhere; }
+  .tool-arg-value { min-width: 0; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tool-command, .tool-json { max-width: 100%; margin: 5px 0 0; padding: 8px 10px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 4px; background: var(--bg); color: var(--text); font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 10px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; }
+  .tool-prose { margin-top: 4px; color: var(--text); font-family: inherit; font-size: 11px; line-height: 1.65; white-space: normal; }
+  .tool-value-string { color: var(--text); }
+  .tool-value-number { color: var(--gold); font-family: 'JetBrains Mono', monospace; }
+  .tool-value-boolean { color: var(--orchestrator-color); font-family: 'JetBrains Mono', monospace; font-weight: 700; }
+  .tool-value-null { color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-style: italic; }
   .tool-entry .tool-time { font-size: 9px; color: var(--text-dim); margin-top: 4px; }
 
   /* ── 靶机信息面板 ── */
@@ -469,6 +497,60 @@
   :root[data-theme="dark"] .agent-content .thinking-collapsible .thinking-body { color: #8b949e; }
   :root[data-theme="dark"] .agent-content .md-h1 { border-bottom-color: #30363d; }
 
+  /* ── 红 / 黑 / 白主题统一 ── */
+  .btn-new-session { background: rgba(227,25,24,0.06); border-color: rgba(227,25,24,0.38); }
+  .btn-new-session:hover { background: rgba(227,25,24,0.12); border-color: var(--accent); }
+  .session-item.active { background: rgba(227,25,24,0.09); }
+  .phase-tag.planning, .phase-tag.recon { background: rgba(227,25,24,0.12); }
+  .msg-bubble.user-bubble { box-shadow: 0 3px 10px rgba(227,25,24,0.12); }
+  .agent-content .md-json-block { border-color: rgba(227,25,24,0.24); }
+  .agent-content .md-json-block summary { background: rgba(227,25,24,0.07); }
+  .right-panel-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tool-entry .tool-name { color: var(--accent); background: rgba(227,25,24,0.09); }
+  .plan-item.current-phase { background: rgba(227,25,24,0.045); border-left-color: var(--accent); }
+  .plan-item .plan-tag.phase-planning, .mini-plan-item .mp-phase.ph-planning { color: var(--accent); background: rgba(227,25,24,0.11); }
+  .input-area .send-btn { background: var(--accent); }
+  .input-area .send-btn:hover { background: #b80f0e; }
+  .login-header h1, .sidebar-brand h1 { background: linear-gradient(135deg, #e31918, #151515); -webkit-background-clip: text; background-clip: text; }
+
+  :root[data-theme="dark"] .agent-log-panel,
+  :root[data-theme="dark"] .target-info-panel,
+  :root[data-theme="dark"] .plan-panel,
+  :root[data-theme="dark"] .tool-log-panel { background: #080808; }
+  :root[data-theme="dark"] .agent-grid-panel { background: #0b0b0b; }
+  :root[data-theme="dark"] .agent-grid-header.brain { background: rgba(188,140,255,0.08); color: var(--brain-color); }
+  :root[data-theme="dark"] .agent-grid-header.recon { background: rgba(88,166,255,0.08); color: var(--recon-color); }
+  :root[data-theme="dark"] .agent-grid-header.attack { background: rgba(248,81,73,0.08); color: var(--attack-color); }
+  :root[data-theme="dark"] .agent-grid-header.analysis { background: rgba(240,136,62,0.08); color: var(--analysis-color); }
+  :root[data-theme="dark"] .tool-entry,
+  :root[data-theme="dark"] .agent-grid-body .log-entry { background: rgba(255,255,255,0.025); border-color: #303030; }
+  :root[data-theme="dark"] .tool-entry .tool-args { border-color: #303030; background: #0d0d0d; }
+  :root[data-theme="dark"] .tool-command,
+  :root[data-theme="dark"] .tool-json { background: #070707; border-color: #303030; border-left-color: var(--accent); }
+  :root[data-theme="dark"] .session-item:hover,
+  :root[data-theme="dark"] .right-panel-tab:hover { background: rgba(255,255,255,0.035); }
+  :root[data-theme="dark"] .session-item.active { background: rgba(255,48,47,0.12); box-shadow: inset 2px 0 0 var(--accent), 0 0 12px rgba(255,48,47,0.09); }
+  :root[data-theme="dark"] .plan-item.current-phase { background: rgba(255,48,47,0.055); border-left-color: var(--accent); }
+  :root[data-theme="dark"] .agent-content .md-json-block summary { background: rgba(255,48,47,0.1); color: var(--accent); }
+  :root[data-theme="dark"] .upload-zone { background: rgba(255,255,255,0.025); border-color: #3a3a3a; }
+  :root[data-theme="dark"] .upload-zone:hover,
+  :root[data-theme="dark"] .upload-zone.dragover { background: rgba(255,48,47,0.055); border-color: var(--accent); }
+  :root[data-theme="dark"] .upload-file-info { background: rgba(255,48,47,0.08); border-color: rgba(255,48,47,0.25); }
+  :root[data-theme="dark"] .msg-bubble.user-bubble { box-shadow: 0 0 14px rgba(255,48,47,0.2); }
+  :root[data-theme="dark"] .right-panel-tab.active,
+  :root[data-theme="dark"] .phase-tag.planning,
+  :root[data-theme="dark"] .phase-tag.recon { text-shadow: 0 0 8px rgba(255,48,47,0.34); }
+  :root[data-theme="dark"] .right-panel-resizer:hover::after,
+  :root[data-theme="dark"] .agent-log-panel.resizing .right-panel-resizer::after { box-shadow: 0 0 9px 2px rgba(255,48,47,0.28); }
+  :root[data-theme="dark"] .input-area textarea:focus,
+  :root[data-theme="dark"] .login-form .input-wrapper input:focus { box-shadow: 0 0 0 2px rgba(255,48,47,0.11), 0 0 12px rgba(255,48,47,0.08); }
+  :root[data-theme="dark"] .input-area .send-btn,
+  :root[data-theme="dark"] .login-btn.login { box-shadow: 0 0 14px rgba(255,48,47,0.22); }
+  :root[data-theme="dark"] .theme-logo { filter: drop-shadow(0 0 7px rgba(255,48,47,0.16)); }
+  :root[data-theme="dark"] .login-header h1,
+  :root[data-theme="dark"] .sidebar-brand h1 { background: linear-gradient(135deg, #ff302f, #ffffff); -webkit-background-clip: text; background-clip: text; }
+  @keyframes planPulseDark { 0%, 100% { background: transparent; } 50% { background: rgba(255,48,47,0.045); } }
+
   /* ── 移动端 ── */
   .hamburger { display: none; position: fixed; top: 10px; left: 10px; z-index: 800; width: 36px; height: 36px; border: none; border-radius: 6px; background: var(--panel-bg); color: var(--text); font-size: 18px; cursor: pointer; align-items: center; justify-content: center; }
   @media (max-width: 1100px) {
@@ -496,7 +578,7 @@
 <div class="login-page" id="loginPage">
   <div class="login-container">
     <div class="login-header">
-      <div class="logo">🛡️</div>
+      <div class="logo theme-logo"><img class="logo-light" src="/logo2.png" alt="灵枢"><img class="logo-dark" src="/logored.png" alt="灵枢"></div>
       <h1>灵枢 Lingshu</h1>
       <div class="subtitle">多智能体授权安全测试系统</div>
     </div>
@@ -530,7 +612,7 @@
   <!-- 左：会话侧边栏 -->
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
-      <div class="sidebar-brand"><span class="brand-icon">🛡️</span><h1>灵枢</h1><div style="display:flex;gap:6px;align-items:center;margin-left:auto;"><button class="btn-theme-toggle" id="btnThemeToggle" onclick="toggleTheme()" title="切换主题">🌙</button><span class="user-badge" id="userBadge" onclick="handleLogout()" title="点击退出">👤 <span id="userName"></span> | 退出</span></div></div>
+      <div class="sidebar-brand"><span class="brand-icon theme-logo"><img class="logo-light" src="/logo2.png" alt="灵枢"><img class="logo-dark" src="/logored.png" alt="灵枢"></span><h1>灵枢</h1><div style="display:flex;gap:6px;align-items:center;margin-left:auto;min-width:0;"><button class="btn-theme-toggle" id="btnThemeToggle" onclick="toggleTheme()" title="切换主题">🌙</button><span class="user-badge" id="userBadge" onclick="handleLogout()" title="点击退出">👤 <span id="userName"></span> | 退出</span></div></div>
       <button class="btn-new-session" onclick="resetRerunState(); openNewSessionModal()">＋ 新建会话</button>
     </div>
     <div class="sidebar-search"><span class="search-icon">🔍</span><input type="text" id="searchInput" placeholder="搜索目标..." oninput="filterSessions()"></div>
@@ -547,7 +629,7 @@
       </div>
     </div>
     <div class="chat-area" id="chatArea">
-      <div class="chat-empty" id="chatEmpty"><div class="empty-icon">🛡️</div><div class="empty-text">选择或创建一个会话开始对话</div></div>
+      <div class="chat-empty" id="chatEmpty"><div class="empty-icon theme-logo"><img class="logo-light" src="/logo2.png" alt="灵枢"><img class="logo-dark" src="/logored.png" alt="灵枢"></div><div class="empty-text">选择或创建一个会话开始对话</div></div>
     </div>
     <div class="input-area">
       <textarea id="msgInput" placeholder="输入消息..." rows="1" disabled></textarea>
@@ -784,7 +866,9 @@ App.onSetInputState = (enabled, placeholder) => {
   const btn = document.getElementById('sendBtn');
   inp.disabled = !enabled;
   btn.disabled = !enabled;
-  inp.placeholder = placeholder || (enabled ? '输入消息...（Enter 发送，Shift+Enter 换行）' : '会话已结束，请新建会话');
+  btn.textContent = enabled ? '⚡' : '➤';
+  btn.title = enabled ? '发送消息（将中断当前操作并注入指令）' : '会话已结束';
+  inp.placeholder = placeholder || (enabled ? '输入消息...（Enter 发送，Shift+Enter 换行，发送将中断当前操作）' : '会话已结束，请新建会话');
 };
 
 App.onClearChat = (resetToEmpty) => {
@@ -797,7 +881,7 @@ App.onClearChat = (resetToEmpty) => {
   renderPlanItems([], '');
   resetTargetInfo();
   if (resetToEmpty) {
-    area.innerHTML = '<div class="chat-empty" id="chatEmpty"><div class="empty-icon">🛡️</div><div class="empty-text">选择或创建一个会话开始对话</div></div>';
+    area.innerHTML = '<div class="chat-empty" id="chatEmpty"><div class="empty-icon theme-logo"><img class="logo-light" src="/logo2.png" alt="灵枢"><img class="logo-dark" src="/logored.png" alt="灵枢"></div><div class="empty-text">选择或创建一个会话开始对话</div></div>';
     document.getElementById('panelTarget').textContent = '未选择会话';
     document.getElementById('panelPhase').className = 'phase-tag idle';
     document.getElementById('panelPhase').textContent = '--';
@@ -895,13 +979,67 @@ function getToolChineseName(toolName) {
   return TOOL_NAME_CN[toolName] || toolName;
 }
 
+function formatToolScalar(value) {
+  if (value === null) return '<span class="tool-value-null">null</span>';
+  if (typeof value === 'boolean') return `<span class="tool-value-boolean">${value}</span>`;
+  if (typeof value === 'number') return `<span class="tool-value-number">${value}</span>`;
+  return `<span class="tool-value-string">${escapeHtml(String(value))}</span>`;
+}
+
+function formatToolArgsObject(value) {
+  if (Array.isArray(value)) {
+    return `<pre class="tool-json">${escapeHtml(JSON.stringify(value, null, 2))}</pre>`;
+  }
+  if (!value || typeof value !== 'object') return formatToolScalar(value);
+
+  const commandKey = /^(command|cmd|script|code|shell|expression)$/i;
+  const proseKey = /^(reason|thought|thinking|content|description|target_info|objective|report)$/i;
+  return Object.entries(value).map(([key, item]) => {
+    const safeKey = escapeHtml(key);
+    if (typeof item === 'string' && commandKey.test(key)) {
+      return `<div class="tool-arg-row block"><div class="tool-arg-key">${safeKey}</div><pre class="tool-command">${escapeHtml(item)}</pre></div>`;
+    }
+    if (typeof item === 'string' && proseKey.test(key)) {
+      return `<div class="tool-arg-row block"><div class="tool-arg-key">${safeKey}</div><div class="tool-prose markdown-rendered">${mdRender(item)}</div></div>`;
+    }
+    if (item && typeof item === 'object') {
+      return `<div class="tool-arg-row block"><div class="tool-arg-key">${safeKey}</div><pre class="tool-json">${escapeHtml(JSON.stringify(item, null, 2))}</pre></div>`;
+    }
+    return `<div class="tool-arg-row"><div class="tool-arg-key">${safeKey}</div><div class="tool-arg-value">${formatToolScalar(item)}</div></div>`;
+  }).join('');
+}
+
+function renderToolArgs(argsEl, raw) {
+  argsEl.dataset.raw = raw;
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    argsEl.className = 'tool-args';
+    argsEl.textContent = '';
+    return;
+  }
+  try {
+    argsEl.className = 'tool-args formatted';
+    argsEl.innerHTML = formatToolArgsObject(JSON.parse(trimmed));
+  } catch {
+    if (!/^[\[{]/.test(trimmed)) {
+      argsEl.className = 'tool-args formatted';
+      argsEl.innerHTML = `<pre class="tool-command">${escapeHtml(raw)}</pre>`;
+    } else {
+      argsEl.className = 'tool-args pending';
+      argsEl.textContent = raw;
+    }
+  }
+}
+
 App.onToolCallStart = (data) => {
   const panel = document.getElementById('toolLogPanel');
+  const entryId = 'tool-' + data.tool_call_id;
+  if (document.getElementById(entryId)) return;
   const empty = panel.querySelector('.plan-empty');
   if (empty) empty.remove();
   const entry = document.createElement('div');
   entry.className = 'tool-entry';
-  entry.id = 'tool-' + data.tool_call_id;
+  entry.id = entryId;
   const now = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const agentClass = getAgentClass(data.agent);
   const cnName = getToolChineseName(data.tool_name);
@@ -913,14 +1051,29 @@ App.onToolCallDelta = (data) => {
   const entry = document.getElementById('tool-' + data.tool_call_id);
   if (entry) {
     const argsEl = entry.querySelector('.tool-args');
-    if (argsEl) argsEl.textContent += (data.delta || '');
+    if (argsEl) {
+      const raw = (argsEl.dataset.raw || '') + (data.delta || '');
+      renderToolArgs(argsEl, raw);
+    }
     entry.parentElement.scrollTop = entry.parentElement.scrollHeight;
   }
+};
+App.onToolCallComplete = (data) => {
+  let entry = document.getElementById('tool-' + data.tool_call_id);
+  if (!entry) {
+    App.onToolCallStart?.(data);
+    entry = document.getElementById('tool-' + data.tool_call_id);
+  }
+  const argsEl = entry?.querySelector('.tool-args');
+  if (argsEl) renderToolArgs(argsEl, data.full_args || '');
 };
 
 // ── 人工审批回调绑定 ──
 App.onApprovalRequired = (event) => showApprovalModal(event);
 App.onApprovalResolved = (event) => hideApprovalModal();
+App.onSessionDeleted = (sessionId) => {
+  if (_approvalSessionId === sessionId) hideApprovalModal();
+};
 
 // ── 作战计划回调绑定 ──
 let _planFirstShow = true;
@@ -1114,6 +1267,7 @@ function handleLogout() { App.handleLogout(); }
 function filterSessions() { App.onSessionListRender(App.sessions); }
 
 async function doSwitchSession(id) {
+  if (_approvalSessionId && _approvalSessionId !== id) hideApprovalModal();
   await App.switchSession(id, {
     loadMessages: async (sid) => {
       try {
@@ -1189,14 +1343,11 @@ function renderHistoryMessage(msg) {
   } else if (['text_start','text_delta','text_end','thinking_start','thinking_delta','thinking_end'].includes(msg.event_type)) {
     // Agent 流式输出事件 → 历史回放
     // text_delta/thinking_delta 未被持久化，回放时跳过（text_end 有完整 full_text）
+    // text_start/thinking_start 不再创建空气泡：内容来自 _end，空块直接不渲染。
     const isThinking = msg.event_type === 'thinking_end' || msg.event_type === 'thinking_start';
     const agent = msg.agent_name || 'system';
-    if (msg.event_type === 'text_start') {
-      // 创建空气泡，供 text_end 更新
-      App.onRenderAgentMessage(agent, '', '', true);
-    } else if (msg.event_type === 'thinking_start') {
-      // 创建空思考气泡，供 thinking_end 更新
-      App.onRenderAgentMessage(agent, '', 'thinking', true);
+    if (msg.event_type === 'text_start' || msg.event_type === 'thinking_start') {
+      // 空块（无 _end 内容）不建气泡，避免 web 端出现空消息
     } else if (msg.event_type === 'text_delta' || msg.event_type === 'thinking_delta') {
       // text_delta 未持久化，跳过
     } else if ((msg.event_type === 'text_end' || msg.event_type === 'thinking_end') && msg.content) {
@@ -1219,14 +1370,31 @@ function renderHistoryMessage(msg) {
       }
     }
   } else if (msg.event_type === 'tool_call_start') {
-    if (App.onToolCallStart) App.onToolCallStart({ tool_call_id: msg.seq, tool_name: msg.content, agent: msg.agent_name });
-    App.onRenderSystemMessage(`🔧 [${msg.agent_name || 'Agent'}] 调用工具: ${msg.content || '?'}`);
-  } else if (['tool_call_end', 'target_info', 'flag_found'].includes(msg.event_type)) {
+    let tool = {};
+    try { tool = JSON.parse(msg.content || '{}'); } catch { tool = { tool_name: msg.content }; }
+    const toolCallId = tool.tool_call_id || `history-${msg.seq}`;
+    const toolName = tool.tool_name || msg.content || '?';
+    App.onToolCallStart?.({ tool_call_id: toolCallId, tool_name: toolName, agent: msg.agent_name });
+    App.onRenderSystemMessage(`🔧 [${msg.agent_name || 'Agent'}] 调用工具: ${toolName}`);
+  } else if (msg.event_type === 'tool_call_end') {
+    let tool = {};
+    try { tool = JSON.parse(msg.content || '{}'); } catch {}
+    if (tool.tool_call_id) {
+      App.onToolCallComplete?.({
+        tool_call_id: tool.tool_call_id,
+        tool_name: tool.tool_name || '',
+        agent: msg.agent_name,
+        full_args: tool.full_args || '',
+      });
+    }
+  } else if (['target_info', 'flag_found'].includes(msg.event_type)) {
     // 这些事件在实时模式下不生成普通聊天气泡，历史回放保持一致。
   } else {
     // agent message 事件：显示在聊天面板
     const content = msg.content || '';
-    App.onRenderAgentMessage(msg.agent_name || 'system', content, '', true);
+    if ((content || '').trim()) {
+      App.onRenderAgentMessage(msg.agent_name || 'system', content, '', true);
+    }
   }
 }
 
@@ -1436,8 +1604,14 @@ async function sendMessage() {
 
 async function cancelSession(id) {
   if (!id) return;
+  if (!confirm('确定停止当前任务？\n\n将终止任务及所有由任务启动的命令（含后台进程）。')) return;
+  const btn = document.querySelector(`button[onclick="cancelSession('${id}')"]`);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ 正在停止...'; }
   try { await App.cancelSession(id); }
-  catch (e) { App.onRenderSystemMessage('取消请求失败: ' + e.message); }
+  catch (e) {
+    App.onRenderSystemMessage('停止请求失败: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = '⏹ 停止'; }
+  }
 }
 
 async function deleteSession(id) {
@@ -1589,7 +1763,11 @@ function _renderMiniPlan(planItems) {
 }
 
 function showApprovalModal(event) {
-  _approvalSessionId = event.session_id || App.currentSessionId;
+  const sessionId = event.session_id || App.currentSessionId;
+  if (!sessionId || sessionId !== App.currentSessionId || App.deletedSessionIds.has(sessionId)) {
+    return;
+  }
+  _approvalSessionId = sessionId;
 
   // ── 结构化扫描摘要 ──
   const summary = event.scan_summary || {};
@@ -1629,6 +1807,13 @@ async function handleApprovalDecision(decision) {
     });
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}));
+      if (resp.status === 404) {
+        hideApprovalModal();
+        App.deletedSessionIds.add(sid);
+        await App.loadSessions();
+        App.onRenderSystemMessage?.('该会话已删除，审批请求已失效');
+        return;
+      }
       throw new Error(data.detail || '审批答复发送失败');
     }
     hideApprovalModal();
@@ -1738,7 +1923,12 @@ async function restorePendingApproval(sessionId) {
     const resp = await App.authFetch(`/api/session/${sessionId}/pending_approval`);
     if (!resp.ok) return;
     const data = await resp.json();
-    if (data.pending && data.event) {
+    if (
+      App.currentSessionId === sessionId
+      && !App.deletedSessionIds.has(sessionId)
+      && data.pending
+      && data.event
+    ) {
       const evt = data.event;
       evt.session_id = sessionId;
       showApprovalModal(evt);

@@ -6,6 +6,8 @@ import json
 import os
 from datetime import datetime
 
+from Tools.tooling import AllowedFunctionTool
+
 # 记忆文件路径
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 _MEMORY_FILE = os.path.join(_PROJECT_ROOT, "../.LongMemory", "agentic_memory.json")
@@ -114,3 +116,61 @@ def get_experience_hint():
         cves = list(set(e["cve"] for e in entries[-3:]))
         hints.append(f"- {service}: 可利用 {', '.join(cves)}")
     return "\n".join(hints)
+
+
+def _format_experience(result: dict, service: str) -> str:
+    """把 query_experience 结果格式化为给 LLM 的 markdown 文本。"""
+    if service:
+        exploits = result.get("known_exploits", [])
+        missions = result.get("related_missions", [])
+        if not exploits and not missions:
+            return (
+                f"未找到服务「{service}」相关的历史攻击经验，"
+                "请依靠当前侦察证据制定方案，不要臆测 CVE。"
+            )
+        lines = [f"## 历史经验：{service}"]
+        if exploits:
+            lines.append("已知可利用 CVE：")
+            for e in exploits:
+                lines.append(f"- {e.get('cve', '?')}（记录于 {e.get('timestamp', '?')}）")
+        if missions:
+            lines.append("相关历史任务：")
+            for m in missions:
+                mark = "成功" if m.get("success") else "失败"
+                lines.append(
+                    f"- [{mark}] 目标 {m.get('target', '?')}，目标 {m.get('goal', '?')}"
+                    f" → {str(m.get('summary', ''))[:200]}",
+                )
+        return "\n".join(lines)
+
+    recent = result.get("recent_missions", [])
+    total = result.get("total_missions", 0)
+    if not recent:
+        return "当前暂无历史任务经验。"
+    lines = [f"## 近期历史任务（共 {total} 条，最近 {len(recent)} 条）"]
+    for m in recent:
+        mark = "成功" if m.get("success") else "失败"
+        flag = f"，flag={m.get('flag')}" if m.get("flag") else ""
+        lines.append(
+            f"- [{mark}] {m.get('target', '?')} · {m.get('goal', '?')} · {m.get('timestamp', '?')}{flag}",
+        )
+    return "\n".join(lines)
+
+
+def create_query_memory_tool() -> AllowedFunctionTool:
+    """创建 QueryMemory 工具：按服务名查询长期记忆中的历史攻击经验。"""
+
+    def QueryMemory(service: str = "", limit: int = 5) -> str:
+        """查询长期记忆中的历史攻击经验。
+
+        服务名精确匹配已知 CVE 与相关历史任务；
+        服务名为空时返回近期任务概览。
+
+        Args:
+            service: 服务名（如 "Apache 2.4.49"），留空则返回近期任务。
+            limit: 返回条数上限，默认 5。
+        """
+        result = query_experience(service=service.strip() or None, limit=limit)
+        return _format_experience(result, service.strip())
+
+    return AllowedFunctionTool(QueryMemory, is_read_only=True)

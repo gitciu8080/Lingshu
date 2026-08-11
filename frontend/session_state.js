@@ -24,6 +24,7 @@ class LingShuState {
     this.lastMessageSeq = 0;
     this.isAutoScroll = true;
     this.activeAgentBubbles = {}; // agent_name → DOM 元素引用
+    this.deletedSessionIds = new Set();
 
     this._sseAbortController = null;
     this._sseRetryCount = 0;
@@ -44,10 +45,12 @@ class LingShuState {
     this.onClearChat = null;
     this.onHideLogin = null;
     this.onShowLogin = null;
+    this.onSessionDeleted = null;
 
     // 工具调用记录面板回调
     this.onToolCallStart = null;      // (data) => void — 工具调用开始
     this.onToolCallDelta = null;      // (data) => void — 工具参数增量
+    this.onToolCallComplete = null;   // (data) => void — 工具调用完整参数
 
     // 人工审批回调
     this.onApprovalRequired = null;    // (event) => void — 弹出审批模态框
@@ -198,40 +201,59 @@ class LingShuState {
     return data.session_id;
   }
 
-  /** 发送用户消息 */
+  /** 发送用户消息（运行时自动中断当前操作并注入指令） */
   async sendMessage(content) {
     if (!this.currentSessionId) return;
-    await this.authFetch(`/api/session/${this.currentSessionId}/message`, {
+    const resp = await this.authFetch(`/api/session/${this.currentSessionId}/message`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
     });
+    const data = await resp.json().catch(() => ({}));
+    if (data.status === 'steering') {
+      this.onRenderSystemMessage?.('⚡ 指令已中断当前操作并注入，即将继续执行……');
+    }
   }
 
-  /** 取消运行中的会话 */
+  /** 立即停止运行中的会话（后端立即生效，进程清理在后台完成） */
   async cancelSession(id) {
     if (!id) return;
-    await this.authFetch(`/api/session/${id}/cancel`, { method: 'POST' });
-    this.onRenderSystemMessage?.('已发送取消请求...');
-    // 短暂延迟后刷新列表和标题栏，等待后端状态更新
-    setTimeout(() => {
-      this.loadSessions();
-      if (this.currentSessionId === id) {
-        this.onSetInputState?.(false, '会话已取消，请新建会话');
-        this.onUpdatePhaseTag?.('cancelled');
-      }
-    }, 500);
+    // 立即反馈：先关闭 SSE、禁用输入，不等后台清理
+    this.closeSSE();
+    this.onSetInputState?.(false, '会话已停止，请新建会话');
+    this.onUpdatePhaseTag?.('cancelled');
+    this.onApprovalResolved?.({ approved: false, cancelled: true, session_id: id });
+    this.onRenderSystemMessage?.('⏹ 正在停止任务...');
+    try {
+      await this.authFetch(`/api/session/${id}/cancel`, { method: 'POST' });
+    } catch (e) {
+      // 即使请求失败也保持停止态，避免误报运行中
+      this.onRenderSystemMessage?.('已本地停止，后台清理请稍候: ' + e.message);
+    }
+    await this.loadSessions();
+    this.onRenderSystemMessage?.('✅ 任务已停止，后台进程正在清理');
   }
 
   /** 删除会话 */
   async deleteSession(id) {
-    await this.authFetch(`/api/session/${id}`, { method: 'DELETE' });
+    this.deletedSessionIds.add(id);
     if (this.currentSessionId === id) {
       this.closeSSE();
       this.currentSessionId = null;
+      this.onSessionDeleted?.(id);
       this.onClearChat?.(true); // true = 重置为空状态
     }
-    await this.loadSessions();
+    try {
+      const resp = await this.authFetch(`/api/session/${id}`, { method: 'DELETE' });
+      if (!resp.ok && resp.status !== 404) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(data.detail || '删除失败');
+      }
+      await this.loadSessions();
+    } catch (error) {
+      this.deletedSessionIds.delete(id);
+      throw error;
+    }
   }
 
   // ══════════════════════════════════════
@@ -317,7 +339,10 @@ class LingShuState {
   /** SSE 事件路由 */
   handleSSEEvent(event) {
     // 防串扰：仅处理当前选中会话的事件，防止切换会话或旧 SSE 残留
-    if (event.session_id && this.currentSessionId && event.session_id !== this.currentSessionId) {
+    if (event.session_id && (
+      this.deletedSessionIds.has(event.session_id)
+      || event.session_id !== this.currentSessionId
+    )) {
       return;
     }
     if (event.seq && event.seq <= this.lastMessageSeq) {
@@ -330,6 +355,15 @@ class LingShuState {
     if (!this._streamBubbles) this._streamBubbles = {};
 
     switch (event.type) {
+      case 'session_deleted':
+        this.deletedSessionIds.add(event.session_id);
+        this.closeSSE();
+        this.currentSessionId = null;
+        this.onSessionDeleted?.(event.session_id);
+        this.onClearChat?.(true);
+        this.loadSessions();
+        break;
+
       case 'user_message':
         this.onRenderUserMessage?.(event.content || '');
         break;
@@ -368,6 +402,9 @@ class LingShuState {
           this.onScrollToBottom?.();
         } else if (event.full_text) {
           this.onRenderAgentMessage?.(event.agent || 'system', event.full_text);
+        } else if (ref && ref.bubble && !(ref.contentEl && (ref.contentEl.textContent || '').trim())) {
+          // 无内容（空气泡）：移除，避免 web 端出现空消息
+          ref.bubble.remove();
         }
         delete this._streamBubbles[event.agent];
         delete this.activeAgentBubbles[event.agent];
@@ -402,6 +439,9 @@ class LingShuState {
             if (ref.contentEl) {
               ref.contentEl.innerHTML = '<details class="thinking-collapsible" open><summary>🧠 思考过程 (点击折叠)</summary><div class="thinking-body">' + mdRender(event.full_text) + '</div></details>';
             }
+          } else if (ref && ref.bubble && !(ref.contentEl && (ref.contentEl.textContent || '').trim())) {
+            // 空思考块（无内容）：仅移除确实为空的空气泡，避免误删同 agent 有内容的文本气泡
+            ref.bubble.remove();
           }
           delete this._streamBubbles[key];
           delete this.activeAgentBubbles[event.agent];
@@ -437,7 +477,26 @@ class LingShuState {
         break;
 
       case 'tool_call_end':
-        // 工具调用结束
+        this.onToolCallComplete?.({
+          tool_call_id: event.tool_call_id,
+          tool_name: event.tool_name,
+          agent: event.agent,
+          full_args: event.full_args || '',
+        });
+        break;
+
+      case 'tool_call_snapshot':
+        this.onToolCallStart?.({
+          tool_call_id: event.tool_call_id,
+          tool_name: event.tool_name,
+          agent: event.agent,
+        });
+        this.onToolCallComplete?.({
+          tool_call_id: event.tool_call_id,
+          tool_name: event.tool_name,
+          agent: event.agent,
+          full_args: event.full_args || '',
+        });
         break;
 
       case 'target_info':
@@ -454,6 +513,10 @@ class LingShuState {
 
       case 'message': {
         const msgText = event.content || event.message || '';
+        if (!(msgText || '').trim()) {
+          // 空最终消息不渲染，避免空气泡
+          break;
+        }
         this.onRenderAgentMessage?.(event.agent || 'system', msgText);
         break;
       }
