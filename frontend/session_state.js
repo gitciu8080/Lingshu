@@ -2,7 +2,7 @@
  * session_state.js — 灵枢多会话状态管理模块
  * 
  * 核心职责：
- * - JWT 认证与鉴权请求封装
+ * - JWT 认证状态与统一 transport 管理
  * - 会话生命周期管理（创建/切换/取消/删除）
  * - SSE 流式连接管理（fetch + ReadableStream，Bearer Token 认证）
  * - 会话列表轮询
@@ -16,7 +16,7 @@
 //  LingShuState — 核心状态管理类
 // ══════════════════════════════════════
 class LingShuState {
-  constructor() {
+  constructor({ transport = null, useAgentScope = window.LINGSHU_AGENT_SERVICE_ENABLED === true } = {}) {
     this.token = '';
     this.sessions = [];
     this.currentSessionId = null;
@@ -28,12 +28,29 @@ class LingShuState {
 
     this._sseAbortController = null;
     this._sseRetryCount = 0;
+    this._accountSseAbortController = null;
     this._sessionPollTimer = null;
+
+    this.apiClient = new ApiClient({
+      getToken: () => this.getAuthToken(),
+      onUnauthorized: () => {
+        this.clearAuthToken();
+        this.onShowLogin?.();
+      },
+    });
+    this.transport = transport || (useAgentScope
+      ? new AgentScopeTransport(this.apiClient, {
+          agentId: window.LINGSHU_AGENT_ID,
+          sessionConfig: window.LINGSHU_AGENT_SESSION_CONFIG || {},
+        })
+      : new LegacyLingshuTransport(this.apiClient));
+    this._agentEventReducer = new AgentEventReducer();
 
     // UI 回调（由 index.html 设置）
     this.onRenderUserMessage = null;
     this.onRenderAgentMessage = null;
     this.onRenderSystemMessage = null;
+    this.onRenderExpertJoined = null;
     this.onRenderPhaseDivider = null;
     this.onUpdatePhaseTag = null;
     this.onSetInputState = null;
@@ -78,19 +95,15 @@ class LingShuState {
   }
 
   clearAuthToken() {
+    this.closeAccountSSE();
     localStorage.removeItem(LingShuState.AUTH_KEY);
     this.token = '';
   }
 
   /** 统一请求封装：自动携带 Bearer Token，401 时清除令牌并跳回登录页 */
   async authFetch(url, options = {}) {
-    const t = this.getAuthToken();
-    const headers = Object.assign({}, options.headers);
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const resp = await fetch(url, Object.assign({}, options, { headers }));
+    const resp = await this.apiClient.raw(url, options);
     if (resp.status === 401) {
-      this.clearAuthToken();
-      this.onShowLogin?.();
       throw new Error('认证已过期');
     }
     return resp;
@@ -102,12 +115,11 @@ class LingShuState {
     if (!t) { this.onShowLogin?.(); return; }
     this.token = t;
     try {
-      const resp = await fetch('/auth/me', {
-        headers: { 'Authorization': 'Bearer ' + t }
-      });
+      const resp = await this.apiClient.raw('/auth/me');
       if (!resp.ok) { this.clearAuthToken(); this.onShowLogin?.(); return; }
       const user = await resp.json();
       this.onHideLogin?.(user);
+      this.connectAccountSSE();
       await this.loadSessions();
       this.startSessionPolling();
       // 页面加载/刷新后自动选中第一个会话并加载历史
@@ -129,6 +141,7 @@ class LingShuState {
     this.clearAuthToken();
     this.stopSessionPolling();
     this.closeSSE();
+    this.closeAccountSSE();
     window.location.reload();
   }
 
@@ -139,9 +152,7 @@ class LingShuState {
   async loadSessions() {
     if (!this.getAuthToken()) return;
     try {
-      const resp = await this.authFetch('/api/sessions?limit=50');
-      if (!resp.ok) return;
-      const data = await resp.json();
+      const data = await this.transport.listSessions(50);
       this.sessions = data.sessions || [];
       this.onSessionListRender?.(this.sessions);
     } catch {}
@@ -156,17 +167,15 @@ class LingShuState {
     this.currentPhase = '';
     this.activeAgentBubbles = {};
     this._streamBubbles = {};
+    this._agentEventReducer.reset();
     this.onHighlightSession?.(id);
     this.onClearChat?.();
 
     // 加载会话详情更新标题栏
     let sessionDetail = null;
     try {
-      const resp = await this.authFetch(`/api/session/${id}`);
-      if (resp.ok) {
-        sessionDetail = await resp.json();
-        this.onUpdatePanelHeader?.(sessionDetail);
-      }
+      sessionDetail = await this.transport.getSession(id);
+      this.onUpdatePanelHeader?.(sessionDetail);
     } catch {}
 
     // 加载历史消息
@@ -177,7 +186,15 @@ class LingShuState {
 
     // 使用会话详情或刷新后的列表判断是否活跃
     const session = this.sessions.find(s => s.id === id);
-    const isLive = session ? session.is_live === true : sessionDetail?.is_live === true;
+    const terminalPhases = new Set(['completed', 'failed', 'cancelled']);
+    const isStandardSession = this.transport.kind === 'agentscope'
+      && this.transport.isAgentScopeSession(id);
+    const standardMissionOpen = isStandardSession
+      && sessionDetail?.is_live === true
+      && !terminalPhases.has(String(sessionDetail?.phase || '').toLowerCase());
+    const isLive = isStandardSession
+      ? standardMissionOpen
+      : (session ? session.is_live === true : sessionDetail?.is_live === true);
     if (isLive) {
       this.connectSSE(id);
       this.onSetInputState?.(true);
@@ -190,13 +207,7 @@ class LingShuState {
   async startNewSession(target, goal, model, provider, sourceSessionId = null) {
     const body = { target, goal, model, provider };
     if (sourceSessionId) body.source_session_id = sourceSessionId;
-    const resp = await this.authFetch('/api/session/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail || '启动失败');
+    const data = await this.transport.createSession(body);
     await this.loadSessions();
     return data.session_id;
   }
@@ -204,12 +215,7 @@ class LingShuState {
   /** 发送用户消息（运行时自动中断当前操作并注入指令） */
   async sendMessage(content) {
     if (!this.currentSessionId) return;
-    const resp = await this.authFetch(`/api/session/${this.currentSessionId}/message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    });
-    const data = await resp.json().catch(() => ({}));
+    const data = await this.sendSessionMessage(this.currentSessionId, content) || {};
     if (data.status === 'steering') {
       this.onRenderSystemMessage?.('⚡ 指令已中断当前操作并注入，即将继续执行……');
     }
@@ -225,7 +231,7 @@ class LingShuState {
     this.onApprovalResolved?.({ approved: false, cancelled: true, session_id: id });
     this.onRenderSystemMessage?.('⏹ 正在停止任务...');
     try {
-      await this.authFetch(`/api/session/${id}/cancel`, { method: 'POST' });
+      await this.transport.interrupt(id);
     } catch (e) {
       // 即使请求失败也保持停止态，避免误报运行中
       this.onRenderSystemMessage?.('已本地停止，后台清理请稍候: ' + e.message);
@@ -244,15 +250,46 @@ class LingShuState {
       this.onClearChat?.(true); // true = 重置为空状态
     }
     try {
-      const resp = await this.authFetch(`/api/session/${id}`, { method: 'DELETE' });
-      if (!resp.ok && resp.status !== 404) {
-        const data = await resp.json().catch(() => ({}));
-        throw new Error(data.detail || '删除失败');
-      }
+      await this.transport.deleteSession(id);
       await this.loadSessions();
     } catch (error) {
+      if (error.status === 404) {
+        await this.loadSessions();
+        return;
+      }
       this.deletedSessionIds.delete(id);
       throw error;
+    }
+  }
+
+  getSession(id) {
+    return this.transport.getSession(id);
+  }
+
+  getMessages(id, options) {
+    return this.transport.getMessages(id, options);
+  }
+
+  sendSessionMessage(id, content) {
+    return this.transport.sendMessage(id, content);
+  }
+
+  getPendingApproval(id) {
+    return this.transport.getPendingApproval(id);
+  }
+
+  primeHistoryMessage(message) {
+    if (this.transport.kind === 'agentscope') {
+      this._agentEventReducer.primeHistory(message);
+    }
+  }
+
+  restoreStreamSnapshots(snapshots) {
+    if (!Array.isArray(snapshots)) return;
+    for (const snapshot of snapshots) {
+      for (const event of this._agentEventReducer.primeSnapshot(snapshot)) {
+        this._handleUIEvent(event);
+      }
     }
   }
 
@@ -274,38 +311,17 @@ class LingShuState {
       if (!isRetry) {
         this._sseRetryCount = 0;
       }
-      const resp = await this.authFetch(
-        `/api/session/${sessionId}/stream?after_seq=${this.lastMessageSeq}`,
-        { signal },
-      );
-      if (!resp.ok) {
-        // 404 表示会话已结束，不重连
-        if (resp.status === 404) return;
-        throw new Error(`SSE 连接失败: ${resp.status}`);
-      }
-      this._sseRetryCount = 0; // 连接成功，重置计数
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const event = JSON.parse(line.slice(6));
-              this.handleSSEEvent(event);
-            } catch {}
-          }
-        }
+      for await (const frame of this.transport.stream(sessionId, {
+        afterSeq: this.lastMessageSeq,
+        signal,
+      })) {
+        this._sseRetryCount = 0; // 收到事件表示连接成功，重置计数
+        if (frame.data && typeof frame.data === 'object') this.handleSSEEvent(frame.data);
       }
       // done=true：正常关闭（服务端结束流）
     } catch (e) {
       if (e.name === 'AbortError') return; // 主动关闭，不重连
+      if (e.status === 404) return; // 会话已结束，不重连
       // 刷新后再判断会话是否仍活跃，避免本地缓存过期导致放弃重连。
       await this.loadSessions();
       const session = this.sessions.find(s => s.id === sessionId);
@@ -336,8 +352,65 @@ class LingShuState {
     }
   }
 
+  /** 订阅同一账户下所有任务的阶段变化，用于跨页面同步。 */
+  connectAccountSSE() {
+    this.closeAccountSSE();
+    this._accountSseAbortController = new AbortController();
+    this._doConnectAccountSSE(this._accountSseAbortController.signal);
+  }
+
+  async _doConnectAccountSSE(signal) {
+    let retry = 0;
+    while (!signal.aborted && this.getAuthToken()) {
+      try {
+        for await (const frame of this.transport.accountStream({ signal })) {
+          retry = 0;
+          const event = frame.data;
+          if (!event || !['account_phase_change', 'account_session_title'].includes(event.type)) continue;
+          const session = this.sessions.find(item => item.id === event.session_id);
+          if (session && event.type === 'account_phase_change') session.phase = event.phase;
+          if (session && event.type === 'account_session_title') session.title = event.title;
+          this.onSessionListRender?.(this.sessions);
+          if (event.type === 'account_session_title' && event.session_id === this.currentSessionId && session) {
+            this.onUpdatePanelHeader?.(session);
+          }
+          if (event.type === 'account_phase_change' && event.session_id === this.currentSessionId && event.phase) {
+            this.currentPhase = event.phase;
+            this.onUpdatePhaseTag?.(event.phase);
+          }
+        }
+      } catch (error) {
+        if (error.name === 'AbortError' || error.status === 401) return;
+      }
+      if (signal.aborted) return;
+      retry++;
+      await new Promise(resolve => setTimeout(resolve, Math.min(1000 * 2 ** (retry - 1), 16000)));
+    }
+  }
+
+  closeAccountSSE() {
+    if (this._accountSseAbortController) {
+      this._accountSseAbortController.abort();
+      this._accountSseAbortController = null;
+    }
+  }
+
   /** SSE 事件路由 */
   handleSSEEvent(event) {
+    if (
+      this.transport.kind === 'agentscope'
+      && this.transport.isAgentScopeSession(this.currentSessionId)
+    ) {
+      for (const adaptedEvent of this._agentEventReducer.reduce(event)) {
+        this._handleUIEvent(adaptedEvent);
+      }
+      return;
+    }
+    this._handleUIEvent(event);
+  }
+
+  /** 已归一化事件到现有 UI 回调的唯一 reducer 边界。 */
+  _handleUIEvent(event) {
     // 防串扰：仅处理当前选中会话的事件，防止切换会话或旧 SSE 残留
     if (event.session_id && (
       this.deletedSessionIds.has(event.session_id)
@@ -378,15 +451,17 @@ class LingShuState {
       case 'text_start': {
         // 创建空 Agent 气泡，保存引用供 delta 追加
         const ref = this.onRenderAgentMessage?.(event.agent, '', '') || {};
-        this._streamBubbles[event.agent] = ref;
-        this.activeAgentBubbles[event.agent] = ref;
+        const key = event.reply_id && event.block_id ? `${event.reply_id}:${event.block_id}` : event.agent;
+        this._streamBubbles[key] = ref;
+        this.activeAgentBubbles[key] = ref;
         break;
       }
 
       case 'text_delta':
         // 追加到已有气泡（用 textContent 追加，避免 HTML 注入）
         {
-          const ref = this._streamBubbles[event.agent];
+          const key = event.reply_id && event.block_id ? `${event.reply_id}:${event.block_id}` : event.agent;
+          const ref = this._streamBubbles[key];
           if (ref && ref.contentEl) {
             ref.contentEl.textContent += event.delta || event.content || '';
             this.onScrollToBottom?.();
@@ -396,8 +471,11 @@ class LingShuState {
 
       case 'text_end': {
         // 用全文替换（经 Markdown 渲染），清除引用
-        const ref = this._streamBubbles[event.agent] || this.activeAgentBubbles[event.agent];
-        if (ref && ref.contentEl && event.full_text) {
+        const key = event.reply_id && event.block_id ? `${event.reply_id}:${event.block_id}` : event.agent;
+        const ref = this._streamBubbles[key] || this.activeAgentBubbles[key];
+        if (event.duplicate) {
+          ref?.bubble?.remove();
+        } else if (ref && ref.contentEl && event.full_text) {
           ref.contentEl.innerHTML = mdRender(event.full_text);
           this.onScrollToBottom?.();
         } else if (event.full_text) {
@@ -406,20 +484,24 @@ class LingShuState {
           // 无内容（空气泡）：移除，避免 web 端出现空消息
           ref.bubble.remove();
         }
-        delete this._streamBubbles[event.agent];
-        delete this.activeAgentBubbles[event.agent];
+        delete this._streamBubbles[key];
+        delete this.activeAgentBubbles[key];
         break;
       }
 
       case 'thinking_start': {
-        const ref = this.onRenderAgentMessage?.(event.agent, '', 'thinking') || {};
-        this._streamBubbles['think_' + event.agent] = ref;
+        const html = '<details class="thinking-collapsible"><summary>🧠 思考过程 (点击展开)</summary><div class="thinking-body"></div></details>';
+        const ref = this.onRenderAgentMessage?.(event.agent, html, 'thinking', false, true) || {};
+        ref.contentEl = ref.bubble?.querySelector('.thinking-body') || ref.contentEl;
+        const identity = event.reply_id && event.block_id ? `${event.reply_id}:${event.block_id}` : event.agent;
+        this._streamBubbles['think_' + identity] = ref;
         break;
       }
 
       case 'thinking_delta':
         {
-          const ref = this._streamBubbles['think_' + event.agent];
+          const identity = event.reply_id && event.block_id ? `${event.reply_id}:${event.block_id}` : event.agent;
+          const ref = this._streamBubbles['think_' + identity];
           if (ref && ref.contentEl) {
             ref.contentEl.textContent += event.delta || event.content || '';
             this.onScrollToBottom?.();
@@ -429,22 +511,23 @@ class LingShuState {
 
       case 'thinking_end':
         {
-          const key = 'think_' + event.agent;
-          const ref = this._streamBubbles[key] || this.activeAgentBubbles[event.agent];
-          if (ref && ref.contentEl && event.full_text) {
-            ref.contentEl.innerHTML = '<details class="thinking-collapsible" open><summary>🧠 思考过程 (点击折叠)</summary><div class="thinking-body">' + mdRender(event.full_text) + '</div></details>';
+          const identity = event.reply_id && event.block_id ? `${event.reply_id}:${event.block_id}` : event.agent;
+          const key = 'think_' + identity;
+          const ref = this._streamBubbles[key] || this.activeAgentBubbles[identity];
+          if (event.duplicate) {
+            ref?.bubble?.remove();
+          } else if (ref && ref.contentEl && event.full_text) {
+            ref.contentEl.innerHTML = mdRender(event.full_text);
             this.onScrollToBottom?.();
           } else if (event.full_text) {
-            const ref = this.onRenderAgentMessage?.(event.agent || 'system', '', 'thinking') || {};
-            if (ref.contentEl) {
-              ref.contentEl.innerHTML = '<details class="thinking-collapsible" open><summary>🧠 思考过程 (点击折叠)</summary><div class="thinking-body">' + mdRender(event.full_text) + '</div></details>';
-            }
+            const html = '<details class="thinking-collapsible"><summary>🧠 思考过程 (点击展开)</summary><div class="thinking-body">' + mdRender(event.full_text) + '</div></details>';
+            this.onRenderAgentMessage?.(event.agent || 'system', html, 'thinking', false, true);
           } else if (ref && ref.bubble && !(ref.contentEl && (ref.contentEl.textContent || '').trim())) {
             // 空思考块（无内容）：仅移除确实为空的空气泡，避免误删同 agent 有内容的文本气泡
             ref.bubble.remove();
           }
           delete this._streamBubbles[key];
-          delete this.activeAgentBubbles[event.agent];
+          delete this.activeAgentBubbles[identity];
         }
         break;
 
@@ -453,9 +536,15 @@ class LingShuState {
         const key = isThinking ? 'think_' + event.agent : event.agent;
         let ref = this._streamBubbles[key] || this.activeAgentBubbles[event.agent];
         if (!ref || !ref.contentEl) {
+          const html = isThinking
+            ? '<details class="thinking-collapsible"><summary>🧠 思考过程 (点击展开)</summary><div class="thinking-body"></div></details>'
+            : '';
           ref = this.onRenderAgentMessage?.(
-            event.agent || 'system', '', isThinking ? 'thinking' : '',
+            event.agent || 'system', html, isThinking ? 'thinking' : '', false, isThinking,
           ) || {};
+          if (isThinking) {
+            ref.contentEl = ref.bubble?.querySelector('.thinking-body') || ref.contentEl;
+          }
           this._streamBubbles[key] = ref;
         }
         if (ref.contentEl) {
@@ -509,6 +598,22 @@ class LingShuState {
         this.onUpdatePhaseTag?.(event.phase);
         // 靶机信息刷新
         this.onTargetInfo?.(event);
+        break;
+
+      case 'session_title': {
+        const session = this.sessions.find(item => item.id === this.currentSessionId);
+        if (session) session.title = event.title;
+        this.onSessionListRender?.(this.sessions);
+        if (session) this.onUpdatePanelHeader?.(session);
+        break;
+      }
+
+      case 'expert_joined':
+        if (this.onRenderExpertJoined) {
+          this.onRenderExpertJoined(event.expert_name || event.agent || '安全专家');
+        } else {
+          this.onRenderSystemMessage?.(`【专家加入会话】${event.expert_name || event.agent || '安全专家'}`);
+        }
         break;
 
       case 'message': {
@@ -596,17 +701,22 @@ function phaseLabel(p) {
   return map[p] || p;
 }
 
-/** 相对时间格式化 */
+/** 将后端 UTC 时间转换为本地具体时间。 */
 function formatTime(ts) {
   if (!ts) return '';
-  const d = new Date(ts);
-  const now = new Date();
-  const diff = (now - d) / 1000;
-  if (diff < 60) return '刚刚';
-  if (diff < 3600) return Math.floor(diff / 60) + '分钟前';
-  if (diff < 86400) return Math.floor(diff / 3600) + '小时前';
-  if (diff < 172800) return '昨天';
-  return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+  const raw = String(ts).trim();
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const normalized = hasTimezone ? raw : raw.replace(' ', 'T') + 'Z';
+  const d = new Date(normalized);
+  if (Number.isNaN(d.getTime())) return raw;
+  return d.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
 }
 
 /** HTML 转义 */
@@ -619,21 +729,21 @@ function escapeHtml(text) {
 /** Agent 名称 → CSS 颜色类 */
 function resolveAgentClass(agent) {
   const a = (agent || '').toLowerCase();
-  if (a.includes('brain')) return 'brain';
-  if (a.includes('recon')) return 'recon';
-  if (a.includes('attack')) return 'attack';
-  if (a.includes('analysis')) return 'analysis';
-  if (a.includes('orchestrat')) return 'orchestrator';
+  if (a.includes('brain') || a.includes('战略规划')) return 'brain';
+  if (a.includes('recon') || a.includes('侦察') || a.includes('文件分析')) return 'recon';
+  if (a.includes('attack') || a.includes('渗透') || a.includes('利用专家') || a.includes('安全验证')) return 'attack';
+  if (a.includes('analysis') || a.includes('研判') || a.includes('密码分析')) return 'analysis';
+  if (a.includes('orchestrat') || a.includes('行动指挥')) return 'orchestrator';
   return 'system';
 }
 
 /** Agent 名称 → 状态消息 Emoji 前缀 */
 function agentStatusEmoji(agent) {
   const a = (agent || '').toLowerCase();
-  if (a.includes('brain')) return '🧠';
-  if (a.includes('recon')) return '🔍';
-  if (a.includes('attack')) return '⚔️';
-  if (a.includes('analysis')) return '🧪';
-  if (a.includes('orchestrat')) return '🎯';
+  if (a.includes('brain') || a.includes('战略规划')) return '🧠';
+  if (a.includes('recon') || a.includes('侦察') || a.includes('文件分析')) return '🔍';
+  if (a.includes('attack') || a.includes('渗透') || a.includes('利用专家')) return '⚔️';
+  if (a.includes('analysis') || a.includes('研判') || a.includes('密码分析')) return '🧪';
+  if (a.includes('orchestrat') || a.includes('行动指挥')) return '🎯';
   return '🤖';
 }

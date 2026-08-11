@@ -5,6 +5,7 @@ import asyncio
 import json
 import sys
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,12 @@ from auth import (
 
 from main import run_mission
 import session_store
+from integrations.agentscope_service import (
+    agentscope_app,
+    agentscope_lifespan,
+    control_router as agentscope_control_router,
+)
+from integrations.agentscope_service.account_events import publish_account_event
 
 # ── SessionContext 与会话注册表 ──
 
@@ -102,6 +109,7 @@ _PERSIST_EVENT_TYPES = frozenset({
     "mission_start", "mission_end", "mission_cancelled",
     "phase_change", "message", "error",
     "approval_required", "approval_resolved",
+    "expert_joined",
     "plan_updated",
     # Agent 流式输出事件
     "text_start", "text_end",
@@ -119,6 +127,7 @@ _SYSTEM_ROLE_EVENTS = frozenset({
     "mission_start", "mission_end", "mission_cancelled",
     "phase_change", "error",
     "approval_required", "approval_resolved",
+    "expert_joined",
 })
 
 
@@ -136,6 +145,12 @@ def _persist_event(session_id: str, event_type: str, payload: dict) -> int | Non
         content = payload.get("message", "任务已被取消")
     elif event_type == "phase_change":
         content = payload.get("phase", "")
+        agent_name = "system"
+    elif event_type == "expert_joined":
+        content = json.dumps({
+            "expert_name": payload.get("expert_name") or agent_name,
+            "specialty": payload.get("specialty", ""),
+        }, ensure_ascii=False)
         agent_name = "system"
     elif event_type == "error":
         content = payload.get("message", "")
@@ -294,6 +309,29 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             })
         elif event_type == "phase_change":
             _persist_target_info(session_id, {"phase": payload.get("phase", "")})
+            session_store.update_session(
+                session_id,
+                phase=payload.get("phase", ""),
+            )
+            publish_account_event(
+                ctx.user_id,
+                "account_phase_change",
+                session_id=session_id,
+                phase=payload.get("phase", ""),
+                previous_phase=payload.get("previous_phase", ""),
+                reason=payload.get("reason", ""),
+                source_id=str(seq or ""),
+            )
+        elif event_type == "session_title":
+            title = str(payload.get("title") or "安全测试任务")
+            session_store.update_session(session_id, title=title)
+            publish_account_event(
+                ctx.user_id,
+                "account_session_title",
+                session_id=session_id,
+                title=title,
+                source_id=str(seq or ""),
+            )
         elif event_type == "flag_found":
             flag = payload.get("flag") or payload.get("content")
             if flag:
@@ -336,7 +374,7 @@ def _message_to_event(message: dict) -> dict:
         event["full_text"] = content
     elif event_type == "phase_change":
         event["phase"] = content
-    elif event_type in ("approval_required", "approval_resolved", "plan_updated", "nss_submit"):
+    elif event_type in ("approval_required", "approval_resolved", "plan_updated", "nss_submit", "expert_joined"):
         try:
             event.update(json.loads(content))
         except (json.JSONDecodeError, TypeError):
@@ -442,6 +480,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
     summary = ""
     flag = None
     success = None
+    mission_state = None
     try:
         mission_state = await run_mission(
             target=target, goal=goal, model_ver=model_ver,
@@ -476,6 +515,20 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
         phase = "failed"
         callback("error", message=f"任务异常：{exc}", agent="system")
     finally:
+        if mission_state is None or status_val == "cancelled":
+            existing = session_store.get_session(session_id) or {}
+            current_title = str(existing.get("title") or "安全测试任务")
+            if current_title == str(existing.get("target") or ""):
+                current_title = "安全测试任务"
+            prefix = f"[{session_id[:8]}]"
+            if not current_title.startswith(prefix):
+                current_title = f"{prefix} {current_title}"
+            outcome = "任务已取消" if status_val == "cancelled" else "任务异常结束"
+            callback(
+                "session_title",
+                title=f"{current_title} - {outcome}",
+                agent="system",
+            )
         # 异常或取消时也固化尚未收到 end 的工具参数，避免历史缺失。
         for tool_call_id, tool in tuple(ctx.tool_buffers.items()):
             callback(
@@ -502,10 +555,17 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             del _active_sessions[session_id]
 
 
+@asynccontextmanager
+async def _app_lifespan(_: FastAPI):
+    async with agentscope_lifespan():
+        yield
+
+
 app = FastAPI(
     title="灵枢 Lingshu — Web 控制台",
     description="多智能体授权安全测试系统前端 API",
     version="0.5.0",
+    lifespan=_app_lifespan,
 )
 
 app.add_middleware(
@@ -521,6 +581,8 @@ _AUTH_SKIP_PATHS = (
     "/",
     "/index.html",
     "/session_state.js",
+    "/api_client.js",
+    "/agent_transport.js",
     "/iconpark-icons.js",
     "/logo2.png",
     "/logored.png",
@@ -582,6 +644,8 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(JWTAuthMiddleware)
 app.mount("/uploads", StaticFiles(directory=str(_upload_dir)), name="uploads")
+app.include_router(agentscope_control_router)
+app.mount("/agentscope", agentscope_app)
 
 # ── 初始化会话数据库 ──
 session_store.init_sessions_db()
@@ -735,6 +799,26 @@ async def session_state_js():
     return Response(status_code=404)
 
 
+@app.get("/api_client.js")
+async def api_client_js():
+    js_path = _PROJECT_ROOT / "frontend" / "api_client.js"
+    return FileResponse(
+        js_path,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+@app.get("/agent_transport.js")
+async def agent_transport_js():
+    js_path = _PROJECT_ROOT / "frontend" / "agent_transport.js"
+    return FileResponse(
+        js_path,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
 @app.get("/iconpark-icons.js")
 async def iconpark_icons_js():
     js_path = _PROJECT_ROOT / "frontend" / "iconpark-icons.js"
@@ -802,7 +886,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         goal=req.goal,
         provider=req.provider,
         model=req.model,
-        title=req.target,
+        title=f"[{session_id[:8]}] 安全测试任务",
         session_id=session_id,
     )
 
@@ -977,10 +1061,13 @@ async def get_session_messages(
 ):
     """获取会话消息历史。"""
     await _verify_session_owner(session_id, current_user["id"])
-    messages = await asyncio.to_thread(
-        lambda: session_store.get_messages(session_id, after_seq=after_seq, limit=limit)
+    messages, snapshots = await asyncio.to_thread(
+        session_store.get_history_snapshot,
+        session_id,
+        after_seq,
+        limit,
     )
-    return {"messages": messages}
+    return {"messages": messages, "snapshots": snapshots}
 
 
 @app.get("/api/session/{session_id}/pending_approval")

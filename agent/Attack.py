@@ -14,6 +14,7 @@ from agentscope.tool import Toolkit
 from Tools.CVE_Search import cve_search
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.tooling import AllowedFunctionTool, create_scoped_shell_tool, stream_agent_reply
+from agent.experts import attack_expert_name
 
 
 ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
@@ -108,6 +109,8 @@ async def create_attack_agent(
     category_decision: dict | None = None,
     scope_registry: ScopeRegistry | None = None,
     max_iters: int = 20,
+    expert_context: str = "",
+    event_callback=None,
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -130,6 +133,7 @@ async def create_attack_agent(
             analysis_agent,
             UserMsg(name="Attack", content=service_info),
             prefix="[Analysis] ",
+            on_event=event_callback,
         )
         return result.get_text_content() or "[Analysis] 未返回文本结果"
 
@@ -158,7 +162,11 @@ async def create_attack_agent(
         # mcps=[ida_mcp],
     )
     return Agent(
-        name="Attack",
+        name=attack_expert_name(
+            str((category_decision or {}).get("primary") or "unknown"),
+            str((category_decision or {}).get("target_kind") or ""),
+            expert_context,
+        ),
         system_prompt=ATTACK_SYS_PROMPT,
         model=model,
         toolkit=toolkit,

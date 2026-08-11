@@ -205,6 +205,26 @@
   .msg-bubble .agent-label.system { color: var(--system-color); background: rgba(101,109,118,0.12); }
   .msg-bubble .agent-content { margin-top: 4px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
   .msg-bubble .agent-content.thinking { color: var(--text-dim); font-style: italic; }
+  .expert-join-row { display: flex; justify-content: center; margin: 10px 0; animation: expertJoinIn 0.35s ease-out; }
+  .expert-join-card { width: min(560px, 88%); padding: 11px 15px; border: 1px solid; border-radius: 9px; display: flex; align-items: center; gap: 10px; box-shadow: 0 3px 12px rgba(0,0,0,0.08); }
+  .expert-join-card .expert-icon { font-size: 19px; }
+  .expert-join-card .expert-join-label { padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 800; letter-spacing: 1px; background: rgba(255,255,255,0.62); }
+  .expert-join-card .expert-join-name { font-size: 13px; font-weight: 750; }
+  .expert-join-card.brain { color: #6f42c1; border-color: rgba(111,66,193,0.4); background: rgba(137,87,229,0.16); }
+  .expert-join-card.recon { color: #8a5b00; border-color: rgba(154,103,0,0.42); background: rgba(255,193,7,0.18); }
+  .expert-join-card.analysis { color: #a34400; border-color: rgba(188,76,0,0.4); background: rgba(255,140,0,0.16); }
+  .expert-join-card.attack { color: #b42318; border-color: rgba(207,34,46,0.42); background: rgba(255,65,54,0.15); }
+  .expert-join-card.orchestrator { color: #176b35; border-color: rgba(26,127,55,0.42); background: rgba(46,160,67,0.15); }
+  .expert-join-card.system { color: #0969da; border-color: rgba(9,105,218,0.38); background: rgba(9,105,218,0.12); }
+  :root[data-theme="dark"] .expert-join-card { box-shadow: 0 0 16px rgba(88,166,255,0.2), 0 4px 14px rgba(0,0,0,0.42); }
+  :root[data-theme="dark"] .expert-join-card .expert-join-label { color: inherit; background: rgba(255,255,255,0.12); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.1); }
+  :root[data-theme="dark"] .expert-join-card.brain { color: #d2a8ff; border-color: rgba(210,168,255,0.7); background: rgba(137,87,229,0.28); box-shadow: 0 0 20px rgba(188,140,255,0.45), inset 0 0 14px rgba(188,140,255,0.1); }
+  :root[data-theme="dark"] .expert-join-card.recon { color: #f2cc60; border-color: rgba(242,204,96,0.7); background: rgba(187,128,9,0.27); box-shadow: 0 0 20px rgba(227,179,65,0.42), inset 0 0 14px rgba(227,179,65,0.09); }
+  :root[data-theme="dark"] .expert-join-card.analysis { color: #ffb77c; border-color: rgba(255,183,124,0.72); background: rgba(188,76,0,0.28); box-shadow: 0 0 20px rgba(255,166,87,0.42), inset 0 0 14px rgba(255,166,87,0.09); }
+  :root[data-theme="dark"] .expert-join-card.attack { color: #ff8b8b; border-color: rgba(255,139,139,0.74); background: rgba(207,34,46,0.3); box-shadow: 0 0 21px rgba(255,82,82,0.48), inset 0 0 14px rgba(255,82,82,0.1); }
+  :root[data-theme="dark"] .expert-join-card.orchestrator { color: #7ee787; border-color: rgba(126,231,135,0.7); background: rgba(35,134,54,0.28); box-shadow: 0 0 20px rgba(63,185,80,0.42), inset 0 0 14px rgba(63,185,80,0.09); }
+  :root[data-theme="dark"] .expert-join-card.system { color: #79c0ff; border-color: rgba(121,192,255,0.7); background: rgba(31,111,235,0.27); box-shadow: 0 0 20px rgba(88,166,255,0.42), inset 0 0 14px rgba(88,166,255,0.09); }
+  @keyframes expertJoinIn { from { opacity: 0; transform: translateY(-6px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 
   /* Markdown 渲染样式 */
   .agent-content .md-code { background: rgba(246,248,250,0.8); border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; font-size: 11px; line-height: 1.5; overflow-x: auto; white-space: pre-wrap; margin: 6px 0; }
@@ -475,6 +495,7 @@
   .plan-item .plan-tag.phase-planning { color: var(--accent); background: rgba(9,105,218,0.15); }
   .plan-item .plan-tag.origin-brain { color: var(--brain-color); background: rgba(137,87,229,0.12); }
   .plan-item .plan-tag.origin-orchestrator { color: var(--orchestrator-color); background: rgba(26,127,55,0.12); }
+  .plan-item .plan-tag.expert-owner { color: var(--purple); background: rgba(137,87,229,0.12); }
   .plan-item .plan-evidence { font-size: 11px; color: var(--text-dim); margin-top: 4px; padding: 4px 8px; background: rgba(246,248,250,0.6); border-radius: 4px; border-left: 2px solid var(--border-light); overflow-wrap: anywhere; }
   .plan-item:hover { background: rgba(0,0,0,0.02); }
   /* 暗色主题 */
@@ -766,6 +787,9 @@
 </div>
 
 <!-- 导入核心状态管理模块 -->
+<script>window.LINGSHU_AGENT_SERVICE_ENABLED = true;</script>
+<script src="api_client.js"></script>
+<script src="agent_transport.js"></script>
 <script src="session_state.js"></script>
 <script>
 // ══════════════════════════════════════
@@ -794,7 +818,7 @@ App.onHideLogin = (user) => {
 
 App.onSessionListRender = (list) => {
   const filter = (document.getElementById('searchInput').value || '').toLowerCase();
-  const filtered = list.filter(s => (s.target || s.title || '').toLowerCase().includes(filter));
+  const filtered = list.filter(s => `${s.title || ''} ${s.target || ''}`.toLowerCase().includes(filter));
   const isActive = (s) => s.is_live === true;
   const active = filtered.filter(isActive);
   const history = filtered.filter(s => !isActive(s));
@@ -814,7 +838,7 @@ App.onSessionListRender = (list) => {
 };
 
 function sessionItemHtml(s, isLive) {
-  const target = s.target || s.title || '未知';
+  const target = sessionDisplayTitle(s);
   const isCurrent = s.id === App.currentSessionId;
   let dotClass = 'pending', statusIcon = '';
   if (isLive) dotClass = 'live';
@@ -831,6 +855,13 @@ function sessionItemHtml(s, isLive) {
   </div>`;
 }
 
+function sessionDisplayTitle(s) {
+  const idPrefix = `[${String(s.id || '').slice(0, 8)}]`;
+  let target = s.title && s.title !== s.target ? s.title : '安全测试任务';
+  if (!target.startsWith(idPrefix)) target = `${idPrefix} ${target}`;
+  return target.replaceAll(' · ', ' - ');
+}
+
 App.onHighlightSession = (id) => {
   document.querySelectorAll('.session-item').forEach(el => {
     el.classList.toggle('active', el.getAttribute('data-id') === id);
@@ -838,7 +869,7 @@ App.onHighlightSession = (id) => {
 };
 
 App.onUpdatePanelHeader = (s) => {
-  const targetName = s.target || s.title || '未知';
+  const targetName = sessionDisplayTitle(s);
   const targetEl = document.getElementById('panelTarget');
   targetEl.textContent = targetName;
   targetEl.title = targetName;
@@ -920,11 +951,8 @@ App.onRenderAgentMessage = (agent, content, cls, isReplay, isRawHtml) => {
   bubble.innerHTML = `<div class="agent-label ${colorClass}">${escapeHtml(agent || 'system')}</div><div class="agent-content${cls ? ' ' + cls : ''}">${rendered}</div>`;
   row.appendChild(bubble);
   area.appendChild(row);
-  const ref = { bubble, contentEl: bubble.querySelector('.agent-content') };
-  if (isReplay) {
-    App.activeAgentBubbles[agent] = ref;
-  }
-  return ref;
+  doScrollToBottom();
+  return { bubble, contentEl: bubble.querySelector('.agent-content') };
 };
 
 App.onRenderSystemMessage = (content) => {
@@ -933,6 +961,17 @@ App.onRenderSystemMessage = (content) => {
   const row = document.createElement('div');
   row.className = 'msg-row system';
   row.innerHTML = `<div class="msg-system">${escapeHtml(content)}</div>`;
+  area.appendChild(row);
+  doScrollToBottom();
+};
+
+App.onRenderExpertJoined = (expertName) => {
+  removeEmpty();
+  const area = $chatArea();
+  const row = document.createElement('div');
+  const expertClass = resolveAgentClass(expertName);
+  row.className = 'expert-join-row';
+  row.innerHTML = `<div class="expert-join-card ${expertClass}"><span class="expert-icon">${agentStatusEmoji(expertName)}</span><span class="expert-join-label">专家加入</span><span class="expert-join-name">${escapeHtml(expertName)}</span><span style="margin-left:auto;font-size:11px;opacity:.78">已加入当前任务</span></div>`;
   area.appendChild(row);
   doScrollToBottom();
 };
@@ -1271,19 +1310,43 @@ async function doSwitchSession(id) {
   await App.switchSession(id, {
     loadMessages: async (sid) => {
       try {
+        if (
+          App.transport.kind === 'agentscope'
+          && App.transport.isAgentScopeSession(sid)
+          && !App.transport.usesLegacyHistory(sid)
+        ) {
+          let before = '';
+          const pages = [];
+          while (true) {
+            const data = await App.getMessages(sid, { before, limit: 200 });
+            const messages = data.messages || [];
+            if (!messages.length) break;
+            pages.unshift(...messages);
+            if (!data.has_more || !data.before) break;
+            before = data.before;
+          }
+          pages.forEach(message => {
+            App.primeHistoryMessage(message);
+            renderHistoryMessage(message);
+          });
+          doScrollToBottom(true);
+          return;
+        }
         let afterSeq = 0;
+        let streamSnapshots = [];
         while (true) {
-          const resp = await App.authFetch(`/api/session/${sid}/messages?after_seq=${afterSeq}&limit=500`);
-          if (!resp.ok) return;
-          const data = await resp.json();
+          const data = await App.getMessages(sid, { afterSeq, limit: 500 });
+          streamSnapshots = data.snapshots || streamSnapshots;
           const messages = data.messages || [];
           messages.forEach(m => {
+            App.primeHistoryMessage(m);
             renderHistoryMessage(m);
             if (m.seq > App.lastMessageSeq) App.lastMessageSeq = m.seq;
           });
-          if (messages.length < 500) break;
+          if (messages.length < (data.page_limit || 500)) break;
           afterSeq = messages[messages.length - 1].seq;
         }
+        App.restoreStreamSnapshots(streamSnapshots);
         doScrollToBottom(true);
       } catch {}
     }
@@ -1291,9 +1354,8 @@ async function doSwitchSession(id) {
   // 恢复作战计划清单和靶机信息
   _planFirstShow = false; // 刷新恢复时不自动切换 Tab
   try {
-    const resp = await App.authFetch(`/api/session/${id}`);
-    if (resp.ok) {
-      const detail = await resp.json();
+    const detail = await App.getSession(id);
+    if (detail) {
       const planItems = detail?.mission_state?.plan_items;
       const phase = detail?.mission_state?.phase || detail?.phase || '';
       if (planItems && planItems.length > 0) {
@@ -1313,6 +1375,35 @@ async function doSwitchSession(id) {
 function renderHistoryMessage(msg) {
   if (msg.role === 'user') {
     App.onRenderUserMessage(msg.content);
+  } else if (msg.event_type === 'agentscope_message' && Array.isArray(msg.native_blocks)) {
+    for (const block of msg.native_blocks) {
+      const blockAgent = block.agent || msg.agent_name || 'Lingshu';
+      if (block.type === 'text' && block.text) {
+        App.onRenderAgentMessage(blockAgent, block.text, '', true);
+      } else if (block.type === 'thinking' && block.thinking) {
+        const html = '<details class="thinking-collapsible"><summary>🧠 思考过程 (点击展开)</summary><div class="thinking-body">'
+          + mdRender(block.thinking) + '</div></details>';
+        App.onRenderAgentMessage(blockAgent, html, 'thinking', true, true);
+      } else if (block.type === 'tool_call') {
+        App.onRenderSystemMessage(`🔧 [${blockAgent}] 调用工具: ${block.name || '?'}`);
+        App.onToolCallStart?.({
+          tool_call_id: block.id,
+          tool_name: block.name || '?',
+          agent: blockAgent,
+        });
+        App.onToolCallComplete?.({
+          tool_call_id: block.id,
+          tool_name: block.name || '?',
+          agent: blockAgent,
+          full_args: block.input || '',
+        });
+      } else if (block.type === 'tool_result') {
+        const output = typeof block.output === 'string'
+          ? block.output
+          : (block.output || []).filter(item => item.type === 'text').map(item => item.text || '').join('\n');
+        if (output) App.onRenderSystemMessage(`🔧 ${block.name || '工具'} [${block.state || 'unknown'}]: ${output}`);
+      }
+    }
   } else if (msg.event_type === 'phase_change') {
     App.onRenderPhaseDivider(msg.content);
   } else if (msg.event_type === 'mission_start') {
@@ -1323,6 +1414,13 @@ function renderHistoryMessage(msg) {
     App.onRenderSystemMessage('⏹ ' + msg.content);
   } else if (msg.event_type === 'error') {
     App.onRenderSystemMessage('❌ ' + msg.content);
+  } else if (msg.event_type === 'expert_joined') {
+    try {
+      const expert = JSON.parse(msg.content || '{}');
+      App.onRenderExpertJoined(expert.expert_name || '安全专家');
+    } catch {
+      App.onRenderExpertJoined(msg.content || '安全专家');
+    }
   } else if (msg.event_type === 'approval_required') {
     App.onRenderSystemMessage('⚠️ 等待人工审批...');
   } else if (msg.event_type === 'approval_resolved') {
@@ -1351,22 +1449,11 @@ function renderHistoryMessage(msg) {
     } else if (msg.event_type === 'text_delta' || msg.event_type === 'thinking_delta') {
       // text_delta 未持久化，跳过
     } else if ((msg.event_type === 'text_end' || msg.event_type === 'thinking_end') && msg.content) {
-      const ref = App.activeAgentBubbles?.[agent];
-      if (ref && ref.contentEl) {
-        if (msg.event_type === 'thinking_end') {
-          // 思考内容：折叠展示
-          ref.contentEl.innerHTML = '<details class="thinking-collapsible" open><summary>🧠 思考过程 (点击折叠)</summary><div class="thinking-body">' + mdRender(msg.content) + '</div></details>';
-        } else {
-          ref.contentEl.innerHTML = mdRender(msg.content);
-        }
-        doScrollToBottom();
+      if (msg.event_type === 'thinking_end') {
+        const html = '<details class="thinking-collapsible"><summary>🧠 思考过程 (点击展开)</summary><div class="thinking-body">' + mdRender(msg.content) + '</div></details>';
+        App.onRenderAgentMessage(agent, html, 'thinking', true, true);
       } else {
-        // 没有 text_start 的前置气泡（异常），直接创建
-        if (msg.event_type === 'thinking_end') {
-          App.onRenderAgentMessage(agent, '<details class="thinking-collapsible" open><summary>🧠 思考过程 (点击折叠)</summary><div class="thinking-body">' + mdRender(msg.content) + '</div></details>', '', true, true);
-        } else {
-          App.onRenderAgentMessage(agent, msg.content, '', true);
-        }
+        App.onRenderAgentMessage(agent, msg.content, '', true);
       }
     }
   } else if (msg.event_type === 'tool_call_start') {
@@ -1627,9 +1714,8 @@ async function deleteSession(id) {
 
 async function rerunSession(id) {
   try {
-    const resp = await App.authFetch(`/api/session/${id}`);
-    if (!resp.ok) throw new Error('无法读取原任务配置');
-    const session = await resp.json();
+    const session = await App.getSession(id);
+    if (!session) throw new Error('无法读取原任务配置');
 
     // 记录来源会话，预填弹窗
     rerunSourceSessionId = id;
@@ -1661,13 +1747,12 @@ async function rerunSession(id) {
 
 // 滚动控制
 function doScrollToBottom(force) {
-  if (!force && !App.isAutoScroll) return;
   const area = $chatArea();
-  if (!force) {
-    const atBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 80;
-    if (!atBottom) return;
-  }
-  requestAnimationFrame(() => { area.scrollTop = area.scrollHeight; });
+  if (!area) return;
+  requestAnimationFrame(() => {
+    area.scrollTop = area.scrollHeight;
+    App.isAutoScroll = true;
+  });
 }
 
 $chatArea()?.addEventListener('scroll', function() {
@@ -1757,6 +1842,7 @@ function _renderMiniPlan(planItems) {
     html += `<span class="mp-status">${emoji}</span>`;
     html += `<span class="mp-phase ${phCls}">${escapeHtml(item.phase || 'planning')}</span>`;
     html += `<span class="mp-content">${mdRender(item.content || '')}</span>`;
+    if (item.expert) html += `<span title="负责人">${escapeHtml(item.expert)}</span>`;
     html += `</div>`;
   }
   list.innerHTML = html;
@@ -1800,24 +1886,16 @@ async function handleApprovalDecision(decision) {
   const btns = document.querySelectorAll('.approval-actions button');
   btns.forEach(b => b.disabled = true);
   try {
-    const resp = await App.authFetch(`/api/session/${sid}/message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: decision }),
-    });
-    if (!resp.ok) {
-      const data = await resp.json().catch(() => ({}));
-      if (resp.status === 404) {
-        hideApprovalModal();
-        App.deletedSessionIds.add(sid);
-        await App.loadSessions();
-        App.onRenderSystemMessage?.('该会话已删除，审批请求已失效');
-        return;
-      }
-      throw new Error(data.detail || '审批答复发送失败');
-    }
+    await App.sendSessionMessage(sid, decision);
     hideApprovalModal();
   } catch (e) {
+    if (e.status === 404) {
+      hideApprovalModal();
+      App.deletedSessionIds.add(sid);
+      await App.loadSessions();
+      App.onRenderSystemMessage?.('该会话已删除，审批请求已失效');
+      return;
+    }
     App.onRenderSystemMessage?.('审批答复发送失败: ' + e.message);
     btns.forEach(b => b.disabled = false);
   }
@@ -1853,6 +1931,7 @@ function renderPlanItems(items, currentPhase) {
     html += `<div class="plan-tags">`;
     html += `<span class="plan-tag ${phaseClass}">${escapeHtml(item.phase || '')}</span>`;
     html += `<span class="plan-tag ${originClass}">${escapeHtml(item.origin || 'brain')}</span>`;
+    if (item.expert) html += `<span class="plan-tag expert-owner">负责人: ${escapeHtml(item.expert)}</span>`;
     html += `</div>`;
     if (item.status === 'completed' && item.evidence) {
       html += `<div class="plan-evidence">📎 ${escapeHtml(item.evidence)}</div>`;
@@ -1920,9 +1999,7 @@ function resetTargetInfo() {
 
 async function restorePendingApproval(sessionId) {
   try {
-    const resp = await App.authFetch(`/api/session/${sessionId}/pending_approval`);
-    if (!resp.ok) return;
-    const data = await resp.json();
+    const data = await App.getPendingApproval(sessionId);
     if (
       App.currentSessionId === sessionId
       && !App.deletedSessionIds.has(sessionId)

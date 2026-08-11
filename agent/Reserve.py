@@ -18,6 +18,7 @@ from agent.Attack import _build_skill_list
 from Tools.IntelPwn import create_intelpwn_tool
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.tooling import AllowedFunctionTool, create_scoped_shell_tool, stream_agent_reply
+from agent.experts import REVERSE_EXPERT
 
 RESERVE_SYS_PROMPT = """你是二进制逆向分析专家（Reserve）。
 你只能处理 Orchestrator 给出的单一授权目标，并且只使用提供的工具。
@@ -54,6 +55,7 @@ async def create_reverse_agent(
     category_decision: dict | None = None,
     scope_registry: ScopeRegistry | None = None,
     max_iters: int = 20,
+    event_callback=None,
 ) -> Agent:
     async def analysis(service_info: str) -> str:
         """委托 Analysis 专家研判真实证据。
@@ -65,6 +67,7 @@ async def create_reverse_agent(
             analysis_agent,
             UserMsg(name="Reserve", content=service_info),
             prefix="[Analysis] ",
+            on_event=event_callback,
         )
         return result.get_text_content() or "[Analysis] 未返回文本结果"
 
@@ -90,7 +93,7 @@ async def create_reverse_agent(
         mcps=[ida_mcp],
     )
     return Agent(
-        name="Reserve",
+        name=REVERSE_EXPERT,
         system_prompt=RESERVE_SYS_PROMPT,
         model=model,
         toolkit=toolkit,

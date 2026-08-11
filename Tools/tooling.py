@@ -105,6 +105,21 @@ def reset_agent_tasks(token: Token) -> None:
     _AGENT_TASKS.reset(token)
 
 
+_EXPERT_ROSTER: ContextVar[set[str] | None] = ContextVar(
+    "lingshu_expert_roster",
+    default=None,
+)
+
+
+def bind_expert_roster() -> Token:
+    """Bind an empty expert roster to the current mission."""
+    return _EXPERT_ROSTER.set(set())
+
+
+def reset_expert_roster(token: Token) -> None:
+    _EXPERT_ROSTER.reset(token)
+
+
 async def cancel_agent_tasks(tasks: set[asyncio.Task[Any]]) -> None:
     """按 AgentScope 官方中断方式取消承载 reply_stream 的 task。"""
     active = tuple(task for task in tasks if not task.done())
@@ -144,6 +159,16 @@ async def stream_agent_reply(
         if on_event is not None:
             payload.setdefault("agent", agent_name)
             on_event(event_type, **payload)
+
+    roster = _EXPERT_ROSTER.get()
+    if roster is not None and agent_name not in roster:
+        roster.add(agent_name)
+        _, separator, specialty = agent_name.partition(" - ")
+        _emit(
+            "expert_joined",
+            expert_name=agent_name,
+            specialty=specialty if separator else agent_name,
+        )
 
     async def _consume_reply_stream() -> None:
         nonlocal final_msg

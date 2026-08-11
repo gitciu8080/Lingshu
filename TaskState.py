@@ -62,6 +62,7 @@ class MissionState:
     goal: str
     authorized: bool
     session_id: str = ""
+    title: str = ""
     phase: Phase = Phase.PLANNING
     plan: str = ""
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -122,6 +123,13 @@ class MissionState:
             current=phase.value,
             reason=reason,
         )
+        callback = getattr(self, "_phase_callback", None)
+        if callback is not None:
+            callback(previous, phase, reason)
+
+    def bind_phase_callback(self, callback) -> None:
+        """Bind a runtime-only callback invoked after every legal transition."""
+        self._phase_callback = callback
 
     def add_finding(self, source: str, report: str) -> None:
         self.findings.append({"timestamp": _now(), "source": source, "report": report})

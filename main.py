@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse  # 命令行参数解析
 import asyncio  # 异步事件循环，驱动整个多智能体任务
 import os  # 环境变量与路径操作
+import re  # 从最终证据中提取 CVE 等标题特征
 import sys  # 修改模块搜索路径，确保能 import 本目录下的包
 from collections.abc import Callable  # 回调类型注解
 from pathlib import Path  # 跨平台路径对象
@@ -38,15 +39,18 @@ from agent.Recon import (
 )
 from agent.Reserve import create_reverse_agent  # 逆向分析 Agent（IDA MCP）
 from agent.ScopeAuditor import create_scope_auditor_agent  # IP 授权审核 Agent
+from agent.experts import build_expert_assignments
 from Tools.Plan import create_add_plan_tool, push_plan_update  # Brain 登记计划条目的工具
 from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
 from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     AgentMaxIterationsError,
     bind_agent_tasks,
+    bind_expert_roster,
     bind_process_tracker,
     cancel_agent_tasks,
     reset_agent_tasks,
+    reset_expert_roster,
     reset_process_tracker,
     stream_agent_reply,
 )
@@ -60,6 +64,141 @@ _WORKDIR_ROOT = Path(__file__).resolve().parent / "WorkDir"
 
 # 肯定的审批答复（其余一律视为拒绝，安全默认）
 _APPROVAL_YES = {"y", "yes", "ok", "approve", "approved", "是", "批准", "同意"}
+
+_CATEGORY_TITLES = {
+    "web": "Web 安全",
+    "pwn": "二进制利用",
+    "reverse": "逆向分析",
+    "crypto": "密码分析",
+    "forensics": "数字取证",
+    "malware": "恶意代码分析",
+    "misc": "综合安全",
+    "osint": "开源情报",
+    "ai-ml": "AI 安全",
+}
+
+
+def build_mission_title(
+    category: str,
+    target_kind: str,
+    goal: str,
+    plan: str,
+) -> str:
+    """Generate a concise title without exposing the concrete target."""
+    context = f"{goal}\n{plan[:6000]}".lower()
+    resolved_category = category
+    if resolved_category == "unknown":
+        category_signals = {
+            "web": ("http", "web", "网站", "接口", "路由", "目录枚举"),
+            "pwn": ("pwn", "rop", "栈溢出", "堆利用", "二进制利用"),
+            "reverse": ("逆向", "反编译", "ida", "ghidra", "crackme"),
+            "crypto": ("密码", "解密", "rsa", "aes", "cipher"),
+            "forensics": ("取证", "pcap", "内存镜像", "磁盘镜像", "隐写"),
+            "malware": ("恶意软件", "木马", "勒索", "c2", "沙箱分析"),
+            "osint": ("开源情报", "osint", "whois", "地理定位"),
+            "ai-ml": ("提示注入", "模型", "llm", "机器学习"),
+        }
+        resolved_category = next(
+            (
+                name
+                for name, signals in category_signals.items()
+                if any(signal in context for signal in signals)
+            ),
+            "unknown",
+        )
+
+    category_title = _CATEGORY_TITLES.get(resolved_category)
+    if category_title is None:
+        category_title = {
+            "network": "网络安全",
+            "archive": "文件分析",
+            "single_file": "文件分析",
+            "directory": "代码审计",
+        }.get(target_kind, "安全测试")
+
+    intent_signals = (
+        (("web shell", "webshell", "命令执行"), "权限获取"),
+        (("提权", "权限提升"), "权限提升"),
+        (("源码审计", "代码审计"), "代码审计"),
+        (("解密", "密钥", "明文"), "密钥恢复"),
+        (("逆向", "反编译", "程序分析"), "程序分析"),
+        (("取证", "证据", "流量分析"), "证据提取"),
+        (("漏洞", "验证", "利用"), "漏洞验证"),
+        (("flag", "获取 flag"), "Flag 获取"),
+    )
+    def resolve_intent(source: str) -> str | None:
+        return next(
+            (
+                label
+                for signals, label in intent_signals
+                if any(signal in source for signal in signals)
+            ),
+            None,
+        )
+
+    intent = resolve_intent(goal.lower()) or resolve_intent(plan.lower()) or "安全分析"
+    return f"{category_title} - {intent}"
+
+
+def prefix_session_title(session_id: str, title: str) -> str:
+    """Prefix a title with a stable, compact session identifier."""
+    return f"[{session_id[:8]}] {title}" if session_id else title
+
+
+def build_final_mission_title(mission: MissionState) -> str:
+    """Build a more specific title from the completed mission evidence."""
+    category = str((mission.category_decision or {}).get("primary") or "unknown")
+    target_kind = str((mission.target_spec or {}).get("kind") or "")
+    reports = [mission.summary]
+    reports.extend(str(item.get("report") or "") for item in mission.findings)
+    reports.extend(
+        f"{item.get('objective', '')} {item.get('report', '')} {item.get('cve', '')}"
+        for item in mission.attack_chain
+    )
+    evidence = "\n".join(reports).lower()
+    detail_signals = (
+        (("sql注入", "sql 注入", "sql injection", "sqli"), "SQL 注入"),
+        (("模板注入", "ssti"), "模板注入"),
+        (("命令执行", "remote code execution", "rce"), "命令执行"),
+        (("文件上传", "upload"), "文件上传"),
+        (("任意文件读取", "目录穿越", "path traversal", "lfi"), "文件读取"),
+        (("反序列化", "deserialization"), "反序列化"),
+        (("身份绕过", "认证绕过", "auth bypass"), "认证绕过"),
+        (("ssrf", "请求伪造"), "SSRF"),
+        (("jwt",), "JWT 安全"),
+        (("xxe",), "XXE"),
+        (("xss", "跨站"), "XSS"),
+        (("栈溢出", "堆溢出", "buffer overflow"), "内存破坏"),
+        (("rop", "ret2libc"), "ROP 利用"),
+        (("解密", "密钥恢复", "decrypt"), "密钥恢复"),
+        (("隐写", "stego"), "隐写分析"),
+        (("流量分析", "pcap"), "流量取证"),
+    )
+    detail = next(
+        (
+            label
+            for signals, label in detail_signals
+            if any(signal in evidence for signal in signals)
+        ),
+        None,
+    )
+    if detail is None:
+        cve = re.search(r"cve-\d{4}-\d+", evidence, re.IGNORECASE)
+        if cve:
+            detail = cve.group(0).upper()
+    base_title = build_mission_title(category, target_kind, mission.goal, evidence)
+    category_title, _, initial_intent = base_title.partition(" - ")
+    detail = detail or initial_intent
+    if mission.success and mission.flag:
+        outcome = "Flag 获取成功"
+    elif mission.success:
+        outcome = "验证成功"
+    else:
+        outcome = "任务未完成"
+    return prefix_session_title(
+        mission.session_id,
+        f"{category_title} - {detail} - {outcome}",
+    )
 
 # 各角色基础迭代预算（按目标类型）——P2 自适应预算的基准表。
 # 网络渗透任务涉及扫描/枚举/利用，预算最高；单文件取证相对收敛。
@@ -282,6 +421,7 @@ async def run_mission(
     agent_tasks: set[asyncio.Task[Any]] | None = None,
     steering_state: dict[str, Any] | None = None,
     nss_context: dict[str, Any] | None = None,
+    authorization_source: str = "cli",
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
@@ -307,6 +447,7 @@ async def run_mission(
         initial_context: 前次任务上下文摘要（"再打一次"重跑时由 API 层注入）
         agent_tasks: 当前会话活跃的 Agent reply task 注册表
         steering_state: 运行时追加指令共享状态 {"pending": str|None, "processed": bool}
+        authorization_source: 审计记录中的授权入口来源（CLI 或 Agent Service）
 
     Returns:
         最终任务状态 MissionState（含 plan / flag / success 等）
@@ -371,13 +512,23 @@ async def run_mission(
             "stage": category_decision.stage,
         },
         authorization_evidence={
-            "source": "cli",  # 授权来源：命令行用户确认
+            "source": authorization_source,
             "scope": target_spec.authorization_scope,
             "operator_confirmation": True,  # 操作员已确认
         },
     )
     # 记录任务创建事件并立即持久化（防止后续异常丢失状态）
     mission.record("system", "mission_created", model=f"{provider}/{model_ver}")
+    if event_callback is not None:
+        mission.bind_phase_callback(
+            lambda previous, current, reason: event_callback(
+                "phase_change",
+                phase=current.value,
+                previous_phase=previous.value,
+                reason=reason,
+                agent="system",
+            ),
+        )
     store.save(mission)
 
     # ── 动态授权范围注册表 ──
@@ -444,6 +595,7 @@ async def run_mission(
     process_tracker, process_tracker_token = bind_process_tracker()
     active_agent_tasks = agent_tasks if agent_tasks is not None else set()
     agent_tasks_token = bind_agent_tasks(active_agent_tasks)
+    expert_roster_token = None
     try:
         # ── 5. 模型与基础 Agent ──
         # 创建共享的 LLM 模型实例（temperature=0.7 兼顾稳定与发散）
@@ -512,7 +664,35 @@ async def run_mission(
         )
         # 保存计划文本（无输出时回退到内置四阶段计划）
         mission.plan = plan_result.get_text_content() or "使用内置四阶段计划"
+        phase_experts, expert_section = build_expert_assignments(
+            category_decision.primary,
+            target_spec.kind,
+            mission.plan,
+            recon.name,
+        )
+        mission.plan = f"{mission.plan.rstrip()}\n\n{expert_section}"
+        for item in mission.plan_items:
+            item["expert"] = phase_experts.get(
+                str(item.get("phase") or ""),
+                "Alex - 行动指挥专家",
+            )
+        mission.title = prefix_session_title(
+            mission.session_id,
+            build_mission_title(
+                category_decision.primary,
+                target_spec.kind,
+                mission.goal,
+                mission.plan,
+            ),
+        )
         mission.record("Brain", "plan_created", plan_items_count=len(mission.plan_items))
+        mission.record("Brain", "session_title_created", title=mission.title)
+        if event_callback is not None:
+            event_callback("session_title", title=mission.title, agent="Brain")
+            event_callback("message", content=expert_section, agent=brain.name)
+            push_plan_update(mission, event_callback)
+        # Brain 完成作战计划后再启用专家名册；后续角色首次调用时加入专家团。
+        expert_roster_token = bind_expert_roster()
         # 状态机：PLANNING → RECON（非法转型会被状态机拒绝）
         mission.transition(Phase.RECON, "战略计划已制定")
         store.save(mission)  # 每步都持久化，保证崩溃可恢复
@@ -531,6 +711,8 @@ async def run_mission(
             category_decision=mission.category_decision,
             scope_registry=scope_registry,
             max_iters=_iter_budget(target_spec.kind, "attack", model_ver, len(mission.plan_items)),
+            expert_context=mission.plan,
+            event_callback=event_callback,
         )
 
         reserve = await create_reverse_agent(
@@ -542,6 +724,7 @@ async def run_mission(
             category_decision=mission.category_decision,
             scope_registry=scope_registry,
             max_iters=_iter_budget(target_spec.kind, "reserve", model_ver, len(mission.plan_items)),
+            event_callback=event_callback,
         )
 
         scope_auditor = create_scope_auditor_agent(model)
@@ -683,6 +866,11 @@ async def run_mission(
             store.save(mission)
             print(f"[系统] 本轮在 {mission.phase.value} 阶段停止，任务尚未被标记完成。")
         else:
+            mission.title = build_final_mission_title(mission)
+            mission.record("system", "session_title_finalized", title=mission.title)
+            store.save(mission)
+            if event_callback is not None:
+                event_callback("session_title", title=mission.title, agent="system")
             print(f"[系统] 任务结束: success={mission.success}, flag={mission.flag or '未发现'}")
             if mission.flag and event_callback:
                 event_callback("flag_found", flag=mission.flag)
@@ -693,6 +881,8 @@ async def run_mission(
         # AgentScope 官方方式：取消直接承载 reply_stream 的 task。
         await cancel_agent_tasks(active_agent_tasks)
         reset_agent_tasks(agent_tasks_token)
+        if expert_roster_token is not None:
+            reset_expert_roster(expert_roster_token)
         # 停止本任务启动的所有命令及后台子进程，避免取消后继续运行。
         await process_tracker.terminate_all()
         reset_process_tracker(process_tracker_token)

@@ -1,6 +1,7 @@
 """Brain：只负责战略规划，通过 AddPlan 工具登记结构化计划。"""
 from agentscope.agent import Agent, ReActConfig
 from agentscope.tool import Toolkit
+from agent.experts import BRAIN_EXPERT
 
 
 BRAIN_SYS_PROMPT = """你是网络安全作战总参谋（Brain）。
@@ -46,7 +47,7 @@ recon / analysis / exploitation / post_exploitation / complete。
 
 def create_brain_agent(model, tools: list | None = None, max_iters: int = 15) -> Agent:
     return Agent(
-        name="Brain",
+        name=BRAIN_EXPERT,
         system_prompt=BRAIN_SYS_PROMPT,
         model=model,
         toolkit=Toolkit(tools=tools or []),

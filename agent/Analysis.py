@@ -3,6 +3,7 @@ from agentscope.agent import Agent, ReActConfig
 from agentscope.tool import Toolkit
 
 from Tools.CVE_Search import create_cve_search_tool
+from agent.experts import ANALYSIS_EXPERT
 
 ANALYSIS_SYS_PROMPT = """你是网络安全漏洞分析专家（Analysis）。
 你只根据提供的真实侦察证据进行研判，不执行命令，不改变任务状态。
@@ -12,7 +13,7 @@ ANALYSIS_SYS_PROMPT = """你是网络安全漏洞分析专家（Analysis）。
 
 def create_analysis_agent(model) -> Agent:
     return Agent(
-        name="Analysis",
+        name=ANALYSIS_EXPERT,
         system_prompt=ANALYSIS_SYS_PROMPT,
         model=model,
         react_config=ReActConfig(max_iters=3, interruption_raise_cancelled_error=True),

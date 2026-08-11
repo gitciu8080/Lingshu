@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "skills": {
+    "nssctf-agent-arena": {
+      "source": "nssctf.cn",
+      "sourceUrl": "https://www.nssctf.cn/skills/@nssctf/nssctf-agent-arena",
+      "sourceType": "well-known",
+      "computedHash": "d7fa419e9359f2b8425c7c7d1ad7ba1234f5956e3e294cda27ad94bf8aeb4715",
+      "wellKnownDigest": "sha256:f1084bd5dbd418d08e111079a5f7ec2994f8b1f08fa8d3421f05adbd844aef0f"
+    }
+  }
+}
