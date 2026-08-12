@@ -8,7 +8,7 @@ ORCHESTRATOR_EXPERT = "Alex - 行动指挥专家"
 NETWORK_RECON_EXPERT = "Ethan - 网络侦察专家"
 ARTIFACT_TRIAGE_EXPERT = "Iris - 文件分析专家"
 ANALYSIS_EXPERT = "Nora - 漏洞研判专家"
-REVERSE_EXPERT = "Ryan - 逆向工程专家"
+REVERSE_EXPERT = "Ryan - 逆向程序专家"
 SCOPE_AUDITOR_EXPERT = "Grace - 授权范围审计专家"
 
 _ATTACK_EXPERTS = {

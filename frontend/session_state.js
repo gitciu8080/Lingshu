@@ -732,7 +732,7 @@ function resolveAgentClass(agent) {
   if (a.includes('brain') || a.includes('战略规划')) return 'brain';
   if (a.includes('recon') || a.includes('侦察') || a.includes('文件分析')) return 'recon';
   if (a.includes('attack') || a.includes('渗透') || a.includes('利用专家') || a.includes('安全验证')) return 'attack';
-  if (a.includes('analysis') || a.includes('研判') || a.includes('密码分析')) return 'analysis';
+  if (a.includes('analysis') || a.includes('研判') || a.includes('密码分析') || a.includes('逆向程序')) return 'analysis';
   if (a.includes('orchestrat') || a.includes('行动指挥')) return 'orchestrator';
   return 'system';
 }
@@ -743,6 +743,7 @@ function agentStatusEmoji(agent) {
   if (a.includes('brain') || a.includes('战略规划')) return '🧠';
   if (a.includes('recon') || a.includes('侦察') || a.includes('文件分析')) return '🔍';
   if (a.includes('attack') || a.includes('渗透') || a.includes('利用专家')) return '⚔️';
+  if (a.includes('逆向程序')) return '🧩';
   if (a.includes('analysis') || a.includes('研判') || a.includes('密码分析')) return '🧪';
   if (a.includes('orchestrat') || a.includes('行动指挥')) return '🎯';
   return '🤖';

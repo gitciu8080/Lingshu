@@ -37,7 +37,7 @@ from agent.Recon import (
     create_artifact_triage_agent,  # 文件/归档目标的侦察（triage）Agent
     create_network_recon_agent,  # 网络目标侦察 Agent
 )
-from agent.Reserve import create_reverse_agent  # 逆向分析 Agent（IDA MCP）
+from agent.Reserve import close_reverse_agent, create_reverse_agent  # 逆向分析 Agent（IDA MCP）
 from agent.ScopeAuditor import create_scope_auditor_agent  # IP 授权审核 Agent
 from agent.experts import build_expert_assignments
 from Tools.Plan import create_add_plan_tool, push_plan_update  # Brain 登记计划条目的工具
@@ -596,10 +596,12 @@ async def run_mission(
     active_agent_tasks = agent_tasks if agent_tasks is not None else set()
     agent_tasks_token = bind_agent_tasks(active_agent_tasks)
     expert_roster_token = None
+    reserve = None
     try:
         # ── 5. 模型与基础 Agent ──
-        # 创建共享的 LLM 模型实例（temperature=0.7 兼顾稳定与发散）
-        model = create_model(provider=provider, Ver=model_ver, temperature=0.7, config=runtime)
+        # 创建共享的 LLM 模型实例（DeepSeek 0.7，Qwen 0.3 避免工具调用退化）
+        qwen_temp = 0.3 if provider == "qwen" else 0.7
+        model = create_model(provider=provider, Ver=model_ver, temperature=qwen_temp, config=runtime)
         # Brain 通过 AddPlan 工具登记结构化计划条目（origin="brain"），
         # 每次登记都会持久化并推送 plan_updated 事件到前端。
         brain = create_brain_agent(
@@ -880,6 +882,7 @@ async def run_mission(
     finally:
         # AgentScope 官方方式：取消直接承载 reply_stream 的 task。
         await cancel_agent_tasks(active_agent_tasks)
+        await close_reverse_agent(reserve)
         reset_agent_tasks(agent_tasks_token)
         if expert_roster_token is not None:
             reset_expert_roster(expert_roster_token)

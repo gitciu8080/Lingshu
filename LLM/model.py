@@ -11,11 +11,16 @@ DeepSeek 走 Responses API（联网搜索工具仅在该 API 下可用），
 """
 from typing import Any, AsyncGenerator, Literal, Union
 
+from agentscope.formatter import (
+    OpenAIResponseFormatter,
+    OpenAIMultiAgentFormatter,
+)
 from pydantic import Field, SecretStr
 
 from agentscope.credential import DeepSeekCredential, OpenAICredential
 from agentscope.model import DeepSeekChatModel, OpenAIResponseModel, OpenAIChatModel
 from agentscope.model import ChatResponse
+from agentscope.message import ThinkingBlock
 
 from config import RuntimeConfig
 
@@ -29,6 +34,32 @@ class _ResponseEventAlias:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._event, name)
+
+
+class DeepSeekResponseFormatter(OpenAIResponseFormatter):
+    """Formatter that ensures ThinkingBlock carries a reasoning_item_id.
+
+    DeepSeek's Responses API uses ``reasoning_text.delta`` (mapped to
+    ``reasoning_summary_text.delta``) but may not populate a reasoning
+    item in ``response.completed.output``.  Without a
+    ``reasoning_item_id`` the upstream ``OpenAIResponseFormatter`` skips
+    the thinking block silently, so the next request omits the reasoning
+    text and DeepSeek returns 400.
+
+    This formatter patches any ``ThinkingBlock`` that has content but
+    no ``reasoning_item_id`` before delegating to the parent formatter.
+    """
+
+    async def format(self, msgs):
+        """Ensure every non-empty ThinkingBlock has a reasoning_item_id."""
+        from agentscope._utils._common import _generate_id
+
+        for msg in msgs:
+            for block in msg.get_content_blocks():
+                if isinstance(block, ThinkingBlock) and block.thinking:
+                    if not getattr(block, "reasoning_item_id", None):
+                        block.reasoning_item_id = _generate_id()
+        return await super().format(msgs)
 
 
 class DeepSeekResponsesModel(OpenAIResponseModel):
@@ -73,6 +104,8 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
             web_search: 是否注入服务端联网搜索工具。
             **kwargs: 透传给 OpenAIResponseModel 的其他参数。
         """
+        # 默认为 DeepSeek 使用能补全 reasoning_item_id 的 formatter
+        kwargs.setdefault("formatter", DeepSeekResponseFormatter())
         super().__init__(
             credential=credential,
             model=model,
@@ -115,6 +148,40 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
             search_tool = [{"type": "web_search"}]
             fmt_tools = search_tool + (fmt_tools if fmt_tools else [])
         return fmt_tools, fmt_tool_choice
+
+
+class QwenChatModel(OpenAIChatModel):
+    """Qwen chat model that disables thinking on tool-calling turns.
+
+    Qwen's llama.cpp tool parser can mix reasoning text into function
+    arguments when thinking is enabled, producing malformed JSON. Pure text
+    calls retain the configured thinking level.
+    """
+
+    async def _call_api(
+        self,
+        model_name: str,
+        messages: list,
+        tools: list[dict] | None = None,
+        tool_choice=None,
+        **generate_kwargs: Any,
+    ):
+        if tools and self.extra_body is not None:
+            extra_body = dict(self.extra_body)
+            template_kwargs = dict(
+                extra_body.get("chat_template_kwargs") or {},
+            )
+            template_kwargs["enable_thinking"] = False
+            extra_body["chat_template_kwargs"] = template_kwargs
+            generate_kwargs["extra_body"] = extra_body
+
+        return await super()._call_api(
+            model_name,
+            messages,
+            tools,
+            tool_choice,
+            **generate_kwargs,
+        )
 
 
 def DeepSeek(
@@ -205,39 +272,32 @@ def DeepSeek(
 def Qwen(
         Ver: str = "Min",
         temperature: float = 0.7,
-        repeat_penalty: float | None = None,
         config: RuntimeConfig | None = None,
-) -> OpenAIChatModel:
+) -> QwenChatModel:
     """创建 Qwen 模型（llama.cpp OpenAI 兼容 API）。
 
-    思考能力通过 extra_body 传递 llama.cpp 原生参数:
-      Low  → chat_template_kwargs.enable_thinking=false (快速、低延迟)
-      Min  → enable_thinking=true + thinking_budget_tokens=4096 (默认平衡)
-      Max  → enable_thinking=true + thinking_budget_tokens=8192 (深度推理)
+    思考级别通过 extra_body 传递给 llama.cpp 服务器:
+      Low  → thinking=false (快速、低延迟)
+      Min  → thinking=true  (默认平衡)
+      Max  → thinking=true + max_tokens=8192 (深度推理)
 
-    重复惩罚通过 llama.cpp 原生 repeat_penalty 传递（>1.0 惩罚重复 token，
-    调高可抑制模型重复输出残缺/空洞的 <tool_call> 等标签）。
     Args:
         Ver: 思考级别（Low/Min/Max）。
         temperature: 温度参数。
-        repeat_penalty: 重复惩罚系数；None 时读取 config.qwen_repeat_penalty。
         config: 运行时配置。
     """
     runtime = config or RuntimeConfig.from_env()
     model_name = runtime.model_name(Ver, provider="qwen")
-    penalty = runtime.qwen_repeat_penalty if repeat_penalty is None else repeat_penalty
 
     # 思考级别 → 推理参数
-    # max_tokens 限制总输出（思考+回答），必须 > thinking_budget_tokens，
-    # 否则思考链会吃满输出额度导致最终回答被截断。
     _think_levels = {
-        "Low": {"enable_thinking": False, "budget": 2048, "max_tokens": 2048},
-        "Min": {"enable_thinking": True,  "budget": 4096, "max_tokens": 8192},
-        "Max": {"enable_thinking": True,  "budget": 8192, "max_tokens": 16384},
+        "Low": {"thinking": False, "max_tokens": 2048},
+        "Min": {"thinking": True,  "max_tokens": 4096},
+        "Max": {"thinking": True,  "max_tokens": 8192},
     }
     level = _think_levels.get(Ver, _think_levels["Min"])
 
-    return OpenAIChatModel(
+    return QwenChatModel(
         credential=OpenAICredential(
             api_key=SecretStr(runtime.get_api_key("qwen")),
             base_url=runtime.get_base_url("qwen"),
@@ -247,17 +307,6 @@ def Qwen(
             temperature=temperature,
             max_tokens=level["max_tokens"],
         ),
-        extra_body={
-            "reasoning_format": "auto",
-            "chat_template_kwargs": {
-                "enable_thinking": level["enable_thinking"],
-            },
-            "thinking_budget_tokens": level["budget"],
-            "repeat_penalty": penalty,
-            "reasoning_control": True,
-            "return_progress": True,
-            "timings_per_token": True,
-        },
         stream=True,
         max_retries=3,
         client_kwargs={"timeout": 600.0},
