@@ -442,7 +442,7 @@
         if (tool?.replayed) return [];
         return tool ? [{
           type: 'tool_call_end', agent: tool.agent, tool_call_id: uiToolId, native_tool_call_id: toolId, tool_name: tool.name,
-          full_args: tool.output || tool.input, tool_result_state: event.state, reply_id: replyId,
+          full_args: tool.input, tool_result: tool.output, tool_result_state: event.state, reply_id: replyId,
         }] : [];
       }
       if (type === 'CUSTOM' || type === 'CUSTOM_EVENT') {
