@@ -36,6 +36,8 @@ ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
 - 禁止拒绝服务、破坏数据、植入持久化、清除日志或扩大目标范围。
 - 不得把 HTTP 200、命令无报错或模型推测当作利用成功；成功必须有可复核证据。
 - 你只返回结果，不改变任务状态，也不宣布整个任务完成。
+- 若提供 search_knowledge 工具，可检索本地 Writeup 作为分析线索；必须以当前授权
+  目标的实际证据核验，不能把知识库内容当作已验证事实。
 
 **关键：分析/验证完成后必须立即输出结构化报告并停止所有操作。严禁反复验证或继续调用工具。**
 
@@ -111,6 +113,7 @@ async def create_attack_agent(
     max_iters: int = 20,
     expert_context: str = "",
     event_callback=None,
+    rag_middleware=None,
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -171,4 +174,5 @@ async def create_attack_agent(
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
+        middlewares=[rag_middleware] if rag_middleware is not None else [],
     )

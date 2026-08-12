@@ -28,7 +28,13 @@ class Phase(str, Enum):
 _ALLOWED_TRANSITIONS = {
     Phase.PLANNING: {Phase.RECON, Phase.FAILED},
     Phase.RECON: {Phase.RECON, Phase.ANALYSIS, Phase.FAILED},
-    Phase.ANALYSIS: {Phase.RECON, Phase.ANALYSIS, Phase.EXPLOITATION, Phase.FAILED},
+    Phase.ANALYSIS: {
+        Phase.RECON,
+        Phase.ANALYSIS,
+        Phase.EXPLOITATION,
+        Phase.COMPLETED,
+        Phase.FAILED,
+    },
     Phase.EXPLOITATION: {
         Phase.RECON,
         Phase.ANALYSIS,

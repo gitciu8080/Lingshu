@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -43,7 +44,20 @@ def _mission_options(inputs: Msg | list[Msg] | None) -> dict[str, Any]:
         raise ValueError("A Lingshu mission must be started by a user message")
     options = dict(msg.metadata.get("lingshu") or {})
     text = msg.get_text_content() or ""
-    options.setdefault("goal", text.strip() or "获取 Flag")
+    goal_text = text.strip() or "获取 Flag"
+    # Web 控制台（AgentScope web_ui 等）发送的纯文本消息不会携带 metadata，
+    # 此时从消息文本解析授权目标：支持「目标: IP / target: IP」前缀。
+    # 灵枢自家前端仍通过 metadata.lingshu 注入，不触发此回退。
+    if not options.get("target"):
+        target_match = re.search(r"(?:目标|target)\s*[:：]\s*(\S+)", text, re.IGNORECASE)
+        if target_match:
+            options["target"] = target_match.group(1).strip().rstrip("。，,;；")
+            goal_text = (
+                re.sub(r"(?:目标|target)\s*[:：]\s*\S+\s*", "", text, flags=re.IGNORECASE)
+                .strip()
+                or "获取 Flag"
+            )
+    options.setdefault("goal", goal_text)
     if not options.get("target"):
         raise ValueError("UserMsg.metadata.lingshu.target is required")
     return options

@@ -13,3 +13,5 @@ CHANGES.md
 WorkDir/
 venv/
 .bak2
+webui/node_modules/
+webui/dist/

@@ -41,6 +41,7 @@ from integrations.agentscope_service import (
     control_router as agentscope_control_router,
 )
 from integrations.agentscope_service.account_events import publish_account_event
+from Tools.KnowledgeBase import get_rag_service
 
 # ── SessionContext 与会话注册表 ──
 
@@ -558,7 +559,12 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
 @asynccontextmanager
 async def _app_lifespan(_: FastAPI):
     async with agentscope_lifespan():
-        yield
+        rag = get_rag_service(_PROJECT_ROOT)
+        await rag.start()
+        try:
+            yield
+        finally:
+            await rag.close()
 
 
 app = FastAPI(
@@ -584,6 +590,7 @@ _AUTH_SKIP_PATHS = (
     "/api_client.js",
     "/agent_transport.js",
     "/iconpark-icons.js",
+    "/assets",
     "/logo2.png",
     "/logored.png",
     "/uploads",
@@ -778,7 +785,11 @@ async def logout(current_user: dict = Depends(get_current_user)):
 @app.get("/", response_class=HTMLResponse)
 @app.get("/index.html", response_class=HTMLResponse)
 async def index():
-    html_path = _PROJECT_ROOT / "frontend" / "index.html"
+    # Vite production build takes precedence.  The legacy page remains a
+    # temporary fallback so deployments stay usable until their first build.
+    html_path = _PROJECT_ROOT / "webui" / "dist" / "index.html"
+    if not html_path.is_file():
+        html_path = _PROJECT_ROOT / "frontend" / "index.html"
     if html_path.is_file():
         return HTMLResponse(
             html_path.read_text(encoding="utf-8"),
@@ -834,7 +845,7 @@ async def iconpark_icons_js():
 @app.get("/logo2.png")
 async def light_logo():
     return FileResponse(
-        _PROJECT_ROOT / "logo2.png",
+        _PROJECT_ROOT / "webui" / "src" / "logo2.png",
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=3600"},
     )
@@ -843,10 +854,40 @@ async def light_logo():
 @app.get("/logored.png")
 async def dark_logo():
     return FileResponse(
-        _PROJECT_ROOT / "logored.png",
+        _PROJECT_ROOT / "webui" / "src" / "logored.png",
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+@app.get("/api/knowledge/status")
+async def knowledge_status(current_user: dict = Depends(get_current_user)):
+    """Return safe status for the shared, read-only `.RAG` corpus."""
+    del current_user
+    return get_rag_service(_PROJECT_ROOT).status()
+
+
+class KnowledgeSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=5, ge=1, le=10)
+
+
+@app.post("/api/knowledge/search")
+async def knowledge_search(req: KnowledgeSearchRequest, current_user: dict = Depends(get_current_user)):
+    del current_user
+    rag = get_rag_service(_PROJECT_ROOT)
+    if not rag.available:
+        raise HTTPException(status_code=503, detail=rag.error or "知识库不可用")
+    return {"results": await rag.search(req.query, req.top_k)}
+
+
+@app.post("/api/knowledge/reindex")
+async def knowledge_reindex(current_user: dict = Depends(get_current_user)):
+    del current_user
+    rag = get_rag_service(_PROJECT_ROOT)
+    if not rag.available:
+        raise HTTPException(status_code=503, detail=rag.error or "知识库不可用")
+    return await rag.sync()
 
 
 # ══════════════════════════════════════════════════
@@ -1261,6 +1302,27 @@ async def upload_target(file: UploadFile = File(...), current_user: dict = Depen
     dest = _upload_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
     dest.write_bytes(content)
     return {"filename": safe_name, "path": str(dest), "size": len(content), "message": f"文件已上传：{dest}"}
+
+
+# Vite fingerprints every production asset.  Serve only files beneath the
+# expected dist directory, then let client-side React Router handle routes.
+@app.get("/assets/{asset_path:path}")
+async def vite_asset(asset_path: str):
+    root = (_PROJECT_ROOT / "webui" / "dist" / "assets").resolve()
+    candidate = (root / asset_path).resolve()
+    if root not in candidate.parents or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="静态资源未找到")
+    return FileResponse(candidate, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+@app.get("/{frontend_path:path}", response_class=HTMLResponse)
+async def react_spa(frontend_path: str):
+    """SPA fallback, deliberately declared after all API routes."""
+    del frontend_path
+    html_path = _PROJECT_ROOT / "webui" / "dist" / "index.html"
+    if html_path.is_file():
+        return HTMLResponse(html_path.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
+    raise HTTPException(status_code=404, detail="React 前端尚未构建")
 
 
 if __name__ == "__main__":

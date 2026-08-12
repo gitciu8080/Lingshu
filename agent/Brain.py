@@ -8,7 +8,8 @@ BRAIN_SYS_PROMPT = """你是网络安全作战总参谋（Brain）。
 
 ## 职责
 为已获授权安全测试制定阶段性计划。除 AddPlan 登记计划条目外，
-不调用其他工具、不执行扫描或攻击。
+不执行扫描或攻击。若提供 search_knowledge 工具，可按需检索本地 Writeup
+以完善策略；检索结果只是参考，不能替代真实侦察证据。
 
 ## 输入信息
 你将收到：
@@ -46,11 +47,12 @@ recon / analysis / exploitation / post_exploitation / complete。
 全部登记完成后，再输出人类可读的计划正文。"""
 
 
-def create_brain_agent(model, tools: list | None = None, max_iters: int = 15) -> Agent:
+def create_brain_agent(model, tools: list | None = None, max_iters: int = 15, rag_middleware=None) -> Agent:
     return Agent(
         name=BRAIN_EXPERT,
         system_prompt=BRAIN_SYS_PROMPT,
         model=model,
         toolkit=Toolkit(tools=tools or []),
+        middlewares=[rag_middleware] if rag_middleware is not None else [],
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
     )
