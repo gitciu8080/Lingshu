@@ -69,6 +69,14 @@ class RuntimeConfig:
     # 默认调高以抑制 Qwen 输出残缺/重复的 <tool_call> 标签等抽风行为。
     qwen_repeat_penalty: float = 1.3
 
+    # ── RAG embedding (OpenAI compatible) ──
+    # 留空时知识库功能以“未配置”状态降级，不影响主任务系统启动。
+    embedding_api_key: str = ""
+    embedding_base_url: str = ""
+    embedding_model: str = ""
+    embedding_dimensions: int = 0
+    embedding_pass_dimensions: bool = True
+
     command_timeout: int = 300
 
     @classmethod
@@ -101,9 +109,27 @@ class RuntimeConfig:
             qwen_repeat_penalty=max(
                 1.0, min(float(os.getenv("QWEN_REPEAT_PENALTY", "1.3")), 2.0),
             ),
+            embedding_api_key=os.getenv("LINGSHU_EMBEDDING_API_KEY", "").strip(),
+            embedding_base_url=os.getenv("LINGSHU_EMBEDDING_BASE_URL", "").strip().rstrip("/"),
+            embedding_model=os.getenv("LINGSHU_EMBEDDING_MODEL", "").strip(),
+            embedding_dimensions=max(0, int(os.getenv("LINGSHU_EMBEDDING_DIMENSIONS", "0"))),
+            embedding_pass_dimensions=os.getenv("LINGSHU_EMBEDDING_PASS_DIMENSIONS", "1").strip().lower()
+            in ("1", "true", "yes", "on"),
             # 通用
             command_timeout=max(10, min(int(os.getenv("LINGSHU_COMMAND_TIMEOUT", "300")), 600)),
         )
+
+    def embedding_error(self) -> str | None:
+        """Return a user-safe configuration error for the optional RAG service."""
+        if not self.embedding_api_key:
+            return "未配置 LINGSHU_EMBEDDING_API_KEY"
+        if not self.embedding_base_url:
+            return "未配置 LINGSHU_EMBEDDING_BASE_URL"
+        if not self.embedding_model:
+            return "未配置 LINGSHU_EMBEDDING_MODEL"
+        if self.embedding_dimensions <= 0:
+            return "LINGSHU_EMBEDDING_DIMENSIONS 必须为正整数"
+        return None
 
     def model_name(self, version: str, provider: str = "deepseek") -> str:
         """根据提供商和思考级别返回模型名称。"""

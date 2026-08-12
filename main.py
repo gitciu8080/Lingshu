@@ -42,6 +42,7 @@ from agent.ScopeAuditor import create_scope_auditor_agent  # IP 授权审核 Age
 from agent.experts import build_expert_assignments
 from Tools.Plan import create_add_plan_tool, push_plan_update  # Brain 登记计划条目的工具
 from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
+from Tools.KnowledgeBase import get_rag_service
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
 from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     AgentMaxIterationsError,
@@ -604,10 +605,13 @@ async def run_mission(
         model = create_model(provider=provider, Ver=model_ver, temperature=qwen_temp, config=runtime)
         # Brain 通过 AddPlan 工具登记结构化计划条目（origin="brain"），
         # 每次登记都会持久化并推送 plan_updated 事件到前端。
+        rag_service = get_rag_service(project_dir)
+        await rag_service.start()
         brain = create_brain_agent(
             model,
             tools=[create_add_plan_tool(mission, store, event_callback, default_origin="brain")],
             max_iters=_iter_budget(target_spec.kind, "brain", model_ver),
+            rag_middleware=rag_service.middleware(),
         )
         analysis = create_analysis_agent(model)  # 漏洞研判专家（纯推理）
 
@@ -713,6 +717,7 @@ async def run_mission(
             category_decision=mission.category_decision,
             scope_registry=scope_registry,
             max_iters=_iter_budget(target_spec.kind, "attack", model_ver, len(mission.plan_items)),
+            rag_middleware=rag_service.middleware(),
             expert_context=mission.plan,
             event_callback=event_callback,
         )
