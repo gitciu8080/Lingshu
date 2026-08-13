@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -19,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from agentscope.message import UserMsg
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from auth import (
@@ -28,12 +31,28 @@ from auth import (
     create_access_token,
     decode_access_token,
     get_user_by_username,
+    list_users,
+    reset_user_password,
+    delete_user,
+    PasswordReset,
     UserCreate,
     UserLogin,
     TokenResponse,
 )
 
 from main import run_mission
+from config import RuntimeConfig
+from LLM.model import create_model
+from TaskState import MissionStore
+from Tools.Report import generate_mission_pdf
+from Tools.tooling import (
+    cancel_agent_tasks,
+    interrupt_agent_tasks,
+    bind_agent_tasks,
+    reset_agent_tasks,
+    stream_agent_reply,
+)
+from agent.Summary import SUMMARY_EXPERT, create_summary_agent
 import session_store
 from integrations.agentscope_service import (
     agentscope_app,
@@ -42,6 +61,9 @@ from integrations.agentscope_service import (
 )
 from integrations.agentscope_service.account_events import publish_account_event
 from Tools.KnowledgeBase import get_rag_service
+from Tools.target import normalize_target
+
+logger = logging.getLogger(__name__)
 
 # ── SessionContext 与会话注册表 ──
 
@@ -53,11 +75,20 @@ class SessionContext:
     task: asyncio.Task | None = None
     subscribers: set[asyncio.Queue] = field(default_factory=set)
     stream_buffers: dict[str, str] = field(default_factory=dict)
+    # stream key → 稳定 block id。必须跨 start/delta/end 传递，历史恢复时
+    # 才不会把同一 Agent 的多次推理合并覆盖成一条。
+    stream_blocks: dict[str, str] = field(default_factory=dict)
+    stream_counter: int = 0
+    # 旧 WebUI 通道的未完成流快照写入节流状态。模型可能按单个字符返回，
+    # 不能让每个 delta 都重新打开 SQLite、覆盖完整正文并提交事务。
+    stream_snapshot_writes: dict[str, tuple[float, int]] = field(default_factory=dict)
     tool_buffers: dict[str, dict[str, str]] = field(default_factory=dict)
     approval_decision_submitted: bool = False
     agent_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     # 运行时追加指令状态（非审批用户消息 → 中断 Agent → 注入后恢复）
-    steering_state: dict[str, Any] = field(default_factory=lambda: {"pending": None, "processed": False})
+    steering_state: dict[str, Any] = field(
+        default_factory=lambda: {"pending": None, "processed": False, "queue": []},
+    )
     # 用户已点击停止：AgentScope 可能吞掉 CancelledError 使 run_mission 正常返回，
     # 此标记确保 _run_and_cleanup 终态强制收敛为 cancelled 而非 failed。
     cancel_requested: bool = False
@@ -72,12 +103,18 @@ _sessions_dir.mkdir(parents=True, exist_ok=True)
 # 用户并发上限
 MAX_CONCURRENT_SESSIONS_PER_USER = 5
 _session_creation_lock = asyncio.Lock()
+# 浏览器双击、网络重试等会在极短时间内发送相同创建请求。前端有加载锁，
+# 此处再做服务端幂等兜底，避免并发下创建多条相同会话。
+_recent_session_creations: dict[tuple[Any, ...], tuple[float, str]] = {}
+_DUPLICATE_SESSION_WINDOW_SECONDS = 12.0
 
 # ── 旧端点兼容路径常量 ──
 _mission_store_path = _PROJECT_ROOT / ".TaskMemory" / "current_mission.json"
 _long_memory_path = _PROJECT_ROOT / ".LongMemory" / "agentic_memory.json"
 _upload_dir = _PROJECT_ROOT / "WorkDir" / "uploads"
 _upload_dir.mkdir(parents=True, exist_ok=True)
+_reports_dir = _PROJECT_ROOT / ".Reports"
+_reports_dir.mkdir(parents=True, exist_ok=True)
 
 
 # ── 旧版全局 SSE（deprecated，保留兼容） ──
@@ -121,6 +158,7 @@ _PERSIST_EVENT_TYPES = frozenset({
     "target_info", "flag_found",
     # NSSCTF 在线提交结果
     "nss_submit",
+    "report_ready",
 })
 
 # 系统级事件（role="system"），其余持久化事件 role="agent"
@@ -129,6 +167,7 @@ _SYSTEM_ROLE_EVENTS = frozenset({
     "phase_change", "error",
     "approval_required", "approval_resolved",
     "expert_joined",
+    "report_ready",
 })
 
 
@@ -156,9 +195,14 @@ def _persist_event(session_id: str, event_type: str, payload: dict) -> int | Non
     elif event_type == "error":
         content = payload.get("message", "")
     elif event_type in ("text_end", "thinking_end"):
-        content = payload.get("full_text", payload.get("content", ""))
+        # block_id 与正文必须一起存储；只存纯正文会使刷新回放无法区分
+        # 同一 Agent 的多段推理/输出，最终被前端覆盖为一条。
+        content = json.dumps({
+            "block_id": payload.get("block_id", ""),
+            "full_text": payload.get("full_text", payload.get("content", "")),
+        }, ensure_ascii=False)
     elif event_type in ("text_start", "thinking_start"):
-        content = ""
+        content = json.dumps({"block_id": payload.get("block_id", "")}, ensure_ascii=False)
     elif event_type == "plan_updated":
         # 将计划条目和阶段序列化为 JSON 存入 content，供历史回放
         content = json.dumps({
@@ -175,15 +219,23 @@ def _persist_event(session_id: str, event_type: str, payload: dict) -> int | Non
             "tool_call_id": payload.get("tool_call_id", ""),
             "tool_name": payload.get("tool_name", ""),
             "full_args": payload.get("full_args", ""),
+            "output": payload.get("output", ""),
         }, ensure_ascii=False)
     elif event_type == "approval_required":
         # 保存完整事件数据（含 scan_summary、plan_items、reason），供断线重连时恢复审批弹窗
         content = json.dumps(payload, ensure_ascii=False)
     elif event_type == "approval_resolved":
         # 保存审批结果，供前端恢复时判断是否已审批
-        content = json.dumps({"approved": payload.get("approved", False), "decision": payload.get("decision", "")}, ensure_ascii=False)
+        content = json.dumps({
+            "approved": payload.get("approved", False),
+            "decision": payload.get("decision", ""),
+            "selected_plan_id": payload.get("selected_plan_id", ""),
+            "priority_order": payload.get("priority_order", []),
+        }, ensure_ascii=False)
     elif event_type == "nss_submit":
         # 保存 NSSCTF 提交结果，供历史回放
+        content = json.dumps(payload, ensure_ascii=False)
+    elif event_type == "report_ready":
         content = json.dumps(payload, ensure_ascii=False)
     else:
         content = payload.get("content", payload.get("message", ""))
@@ -241,18 +293,42 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
     时在 Agent 日志面板创建气泡入口。
     """
     def callback(event_type: str, **payload: Any) -> None:
+        stream_key = ""
         # 全文缓冲：text_delta / thinking_delta → 累积
         if event_type in ("text_delta", "thinking_delta"):
             agent = payload.get("agent", "")
-            key = f"{event_type.removesuffix('_delta')}:{agent}"
-            ctx.stream_buffers[key] = ctx.stream_buffers.get(key, "") + (
+            stream_key = f"{event_type.removesuffix('_delta')}:{agent}"
+            block_id = ctx.stream_blocks.get(stream_key)
+            if block_id:
+                payload["block_id"] = block_id
+            ctx.stream_buffers[stream_key] = ctx.stream_buffers.get(stream_key, "") + (
                 payload.get("delta") or payload.get("content") or ""
             )
+            if block_id:
+                now = time.monotonic()
+                full_text = ctx.stream_buffers[stream_key]
+                last_write, last_size = ctx.stream_snapshot_writes.get(
+                    stream_key, (0.0, 0),
+                )
+                # 与 Agent Service 历史镜像保持相同策略：最多约每 200ms
+                # 写一次；大块输出累计 512 字符时提前落盘。首个非空
+                # delta 会立即写入，崩溃恢复能力不受影响。
+                if now - last_write >= 0.2 or len(full_text) - last_size >= 512:
+                    session_store.upsert_stream_snapshot(
+                        session_id, "", block_id, agent,
+                        event_type.removesuffix("_delta"), full_text,
+                    )
+                    ctx.stream_snapshot_writes[stream_key] = (now, len(full_text))
         # 全文终结：text_end → 注入 full_text 并清除缓冲区
         elif event_type in ("text_end", "thinking_end"):
             agent = payload.get("agent", "")
-            key = f"{event_type.removesuffix('_end')}:{agent}"
-            full = ctx.stream_buffers.pop(key, "")
+            stream_key = f"{event_type.removesuffix('_end')}:{agent}"
+            block_id = ctx.stream_blocks.pop(stream_key, "")
+            if block_id:
+                payload["block_id"] = block_id
+                session_store.delete_stream_snapshot(session_id, block_id)
+            full = ctx.stream_buffers.pop(stream_key, "")
+            ctx.stream_snapshot_writes.pop(stream_key, None)
             if full:
                 payload["full_text"] = full
             # 也推到 SSE（前端依靠 SSE 拿到含 full_text 的 text_end）
@@ -260,8 +336,14 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
         # start 时清旧缓冲（防止上一条异常截断后残留）
         elif event_type in ("text_start", "thinking_start"):
             agent = payload.get("agent", "")
-            key = f"{event_type.removesuffix('_start')}:{agent}"
-            ctx.stream_buffers[key] = ""
+            stream_key = f"{event_type.removesuffix('_start')}:{agent}"
+            # 若上一个块异常中断，保留其已持久化快照并新开一条记录。
+            ctx.stream_counter += 1
+            block_id = f"{stream_key}:{ctx.stream_counter}"
+            ctx.stream_blocks[stream_key] = block_id
+            ctx.stream_buffers[stream_key] = ""
+            ctx.stream_snapshot_writes.pop(stream_key, None)
+            payload["block_id"] = block_id
 
         # 工具参数按调用 ID 累积，结束时一次性持久化完整快照。
         if event_type == "tool_call_start":
@@ -271,6 +353,7 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                     "agent": payload.get("agent", ""),
                     "tool_name": payload.get("tool_name", ""),
                     "full_args": "",
+                    "output": "",
                 }
         elif event_type == "tool_call_delta":
             tool_call_id = payload.get("tool_call_id", "")
@@ -279,6 +362,7 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                     "agent": payload.get("agent", ""),
                     "tool_name": "",
                     "full_args": "",
+                    "output": "",
                 })
                 tool["full_args"] += payload.get("delta") or ""
         elif event_type == "tool_call_end":
@@ -288,6 +372,8 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                 payload["full_args"] = tool.get("full_args", "")
                 if not payload.get("tool_name"):
                     payload["tool_name"] = tool.get("tool_name", "")
+            # 部分 ToolCallEndEvent 不携带输出；保留空字符串以稳定前端结构。
+            payload["output"] = payload.get("output", "") or (tool or {}).get("output", "")
 
         payload["session_id"] = session_id
         # 先持久化再广播，确保刷新/重连可以从数据库补偿事件。
@@ -371,11 +457,20 @@ def _message_to_event(message: dict) -> dict:
         "agent": message.get("agent_name", ""),
         "seq": message.get("seq", 0),
     }
-    if event_type in ("text_end", "thinking_end"):
-        event["full_text"] = content
+    if event_type in ("text_start", "thinking_start", "text_end", "thinking_end"):
+        try:
+            event.update(json.loads(content))
+        except (json.JSONDecodeError, TypeError):
+            # 兼容已落库的旧版本：结束事件 content 直接就是正文。
+            if event_type.endswith("_end"):
+                event["full_text"] = content
+        # 旧记录没有 block_id 时，按持久化序号分块，避免 React 将同一 Agent
+        # 的所有历史推理覆盖到最后一条。
+        if not event.get("block_id"):
+            event["block_id"] = f"legacy:{event_type}:{message.get('seq', 0)}"
     elif event_type == "phase_change":
         event["phase"] = content
-    elif event_type in ("approval_required", "approval_resolved", "plan_updated", "nss_submit", "expert_joined"):
+    elif event_type in ("approval_required", "approval_resolved", "plan_updated", "nss_submit", "expert_joined", "report_ready"):
         try:
             event.update(json.loads(content))
         except (json.JSONDecodeError, TypeError):
@@ -451,6 +546,33 @@ async def _verify_session_owner(session_id: str, user_id: int) -> dict:
     return session_info
 
 
+def _attach_model_metadata(
+    session: dict,
+    runtime: RuntimeConfig | None = None,
+) -> None:
+    """为会话补充前端可直接展示的思考强度和实际模型名称。"""
+    provider = str(session.get("provider") or "deepseek").strip().lower()
+    stored_model = str(session.get("model") or "Min").strip()
+    canonical_levels = {"low": "Low", "min": "Min", "max": "Max"}
+    model_level = canonical_levels.get(stored_model.lower())
+
+    if model_level is None:
+        # 兼容早期直接将真实模型名写入 model 字段的会话。
+        model_level = str(session.get("model_level") or "自定义")
+        model_name = stored_model
+    else:
+        try:
+            model_name = (runtime or RuntimeConfig.from_env()).model_name(
+                model_level,
+                provider=provider,
+            )
+        except (TypeError, ValueError):
+            model_name = stored_model
+
+    session["model_level"] = model_level
+    session["model_name"] = model_name
+
+
 # ── 长期记忆保存辅助函数 ──
 
 def _save_long_term_memory(session_id, target, goal, phase, success, flag, summary):
@@ -468,6 +590,132 @@ def _save_long_term_memory(session_id, target, goal, phase, success, flag, summa
         )
     except Exception:
         pass
+
+
+def _build_summary_transcript(messages: list[dict], maximum_chars: int = 120_000) -> str:
+    """从持久化事件构建去重、按时间排序且有长度上限的总结输入。"""
+    useful_types = {
+        "", "message", "text_end", "user_message", "phase_change", "error",
+        "approval_required", "approval_resolved", "tool_call_end", "flag_found",
+        "mission_start", "mission_end", "nss_submit", "plan_updated",
+    }
+    lines: list[str] = []
+    last_signature: tuple[str, str] | None = None
+    for item in messages:
+        event_type = str(item.get("event_type") or ("user_message" if item.get("role") == "user" else "message"))
+        if event_type not in useful_types:
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        agent = str(item.get("agent_name") or item.get("role") or "system")
+        signature = (agent, content)
+        if signature == last_signature:
+            continue
+        last_signature = signature
+        lines.append(f"#{item.get('seq', '?')} [{event_type}] [{agent}] {content[:5000]}")
+
+    selected: list[str] = []
+    used = 0
+    for line in reversed(lines):
+        if selected and used + len(line) > maximum_chars:
+            break
+        selected.append(line)
+        used += len(line)
+    selected.reverse()
+    omitted = len(lines) - len(selected)
+    prefix = f"[说明] 因长度限制省略最早的 {omitted} 条低优先级记录。\n" if omitted else ""
+    return prefix + "\n".join(selected)
+
+
+async def _summarize_and_generate_report(
+    session_id: str,
+    ctx: SessionContext,
+    mission_state,
+    provider: str,
+    model_ver: str,
+    callback,
+) -> str:
+    """调用 Summary Agent，总结完整会话并原子生成 PDF。"""
+    messages = await asyncio.to_thread(session_store.get_messages, session_id, 0, 5000)
+    mission_data = mission_state.to_dict()
+    mission_data.pop("events", None)
+    transcript = _build_summary_transcript(messages)
+    prompt = (
+        "请总结以下一次完整授权安全测试。\n\n"
+        f"【结构化任务状态】\n{json.dumps(mission_data, ensure_ascii=False, indent=2)[:50000]}\n\n"
+        f"【完整会话记录】\n{transcript}"
+    )
+    callback(
+        "expert_joined",
+        expert_name=SUMMARY_EXPERT,
+        specialty="对话总结与 PDF 报告",
+        agent=SUMMARY_EXPERT,
+    )
+    try:
+        runtime = RuntimeConfig.from_env()
+        model = create_model(
+            provider=provider,
+            Ver=model_ver,
+            temperature=0.2,
+            web_search=False,
+            config=runtime,
+        )
+        summary_agent = create_summary_agent(model)
+        token = bind_agent_tasks(ctx.agent_tasks)
+        try:
+            result = await stream_agent_reply(
+                summary_agent,
+                UserMsg(name="Orchestrator", content=prompt),
+                prefix="[Summary] ",
+                on_event=callback,
+            )
+        finally:
+            reset_agent_tasks(token)
+        summary = (result.get_text_content() or "").strip()
+        if not summary:
+            raise RuntimeError("Summary Agent 未返回报告正文")
+    except asyncio.CancelledError:
+        raise
+    except Exception as summary_exc:
+        # 模型服务暂时不可用时仍必须为每次正常结束的任务留下可下载报告。
+        summary = mission_state.summary.strip() if mission_state.summary else (
+            "# 执行摘要\n\n"
+            f"授权目标：{mission_state.target}\n\n"
+            f"任务目标：{mission_state.goal}\n\n"
+            f"最终阶段：{mission_state.phase.value}\n\n"
+            f"安全发现：{len(mission_state.findings)} 条；攻击链步骤：{len(mission_state.attack_chain)} 条。\n\n"
+            "# 总结状态\n\nSummary Agent 调用失败，本文由结构化任务状态自动生成；"
+            "完整对话仍保存在会话审计记录中。"
+        )
+        callback(
+            "message",
+            agent=SUMMARY_EXPERT,
+            content=f"{summary}\n\n> 自动降级原因：{summary_exc}",
+        )
+
+    mission_state.summary = summary
+    mission_state.record("Summary", "conversation_summarized", message_count=len(messages))
+    store = MissionStore.for_session(session_id, base_dir=_sessions_dir)
+    store.save(mission_state)
+    mission_data = mission_state.to_dict()
+    session = await asyncio.to_thread(session_store.get_session, session_id) or {}
+    mission_data["title"] = session.get("title") or mission_data.get("title")
+    report_path = await asyncio.to_thread(
+        generate_mission_pdf,
+        session_id,
+        summary,
+        mission_data,
+        _reports_dir,
+    )
+    callback(
+        "report_ready",
+        agent="system",
+        filename=report_path.name,
+        url=f"/api/session/{session_id}/report",
+        message="对话总结与 PDF 报告已生成",
+    )
+    return summary
 
 
 # ── 运行并清理 ──
@@ -507,6 +755,19 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                 status_val = "completed"
             else:
                 status_val = "failed"
+            try:
+                summary = await _summarize_and_generate_report(
+                    session_id, ctx, mission_state, provider, model_ver, callback,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as report_exc:
+                # 报告子流程失败不改变主任务结论，保留 Orchestrator 的原总结。
+                callback(
+                    "report_error",
+                    message=f"总结或 PDF 生成失败：{report_exc}",
+                    agent="system",
+                )
     except asyncio.CancelledError:
         status_val = "cancelled"
         phase = "cancelled"
@@ -550,8 +811,9 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             _save_long_term_memory(session_id, target, goal, phase, success, flag, summary)
         except Exception:
             pass
-        # 延迟清理，给前端时间拉取最后的事件
-        await asyncio.sleep(5)
+        # 正常结束时短暂保留 SSE；用户主动停止必须立即完成清理并返回。
+        if status_val != "cancelled":
+            await asyncio.sleep(5)
         if session_id in _active_sessions:
             del _active_sessions[session_id]
 
@@ -600,6 +862,7 @@ _AUTH_SKIP_PATHS = (
     "/favicon.ico",
     "/auth/login",
     "/auth/register",
+    "/superadmin",
 )
 
 
@@ -639,6 +902,13 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
                 media_type="application/json",
             )
 
+        if int(payload.get("auth_epoch", -1)) != int(user.get("auth_epoch", 0)):
+            return Response(
+                status_code=401,
+                content=json.dumps({"detail": "登录状态已失效，请重新登录"}),
+                media_type="application/json",
+            )
+
         # 存储完整的用户对象，供 get_current_user 直接使用
         request.state.current_user = {
             "id": user["id"],
@@ -667,8 +937,28 @@ class MissionStartRequest(BaseModel):
     nss_context: dict | None = Field(default=None, description="NSSCTF Arena 上下文（attempt_id/token/api_base），供 Orchestrator 在线提交 Flag")
 
 
+def _normalize_user_authorized_target(value: str) -> str:
+    """规范化用户输入，并将其作为本次任务的初始授权目标。
+
+    ``run_mission`` 会据此把网络目标（及域名解析出的 IP）登记到
+    ``ScopeRegistry``。在 API 入口先做一次相同的规范化，保证会话记录、
+    SSE 启动事件和实际执行目标使用同一字符串。
+    """
+    try:
+        spec = normalize_target(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"目标地址无效：{exc}") from exc
+
+    if spec.kind == "network":
+        if not spec.host:
+            raise HTTPException(status_code=422, detail="网络目标缺少主机名或 IP 地址")
+        return f"{spec.host}:{spec.port}" if spec.port is not None else spec.host
+    return spec.original_input
+
+
 class ChatMessage(BaseModel):
     content: str
+    approval_selection: dict[str, Any] | None = None
 
 
 # ── 前次任务上下文构建（"再打一次"重跑用）──
@@ -743,7 +1033,7 @@ def _build_initial_context(source_session_id: str, user_id: str) -> str | None:
 async def register(data: UserCreate):
     try:
         user = create_user(data.username, data.password, data.email)
-        token, expires_in = create_access_token(user["id"], user["username"], user["role"])
+        token, expires_in = create_access_token(user["id"], user["username"], user["role"], user.get("auth_epoch", 0))
         return TokenResponse(access_token=token, username=user["username"], expires_in=expires_in)
     except HTTPException:
         raise
@@ -757,7 +1047,7 @@ async def login(data: UserLogin):
     user = _get_user(data.username)
     if not user or not verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
-    token, expires_in = create_access_token(user["id"], user["username"], user["role"])
+    token, expires_in = create_access_token(user["id"], user["username"], user["role"], user.get("auth_epoch", 0))
     # 登录时更新 last_login
     from auth import get_db
     from datetime import datetime, timezone
@@ -779,6 +1069,43 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 @app.post("/auth/logout")
 async def logout(current_user: dict = Depends(get_current_user)):
     return {"message": "登出成功"}
+
+
+def _require_superadmin(current_user: dict) -> dict:
+    """系统用户操作仅允许独立的 superadmin 角色执行。"""
+    if current_user.get("role") != "superadmin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要超级管理员权限")
+    return current_user
+
+
+@app.get("/api/superadmin/users")
+async def superadmin_users(current_user: dict = Depends(get_current_user)):
+    _require_superadmin(current_user)
+    return {"users": await asyncio.to_thread(list_users)}
+
+
+@app.put("/api/superadmin/users/{user_id}/password")
+async def superadmin_reset_password(
+    user_id: int,
+    data: PasswordReset,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_superadmin(current_user)
+    await asyncio.to_thread(reset_user_password, user_id, data.password)
+    return {"message": "密码已重置；该用户的既有登录状态已失效"}
+
+
+@app.delete("/api/superadmin/users/{user_id}")
+async def superadmin_delete_user(user_id: int, current_user: dict = Depends(get_current_user)):
+    _require_superadmin(current_user)
+    if user_id == current_user["id"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能删除当前超级管理员账户")
+    users = await asyncio.to_thread(list_users)
+    target = next((item for item in users if item["id"] == user_id), None)
+    if target and target.get("role") == "superadmin":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能删除超级管理员账户")
+    await asyncio.to_thread(delete_user, user_id)
+    return {"message": "用户已删除"}
 
 
 # ── 路由 ──
@@ -878,13 +1205,25 @@ async def knowledge_search(req: KnowledgeSearchRequest, current_user: dict = Dep
     rag = get_rag_service(_PROJECT_ROOT)
     if not rag.available:
         raise HTTPException(status_code=503, detail=rag.error or "知识库不可用")
-    return {"results": await rag.search(req.query, req.top_k)}
+    try:
+        return {"results": await rag.search(req.query, req.top_k)}
+    except Exception as exc:
+        # RAG 是可选子系统：检索失败不应把内部 traceback 直接抛给浏览器，
+        # 同时必须留下完整服务端日志，便于定位上游 Embedding/Milvus 问题。
+        logger.exception("本地知识库检索失败")
+        raise HTTPException(
+            status_code=503,
+            detail=f"本地知识库检索失败，请稍后重试或同步索引：{exc}",
+        ) from exc
 
 
 @app.post("/api/knowledge/reindex")
 async def knowledge_reindex(current_user: dict = Depends(get_current_user)):
     del current_user
     rag = get_rag_service(_PROJECT_ROOT)
+    if not rag.available:
+        # 初始化失败后允许用户通过“重建索引”直接重试，无需重启整个 API。
+        await rag.restart()
     if not rag.available:
         raise HTTPException(status_code=503, detail=rag.error or "知识库不可用")
     return await rag.sync()
@@ -897,7 +1236,22 @@ async def knowledge_reindex(current_user: dict = Depends(get_current_user)):
 @app.post("/api/session/start")
 async def session_start(req: MissionStartRequest, current_user: dict = Depends(get_current_user)):
     """创建并启动新会话。"""
+    # 用户在“新建任务”中输入的 IP / 域名即为本次任务的初始授权目标。
+    # 这里不会触发 ScopeAuditor；该审核器只用于后续发现的新增内网目标。
+    authorized_target = _normalize_user_authorized_target(req.target)
     async with _session_creation_lock:
+        fingerprint = (
+            current_user["id"], authorized_target, req.goal.strip(),
+            req.provider, req.model, req.source_session_id or "",
+        )
+        now = time.monotonic()
+        # 清除过期请求指纹，限制内存增长。
+        for key, (created_at, _) in tuple(_recent_session_creations.items()):
+            if now - created_at > _DUPLICATE_SESSION_WINDOW_SECONDS:
+                _recent_session_creations.pop(key, None)
+        duplicate = _recent_session_creations.get(fingerprint)
+        if duplicate and now - duplicate[0] <= _DUPLICATE_SESSION_WINDOW_SECONDS:
+            return {"session_id": duplicate[1], "status": "existing"}
         # 检查用户并发上限
         user_session_count = sum(
             1 for ctx in _active_sessions.values() if ctx.user_id == current_user["id"]
@@ -918,12 +1272,13 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
 
         # 注册到活跃会话
         _active_sessions[session_id] = ctx
+        _recent_session_creations[fingerprint] = (now, session_id)
 
     # 持久化到 DB（传入 API 层生成的 session_id）
     await asyncio.to_thread(
         session_store.create_session,
         user_id=current_user["id"],
-        target=req.target,
+        target=authorized_target,
         goal=req.goal,
         provider=req.provider,
         model=req.model,
@@ -942,12 +1297,12 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         )
 
     # 推送启动事件
-    callback("mission_start", target=req.target, goal=req.goal,
+    callback("mission_start", target=authorized_target, goal=req.goal,
              provider=req.provider, model=req.model)
 
     # 创建后台任务
     task = asyncio.create_task(
-        _run_and_cleanup(session_id, ctx, req.target, req.goal, req.model, req.provider, callback,
+        _run_and_cleanup(session_id, ctx, authorized_target, req.goal, req.model, req.provider, callback,
                          initial_context=initial_context, nss_context=req.nss_context)
     )
     ctx.task = task
@@ -1011,37 +1366,115 @@ async def send_message(session_id: str, msg: ChatMessage, current_user: dict = D
 
     # ── 运行时追加指令（非审批消息 + 会话活跃 → 中断 Agent 并注入） ──
     if ctx.task and not ctx.task.done() and content not in {"批准", "补充侦察", "拒绝"}:
-        ctx.steering_state["pending"] = content
+        steering_queue = ctx.steering_state.setdefault("queue", [])
+        steering_queue.append(content)
+        ctx.steering_state["pending"] = steering_queue[0]
         ctx.steering_state["processed"] = False
+        # reply/task 名称由 stream_agent_reply / run_interruptible_agent_reply
+        # 统一命名。优先向正在工作的子 Agent 回执，而非只显示指挥智能体。
+        working_agents: list[str] = []
+        for agent_task in tuple(ctx.agent_tasks):
+            if agent_task.done():
+                continue
+            task_name = agent_task.get_name()
+            if task_name.startswith("agent-reply:"):
+                name = task_name.removeprefix("agent-reply:")
+            elif task_name.startswith("agent-call:"):
+                name = task_name.removeprefix("agent-call:")
+            else:
+                continue
+            if name and name not in working_agents:
+                working_agents.append(name)
+        child_agents = [name for name in working_agents if name != "Orchestrator"]
+        acknowledgement_agents = child_agents or (["Orchestrator"] if working_agents else [])
         # 取消所有 Agent reply task（含 Orchestrator 自身）：让主循环感知中断后
         # 将用户指令作为新一轮输入注入。dispatch_* 工具内的 _check_steering 是
         # 快速路径（若中断恰好落在工具内则就地注入），主循环负责兜底注入。
-        for agent_task in tuple(ctx.agent_tasks):
-            if not agent_task.done():
-                agent_task.cancel()
-        return {"status": "steering", "message": "指令已注入，当前操作将被中断"}
+        # 根据 AgentScope 的中断语义，这里只取消承载 reply_stream 的 task；
+        # 不在 HTTP 请求中等待嵌套 Agent/工具完全收尾，避免下一条情报被卡住。
+        # run_mission 的 finally 仍会在任务结束时等待并回收全部 task/进程组。
+        interrupted = interrupt_agent_tasks(ctx.agent_tasks)
+        ack_seq = await asyncio.to_thread(
+            session_store.add_message,
+            session_id,
+            "system",
+            "新情报已接收：正在中断当前步骤并交给行动指挥处理。",
+            "steering_received",
+            "system",
+        )
+        ack = {
+            "type": "steering_received",
+            "session_id": session_id,
+            "content": "新情报已接收：正在中断当前步骤并交给行动指挥处理。",
+            "seq": ack_seq,
+        }
+        for subscriber in tuple(ctx.subscribers):
+            subscriber.put_nowait(ack.copy())
+        # 这不是伪造模型推理，而是执行层对“当前实际工作者已接收中断”的
+        # 明确回执；每条同样持久化，刷新会话后仍可辨认情报交给了谁。
+        for agent_name in acknowledgement_agents:
+            agent_seq = await asyncio.to_thread(
+                session_store.add_message,
+                session_id,
+                "agent",
+                "已接收操作员的新情报，当前步骤已中断；正在将上下文交回行动指挥重新规划。",
+                "agent_acknowledged",
+                agent_name,
+            )
+            agent_ack = {
+                "type": "agent_acknowledged",
+                "session_id": session_id,
+                "agent": agent_name,
+                "content": "已接收操作员的新情报，当前步骤已中断；正在将上下文交回行动指挥重新规划。",
+                "seq": agent_seq,
+            }
+            for subscriber in tuple(ctx.subscribers):
+                subscriber.put_nowait(agent_ack.copy())
+        return {
+            "status": "steering",
+            "interrupted_tasks": interrupted,
+            "queued_messages": len(steering_queue),
+            "message": "已请求中断当前 Agent，并将新情报加入调度队列",
+        }
 
-    await ctx.input_queue.put(msg.content)
+    queue_content = msg.content
+    if content in {"批准", "补充侦察", "拒绝"} and msg.approval_selection:
+        queue_content = json.dumps(
+            {"decision": content, **msg.approval_selection},
+            ensure_ascii=False,
+        )
+    await ctx.input_queue.put(queue_content)
     return {"status": "sent"}
 
 
 @app.get("/api/sessions")
 async def list_sessions(
     status_filter: str | None = None,
-    limit: int = 50,
+    limit: int = 30,
     offset: int = 0,
     current_user: dict = Depends(get_current_user),
 ):
     """列出用户所有会话。"""
+    page_size = max(1, min(limit, 100))
+    page_offset = max(0, offset)
+    # 多读取一条来判断是否还有下一页，避免每次滚动都做 COUNT(*)。
     sessions = await asyncio.to_thread(
         lambda: session_store.list_sessions(
-            current_user["id"], status=status_filter, limit=limit, offset=offset,
+            current_user["id"], status=status_filter, limit=page_size + 1, offset=page_offset,
         )
     )
+    has_more = len(sessions) > page_size
+    sessions = sessions[:page_size]
     # 为活跃会话添加实时状态标记
+    runtime = RuntimeConfig.from_env()
     for s in sessions:
         s["is_live"] = s["id"] in _active_sessions
-    return {"sessions": sessions}
+        _attach_model_metadata(s, runtime)
+    return {
+        "sessions": sessions,
+        "has_more": has_more,
+        "next_offset": page_offset + len(sessions),
+    }
 
 
 @app.get("/api/session/{session_id}")
@@ -1050,6 +1483,11 @@ async def get_session_detail(session_id: str, current_user: dict = Depends(get_c
     session = await _verify_session_owner(session_id, current_user["id"])
     # 标记会话是否仍在活跃
     session["is_live"] = session_id in _active_sessions
+    _attach_model_metadata(session)
+    report_path = _reports_dir / f"{session_id}.pdf"
+    session["report_available"] = report_path.is_file()
+    if session["report_available"]:
+        session["report_url"] = f"/api/session/{session_id}/report"
     # 尝试读取 MissionState JSON 文件获取更多详情
     session_file = _sessions_dir / f"{session_id}.json"
     if session_file.is_file():
@@ -1093,6 +1531,23 @@ async def get_session_detail(session_id: str, current_user: dict = Depends(get_c
     return session
 
 
+@app.get("/api/session/{session_id}/report")
+async def download_session_report(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """下载当前用户所属会话的 Summary Agent PDF 报告。"""
+    await _verify_session_owner(session_id, current_user["id"])
+    report_path = _reports_dir / f"{session_id}.pdf"
+    if not report_path.is_file():
+        raise HTTPException(status_code=404, detail="该会话尚未生成 PDF 报告")
+    return FileResponse(
+        report_path,
+        media_type="application/pdf",
+        filename=f"lingshu-report-{session_id}.pdf",
+    )
+
+
 @app.get("/api/session/{session_id}/messages")
 async def get_session_messages(
     session_id: str,
@@ -1108,7 +1563,9 @@ async def get_session_messages(
         after_seq,
         limit,
     )
-    return {"messages": messages, "snapshots": snapshots}
+    # 与 SSE 补偿保持同一事件协议；尤其要把 role=user 的记录还原为
+    # user_message 气泡，而不是让 React 将其误作 system/message。
+    return {"messages": [_message_to_event(message) for message in messages], "snapshots": snapshots}
 
 
 @app.get("/api/session/{session_id}/pending_approval")
@@ -1167,16 +1624,15 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
     session_file = _sessions_dir / f"{session_id}.json"
     if session_file.is_file():
         session_file.unlink()
+    report_file = _reports_dir / f"{session_id}.pdf"
+    if report_file.is_file():
+        report_file.unlink()
     return {"status": "deleted"}
 
 
 @app.post("/api/session/{session_id}/cancel")
 async def cancel_session(session_id: str, current_user: dict = Depends(get_current_user)):
-    """取消正在运行的会话（立即生效，进程清理在后台完成）。
-
-    立即返回：发出取消信号 + 移出活跃会话 + 标记 DB 状态。
-    后台任务自身的 finally 会继续清理 shell 进程组并最终落库。
-    """
+    """取消会话并等待 Agent、工具任务与 shell 进程组完成清理。"""
     await _verify_session_owner(session_id, current_user["id"])
     ctx = _active_sessions.get(session_id)
     if ctx is None or ctx.task is None or ctx.task.done():
@@ -1186,6 +1642,13 @@ async def cancel_session(session_id: str, current_user: dict = Depends(get_curre
     #    _run_and_cleanup 据此将终态强制收敛为 cancelled。
     ctx.cancel_requested = True
 
+    # 将停止意图写入与 Orchestrator 共享的状态。这个标记优先级高于
+    # steering，防止 CancelledError 被误判成“中途指令”后恢复运行。
+    ctx.steering_state["cancel_requested"] = True
+    ctx.steering_state["pending"] = None
+    ctx.steering_state["processed"] = False
+    ctx.steering_state["queue"] = []
+
     # 1) 按 AgentScope 官方机制，直接取消承载 reply_stream 的 task。
     for agent_task in tuple(ctx.agent_tasks):
         if not agent_task.done():
@@ -1194,10 +1657,7 @@ async def cancel_session(session_id: str, current_user: dict = Depends(get_curre
     # 2) 同时取消外层任务，打断阶段调度和非 Agent 等待。
     ctx.task.cancel()
 
-    # 3) 立即移出活跃会话，前端刷新即可看到 is_live=false
-    _active_sessions.pop(session_id, None)
-
-    # 4) 快速落库为已取消（后台 finally 会再次幂等更新）
+    # 3) 先落库为已取消；保留 ctx 直到 finally 完成，这样 SSE 能收到终态。
     await asyncio.to_thread(
         session_store.update_session,
         session_id,
@@ -1205,7 +1665,23 @@ async def cancel_session(session_id: str, current_user: dict = Depends(get_curre
         phase="cancelled",
         pending_approval=None,
     )
-    return {"status": "cancelled", "message": "停止请求已生效，正在后台清理任务进程"}
+    # 4) 等待 run_mission finally 完成 Agent task、逆向服务和 shell 进程组清理。
+    # 接口成功返回即表示本会话后台执行已经真正结束。
+    try:
+        await asyncio.wait_for(asyncio.shield(ctx.task), timeout=20)
+    except asyncio.CancelledError:
+        pass
+    except asyncio.TimeoutError as exc:
+        # 再次发送取消，且不谎报“已停止”。ctx 保留以便 finally 后续清理。
+        ctx.task.cancel()
+        raise HTTPException(
+            status_code=504,
+            detail="任务停止超时，后台清理仍在进行，请稍后重试",
+        ) from exc
+    finally:
+        if ctx.task.done():
+            _active_sessions.pop(session_id, None)
+    return {"status": "cancelled", "message": "任务及其后台 Agent/命令进程已全部停止"}
 
 
 # ══════════════════════════════════════════════════
@@ -1292,16 +1768,61 @@ async def mission_history(limit: int = 20, current_user: dict = Depends(get_curr
 
 
 @app.post("/api/mission/upload")
-async def upload_target(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
-    """上传目标文件。"""
-    MAX_SIZE = 100 * 1024 * 1024
-    content = await file.read()
-    if len(content) > MAX_SIZE:
-        raise HTTPException(status_code=413, detail="文件过大，上限 100MB")
-    safe_name = Path(file.filename or "upload").name
-    dest = _upload_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
-    dest.write_bytes(content)
-    return {"filename": safe_name, "path": str(dest), "size": len(content), "message": f"文件已上传：{dest}"}
+async def upload_target(
+    files: list[UploadFile] = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """批量上传目标文件；多文件返回独立批次目录作为任务目标。"""
+    del current_user
+    max_file_size = 100 * 1024 * 1024
+    max_total_size = 300 * 1024 * 1024
+    if not files:
+        raise HTTPException(status_code=400, detail="至少选择一个文件")
+    if len(files) > 20:
+        raise HTTPException(status_code=413, detail="单次最多上传 20 个文件")
+
+    batch_dir = _upload_dir / uuid.uuid4().hex[:16]
+    batch_dir.mkdir(parents=True, exist_ok=False)
+    uploaded: list[dict[str, Any]] = []
+    total_size = 0
+    try:
+        for index, upload in enumerate(files, 1):
+            safe_name = Path(upload.filename or f"upload-{index}").name
+            if safe_name in {"", ".", ".."}:
+                safe_name = f"upload-{index}"
+            destination = batch_dir / safe_name
+            if destination.exists():
+                destination = batch_dir / f"{index}_{safe_name}"
+            file_size = 0
+            with destination.open("xb") as handle:
+                while chunk := await upload.read(1024 * 1024):
+                    file_size += len(chunk)
+                    total_size += len(chunk)
+                    if file_size > max_file_size:
+                        raise HTTPException(status_code=413, detail=f"文件 {safe_name} 超过 100MB")
+                    if total_size > max_total_size:
+                        raise HTTPException(status_code=413, detail="文件总大小超过 300MB")
+                    handle.write(chunk)
+            uploaded.append({"filename": safe_name, "path": str(destination), "size": file_size})
+    except Exception:
+        for child in batch_dir.iterdir():
+            if child.is_file():
+                child.unlink()
+        batch_dir.rmdir()
+        raise
+    finally:
+        for upload in files:
+            await upload.close()
+
+    target_path = uploaded[0]["path"] if len(uploaded) == 1 else str(batch_dir)
+    return {
+        "files": uploaded,
+        "count": len(uploaded),
+        "total_size": total_size,
+        "target": target_path,
+        "path": target_path,
+        "message": f"已上传 {len(uploaded)} 个文件",
+    }
 
 
 # Vite fingerprints every production asset.  Serve only files beneath the

@@ -90,6 +90,9 @@ class MissionState:
     # 持久化后即使崩溃恢复也不会重复询问
     exploitation_approved: bool = False
 
+    # 人工批准时选定的攻击方案及用户调整后的优先级顺序。
+    approved_attack_plan: dict[str, Any] | None = None
+
     # 动态授权范围快照（ScopeRegistry.snapshot() 的输出），
     # 崩溃恢复时用于重建 ScopeRegistry
     authorized_scope: dict[str, Any] = field(default_factory=dict)

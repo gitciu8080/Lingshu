@@ -12,8 +12,9 @@ from agentscope.message import UserMsg
 from agentscope.tool import Toolkit
 
 from Tools.CVE_Search import cve_search
+from Tools.OCR import create_tesseract_ocr_tool
 from Tools.ScopeRegistry import ScopeRegistry
-from Tools.tooling import AllowedFunctionTool, create_scoped_shell_tool, stream_agent_reply
+from Tools.tooling import AllowedFunctionTool, create_scoped_shell_tool, run_interruptible_agent_reply
 from agent.experts import attack_expert_name
 
 
@@ -25,6 +26,7 @@ ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
 2. cve_search:cve漏洞网上查询工具。
 3. create_scoped_shell_tool:本地命令运行工具。
 4. dispatch_reverse：派遣 Reserve 对二进制文件执行 IDA 逆向分析（反编译、字符串提取等）
+5. ocr_image：使用 Tesseract 对授权工作区内的图片执行文字识别。
 
 
 
@@ -57,6 +59,19 @@ _SKILL_PATH_MAP: dict[str, str] = {
     "ai-ml": "Skills/ctf-skills/ctf-ai-ml",
     "writeup": "Skills/ctf-skills/ctf-writeup",
 }
+
+_CYBERPENDA_SKILL_MAP: dict[str, list[str]] = {
+    "web": ["api-security", "pentest-tools"],
+    "pwn": ["pwn-chain"],
+    "reverse": ["reverse-skill-router", "reverse-engineering"],
+    "crypto": ["ctf-sandbox-orchestrator"],
+    "forensics": ["digital-forensics"],
+    "malware": ["malware-analysis"],
+    "misc": ["ctf-sandbox-orchestrator"],
+    "osint": ["pentest-tools"],
+    "ai-ml": ["llm-security"],
+}
+_CYBERPENDA_ROOT = "Skills/cyberpenda-bundles"
 
 
 def _build_skill_list(
@@ -99,6 +114,19 @@ def _build_skill_list(
 
     # writeup 始终加载
     skill_paths.append(_SKILL_PATH_MAP["writeup"])
+    # CyberPenda bundles 完整保存在仓库中，但运行时只加载与当前分类相关的目录。
+    categories: list[str] = []
+    if category_decision:
+        primary = str(category_decision.get("primary") or "")
+        categories = [primary, *[str(value) for value in category_decision.get("secondary", [])]]
+    cyberpenda_names = ["attack-chain"]
+    for category in categories:
+        cyberpenda_names.extend(_CYBERPENDA_SKILL_MAP.get(category, []))
+    for name in dict.fromkeys(cyberpenda_names):
+        path = f"{_CYBERPENDA_ROOT}/{name}"
+        if project_path and not (project_path / path / "SKILL.md").is_file():
+            continue
+        skill_paths.append(path)
     return skill_paths
 
 
@@ -132,7 +160,7 @@ async def create_attack_agent(
         Args:
             service_info: Recon 得到的服务、版本和响应证据。
         """
-        result = await stream_agent_reply(
+        result = await run_interruptible_agent_reply(
             analysis_agent,
             UserMsg(name="Attack", content=service_info),
             prefix="[Analysis] ",
@@ -160,6 +188,7 @@ async def create_attack_agent(
             AllowedFunctionTool(analysis, is_read_only=True),
             AllowedFunctionTool(cve_search, is_read_only=True),
             create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry),
+            create_tesseract_ocr_tool(project_dir, timeout=min(timeout, 90)),
         ],
         skills_or_loaders=skill_list,
         # mcps=[ida_mcp],

@@ -10,6 +10,8 @@ export type Session = {
   status?: string;
   provider?: string;
   model?: string;
+  model_level?: string;
+  model_name?: string;
 };
 export type Event = Record<string, unknown> & {
   seq?: number;
@@ -29,6 +31,14 @@ export type Event = Record<string, unknown> & {
   tool_name?: string;
   full_args?: string;
 };
+export type SystemUser = {
+  id: number;
+  username: string;
+  email?: string;
+  role: string;
+  created_at?: string;
+  last_login?: string | null;
+};
 const base = import.meta.env.VITE_API_BASE_URL || "";
 let token = localStorage.getItem("lingshu_token") || "";
 export const auth = {
@@ -45,7 +55,8 @@ export const auth = {
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (options.body) headers.set("Content-Type", "application/json");
+  if (options.body && !(options.body instanceof FormData))
+    headers.set("Content-Type", "application/json");
   const response = await fetch(base + url, { ...options, headers });
   const data = await response.json().catch(() => null);
   if (!response.ok)
@@ -63,9 +74,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ username, password, email }),
     }),
-  sessions: async () => {
-    const data = await request<{ sessions?: unknown }>(
-      "/api/sessions?limit=200",
+  me: () => request<{ id: number; username: string; role: string }>("/auth/me"),
+  superadminUsers: () => request<{ users: SystemUser[] }>("/api/superadmin/users"),
+  resetUserPassword: (userId: number, password: string) =>
+    request<{ message: string }>(`/api/superadmin/users/${encodeURIComponent(String(userId))}/password`, {
+      method: "PUT",
+      body: JSON.stringify({ password }),
+    }),
+  deleteUser: (userId: number) =>
+    request<{ message: string }>(`/api/superadmin/users/${encodeURIComponent(String(userId))}`, {
+      method: "DELETE",
+    }),
+  sessions: async (offset = 0, limit = 30) => {
+    const data = await request<{ sessions?: unknown; has_more?: unknown; next_offset?: unknown }>(
+      `/api/sessions?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
     );
     const sessions = Array.isArray(data?.sessions)
       ? data.sessions.filter(
@@ -73,7 +95,11 @@ export const api = {
             !!item && typeof item === "object" && typeof item.id === "string",
         )
       : [];
-    return { sessions };
+    return {
+      sessions,
+      hasMore: data?.has_more === true,
+      nextOffset: Number(data?.next_offset || offset + sessions.length),
+    };
   },
   session: (id: string) =>
     request<Session & Record<string, unknown>>(
@@ -123,6 +149,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ content }),
     }),
+  approvalDecision: (
+    id: string,
+    decision: "批准" | "补充侦察" | "拒绝",
+    selection: { selected_plan_id: string; priority_order: string[] },
+  ) =>
+    request(`/api/session/${encodeURIComponent(id)}/message`, {
+      method: "POST",
+      body: JSON.stringify({ content: decision, approval_selection: selection }),
+    }),
   cancel: (id: string) =>
     request(`/api/session/${encodeURIComponent(id)}/cancel`, {
       method: "POST",
@@ -130,7 +165,34 @@ export const api = {
   remove: (id: string) =>
     request(`/api/session/${encodeURIComponent(id)}`, { method: "DELETE" }),
   approval: (id: string) =>
-    request(`/api/session/${encodeURIComponent(id)}/pending_approval`),
+    request<{ pending: boolean; event?: Record<string, unknown> }>(
+      `/api/session/${encodeURIComponent(id)}/pending_approval`,
+    ),
+  upload: (files: File[]) => {
+    const body = new FormData();
+    files.forEach((file) => body.append("files", file));
+    return request<{
+      files: { filename: string; path: string; size: number }[];
+      path: string;
+      target: string;
+      count: number;
+      total_size: number;
+    }>(
+      "/api/mission/upload",
+      { method: "POST", body },
+    );
+  },
+  report: async (id: string) => {
+    const response = await fetch(
+      base + `/api/session/${encodeURIComponent(id)}/report`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new Error(data?.detail || `报告下载失败 (${response.status})`);
+    }
+    return response.blob();
+  },
   knowledgeStatus: () =>
     request<Record<string, unknown>>("/api/knowledge/status"),
   knowledgeSearch: (query: string) =>

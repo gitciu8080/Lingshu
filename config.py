@@ -59,7 +59,9 @@ class RuntimeConfig:
     deepseek_model_min: str = "deepseek-v4-flash"       # 默认
     deepseek_model_max: str = "deepseek-v4-pro"         # 深度推理
     deepseek_web_search: bool = False                   # Responses API 服务端联网搜索开关
-    deepseek_responses_models: tuple[str, ...] = ("deepseek-v4-flash",)  # 支持 Responses API 的模型（联网搜索仅此 API 可用）
+    # V4 Flash / Pro 均走 OpenAI Responses 协议；可由环境变量覆盖，兼容
+    # 尚未提供 Responses 端点的私有网关。
+    deepseek_responses_models: tuple[str, ...] = ("deepseek-v4-flash", "deepseek-v4-pro")
 
     # ── Qwen (llama.cpp OpenAI 兼容) ──
     qwen_api_key: str = ""
@@ -94,7 +96,7 @@ class RuntimeConfig:
             deepseek_responses_models=tuple(
                 m.strip()
                 for m in os.getenv(
-                    "DEEPSEEK_RESPONSES_MODELS", "deepseek-v4-flash",
+                    "DEEPSEEK_RESPONSES_MODELS", "deepseek-v4-flash,deepseek-v4-pro",
                 ).split(",")
                 if m.strip()
             ),

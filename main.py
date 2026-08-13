@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse  # 命令行参数解析
 import asyncio  # 异步事件循环，驱动整个多智能体任务
+import json  # 审批方案选择协议与结构化消息解析
 import os  # 环境变量与路径操作
 import re  # 从最终证据中提取 CVE 等标题特征
 import sys  # 修改模块搜索路径，确保能 import 本目录下的包
@@ -53,7 +54,7 @@ from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     reset_agent_tasks,
     reset_expert_roster,
     reset_process_tracker,
-    stream_agent_reply,
+    run_interruptible_agent_reply,
 )
 
 
@@ -65,6 +66,25 @@ _WORKDIR_ROOT = Path(__file__).resolve().parent / "WorkDir"
 
 # 肯定的审批答复（其余一律视为拒绝，安全默认）
 _APPROVAL_YES = {"y", "yes", "ok", "approve", "approved", "是", "批准", "同意"}
+
+# 用户任务描述中的明确目标声明。它只用于补充本次任务的初始授权范围；
+# Agent 从扫描结果、页面内容等运行时证据中发现的新地址，仍必须走 ScopeAuditor。
+_DECLARED_TARGET_LABEL = re.compile(
+    r"(?:目标\s*(?:服务器|主机|地址|域名|IP|信息)?\s*[:：]|"
+    r"(?:靶机|服务器|主机|域名)\s*(?:地址|信息)?\s*[:：]|"
+    r"\b(?:ip|host|hostname)\s*[:：]|\bssh\s*(?:连接|地址))",
+    re.IGNORECASE,
+)
+_DECLARED_URL = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
+_DECLARED_HOST_PORT = re.compile(
+    r"(?<![\w.-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z]{2,63}:\d{1,5}(?!\d)",
+)
+_DECLARED_IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+_DECLARED_HOSTNAME = re.compile(
+    r"(?<![\w.-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z]{2,63}(?![\w.-])",
+)
 
 _CATEGORY_TITLES = {
     "web": "Web 安全",
@@ -211,7 +231,7 @@ _ROLE_BASE_BUDGET = {
 }
 
 # 思考级别迭代加成：Max 深度推理多给，Low 快速收敛少给
-_THINK_BONUS = {"Low": -4, "Min": 0, "Max": 4}
+_THINK_BONUS = {"Low": -4, "Min": 8, "Max": 16}
 _ITER_BUDGET_MIN, _ITER_BUDGET_MAX = 12, 40
 
 
@@ -252,7 +272,8 @@ class _ApprovalBroker:
     ) -> None:
         self._event_callback = event_callback
         self._input_queue = input_queue
-        self._pending: asyncio.Future[bool] | None = None
+        self._pending: asyncio.Future[dict[str, Any]] | None = None
+        self._current_options: list[dict[str, Any]] = []
         self._recent_inputs: list[str] = []  # 近 5 条未被审批消费的消息，用于审批挂起时回看
 
     @property
@@ -266,7 +287,7 @@ class _ApprovalBroker:
         if len(self._recent_inputs) > 5:
             self._recent_inputs.pop(0)
 
-    async def request(self, reason: str, scan_summary: dict | None = None) -> bool:
+    async def request(self, reason: str, scan_summary: dict | None = None) -> dict[str, Any]:
         """发起一次攻击阶段审批请求，返回是否批准。
 
         Args:
@@ -277,7 +298,7 @@ class _ApprovalBroker:
             return await self._ask_cli(reason, scan_summary)
         return await self._ask_api(reason, scan_summary)
 
-    async def _ask_cli(self, reason: str, scan_summary: dict | None = None) -> bool:
+    async def _ask_cli(self, reason: str, scan_summary: dict | None = None) -> dict[str, Any]:
         """CLI 通道：终端询问操作员（executor 中运行避免阻塞事件循环）。"""
         print(f"\n{'='*60}")
         print(f"[人工审批] Orchestrator 请求进入攻击阶段（EXPLOITATION）")
@@ -295,6 +316,11 @@ class _ApprovalBroker:
                 for item in plan_items:
                     emoji = {"completed": "✅", "in_progress": "🔄", "pending": "⏳"}.get(item.get("status"), "⏳")
                     print(f"  {emoji} [{item.get('phase','?')}] {item.get('content','')}")
+            options = scan_summary.get("approval_options", [])
+            if options:
+                print(f"[候选攻击方案] ({len(options)} 个)")
+                for index, option in enumerate(options, 1):
+                    print(f"  {index}. {option.get('title')} [风险 {option.get('risk')}] — {option.get('summary')}")
         print(f"[攻击理由] {reason}")
         print(f"{'='*60}")
         loop = asyncio.get_running_loop()
@@ -304,33 +330,52 @@ class _ApprovalBroker:
             )
         except (EOFError, KeyboardInterrupt):
             print("\n[人工审批] 输入中断，视为拒绝。")
-            return False
+            return {"approved": False, "decision": "拒绝", "selected_plan_id": "", "priority_order": []}
         approved = answer.strip().lower() in _APPROVAL_YES
+        options = (scan_summary or {}).get("approval_options", [])
+        selected = options[0].get("id", "") if options else ""
+        priority_order = [str(option.get("id", "")) for option in options if option.get("id")]
+        if approved and options:
+            try:
+                selection = await loop.run_in_executor(
+                    None, input, f"[人工审批] 选择方案 (1-{len(options)}，默认 1): ",
+                )
+                if selection.strip().isdigit() and 1 <= int(selection) <= len(options):
+                    selected = str(options[int(selection) - 1].get("id", selected))
+            except (EOFError, KeyboardInterrupt):
+                pass
         print(f"[人工审批] 操作员{'批准' if approved else '拒绝'}了攻击阶段授权。")
-        return approved
+        return {
+            "approved": approved,
+            "decision": "批准" if approved else "拒绝",
+            "selected_plan_id": selected,
+            "priority_order": priority_order,
+        }
 
-    async def _ask_api(self, reason: str, scan_summary: dict | None = None) -> bool:
+    async def _ask_api(self, reason: str, scan_summary: dict | None = None) -> dict[str, Any]:
         """API 通道：推送 approval_required 事件，挂起等待用户答复。"""
         if self.waiting:
-            return False  # 防御：已有待处理审批，本次视为拒绝
+            return {"approved": False, "decision": "拒绝", "selected_plan_id": "", "priority_order": []}
         # 推送审批事件到 SSE
         payload: dict[str, Any] = {"reason": reason, "agent": "Orchestrator"}
         if scan_summary:
             payload["scan_summary"] = scan_summary
+        self._current_options = list((scan_summary or {}).get("approval_options", []))
         if self._event_callback is not None:
             self._event_callback("approval_required", **payload)
+        loop = asyncio.get_running_loop()
+        self._pending = loop.create_future()
         # 回看近期缓存：若用户在审批请求到达前已发送了答复，直接消费
         for recent in self._recent_inputs:
             if self.feed(recent):
                 self._recent_inputs.clear()
-                return self._pending is None  # feed 已 resolve pending
+                return await self._pending
         self._recent_inputs.clear()
-        loop = asyncio.get_running_loop()
-        self._pending = loop.create_future()
         try:
             return await self._pending
         finally:
             self._pending = None
+            self._current_options = []
 
     def feed(self, user_input: str) -> bool:
         """处理 input_queue 收到的用户消息；返回 True 表示已被审批消费。
@@ -338,16 +383,45 @@ class _ApprovalBroker:
         """
         if not self.waiting:
             return False
-        lower = user_input.strip().lower()
+        raw = user_input.strip()
+        parsed: dict[str, Any] = {}
+        if raw.startswith("{"):
+            try:
+                value = json.loads(raw)
+                if isinstance(value, dict):
+                    parsed = value
+            except json.JSONDecodeError:
+                pass
+        decision = str(parsed.get("decision") or raw).strip()
+        lower = decision.lower()
         approved = lower in _APPROVAL_YES
+        allowed_ids = [str(option.get("id")) for option in self._current_options if option.get("id")]
+        selected_plan_id = str(parsed.get("selected_plan_id") or (allowed_ids[0] if allowed_ids else ""))
+        if allowed_ids and selected_plan_id not in allowed_ids:
+            selected_plan_id = allowed_ids[0]
+        priority_order = [
+            str(value) for value in parsed.get("priority_order", [])
+            if str(value) in allowed_ids
+        ]
+        for option_id in allowed_ids:
+            if option_id not in priority_order:
+                priority_order.append(option_id)
+        result = {
+            "approved": approved,
+            "decision": decision,
+            "selected_plan_id": selected_plan_id,
+            "priority_order": priority_order,
+        }
         if self._event_callback is not None:
             self._event_callback(
                 "approval_resolved",
                 approved=approved,
-                decision=user_input.strip(),
+                decision=decision,
+                selected_plan_id=selected_plan_id,
+                priority_order=priority_order,
                 agent="Orchestrator",
             )
-        self._pending.set_result(approved)
+        self._pending.set_result(result)
         return True
 
 
@@ -410,6 +484,55 @@ def _prepare_workspace(target_spec: TargetSpec) -> tuple[str, Path, dict | None]
     raise SystemExit(f"无法处理目标类型: {target_spec.kind}")
 
 
+def _extract_declared_network_targets(text: str) -> list[str]:
+    """提取用户明确写在任务说明中的网络目标。
+
+    文件型任务常会把“目标服务器 IP / 域名 / SSH 端口”写在任务书中。
+    这些信息与 API 中直接填写目标同属用户的初始授权输入，不能再被误判为
+    Agent 运行时发现的范围扩容。为避免把一般文本中的域名误纳入范围，裸 IP
+    与裸域名仅从带有目标语义的行（及其后两行）提取；完整 URL 和 host:port
+    则被视为明确目标表达。
+    """
+    candidates: dict[str, int | None] = {}
+
+    def add(value: str) -> None:
+        value = value.rstrip(".,;，；:：")
+        if not value:
+            return
+        try:
+            spec = normalize_target(value)
+        except ValueError:
+            return
+        if spec.kind == "network" and spec.host:
+            # 同一个 URL 会同时命中 URL 与 hostname；显式端口优先，
+            # 避免把 example.com 与 example.com:443 记成两个授权目标。
+            if spec.port is not None or spec.host not in candidates:
+                candidates[spec.host] = spec.port
+
+    # URL、host:port 本身已经表达了连接目标，不依赖额外中文标签。
+    for value in _DECLARED_URL.findall(text):
+        add(value)
+    for value in _DECLARED_HOST_PORT.findall(text):
+        add(value)
+
+    labelled_lines_remaining = 0
+    for line in text.splitlines():
+        is_labelled = bool(_DECLARED_TARGET_LABEL.search(line))
+        if is_labelled:
+            labelled_lines_remaining = 2
+        if is_labelled or labelled_lines_remaining:
+            for value in _DECLARED_IPV4.findall(line):
+                add(value)
+            for value in _DECLARED_HOSTNAME.findall(line):
+                add(value)
+        if labelled_lines_remaining:
+            labelled_lines_remaining -= 1
+    return sorted(
+        f"{host}:{port}" if port is not None else host
+        for host, port in candidates.items()
+    )
+
+
 async def run_mission(
     target: str,
     goal: str,
@@ -470,6 +593,18 @@ async def run_mission(
     # 供后续 Brain 规划与 Attack 技能加载使用。
     goal_text = goal.strip() or "获取 Flag"  # 空目标时兜底默认
     category_decision = classify(target_spec, goal_text, manifest)
+    # 用户在任务说明中明确声明的服务器 IP / 域名也属于初始授权输入。
+    # 典型场景：上传的应急响应任务书列出 SSH 目标与端口。对纯文本附件
+    # 一并检查，避免前端只上传任务书、未将其全文复制到“任务目标”时漏掉授权。
+    declared_authorization_text = goal_text
+    if target_spec.kind == "single_file" and target_spec.original_path is not None:
+        try:
+            raw_task_file = target_spec.original_path.read_bytes()[:256 * 1024]
+            if b"\x00" not in raw_task_file:
+                declared_authorization_text += "\n" + raw_task_file.decode("utf-8", errors="ignore")
+        except OSError:
+            pass
+    declared_network_targets = _extract_declared_network_targets(declared_authorization_text)
 
     # 打印分类结果（主题型 / 候选 / 证据），方便人工审计
     print(
@@ -503,6 +638,7 @@ async def run_mission(
             "port": target_spec.port,
             "original_input": target_spec.original_input,
             "authorization_scope": target_spec.authorization_scope,
+            "declared_network_targets": declared_network_targets,
         },
         category_decision={
             "primary": category_decision.primary,
@@ -516,6 +652,8 @@ async def run_mission(
             "source": authorization_source,
             "scope": target_spec.authorization_scope,
             "operator_confirmation": True,  # 操作员已确认
+            "declared_network_targets": declared_network_targets,
+            "declared_targets_auto_trusted": bool(declared_network_targets),
         },
     )
     # 记录任务创建事件并立即持久化（防止后续异常丢失状态）
@@ -540,6 +678,12 @@ async def run_mission(
     # 注册初始目标
     if target_spec.host:
         scope_registry.add_base_target(target_spec.host)
+    for declared_target in declared_network_targets:
+        # 只注册 host，端口信息仍在审计记录中；scoped_shell 以 host/IP
+        # 作为网络范围判断依据，命令本身必须显式写出实际访问对象。
+        declared_spec = normalize_target(declared_target)
+        if declared_spec.host:
+            scope_registry.add_base_target(declared_spec.host)
     # 持久化初始快照
     mission.authorized_scope = scope_registry.snapshot()
     store.save(mission)
@@ -563,11 +707,28 @@ async def run_mission(
             event_callback("target_info", **payload)
 
     # ── 输入队列消费者（API 模式下处理用户实时指令） ──
-    steering = steering_state if steering_state else {"pending": None, "processed": False}
+    steering = steering_state if steering_state is not None else {"pending": None, "processed": False, "queue": []}
+    steering.setdefault("queue", [])
+
+    def _next_steering_input() -> str | None:
+        queue = steering.setdefault("queue", [])
+        if queue:
+            value = str(queue.pop(0))
+            steering["pending"] = queue[0] if queue else None
+            steering["processed"] = True
+            return value
+        pending = steering.get("pending")
+        if pending and not steering.get("processed"):
+            steering["pending"] = None
+            steering["processed"] = True
+            return str(pending)
+        return None
 
     async def input_hook(user_input: str) -> None:
         """运行时追加指令入口：写入 steering_state 供主循环消费。"""
-        steering["pending"] = user_input
+        queue = steering.setdefault("queue", [])
+        queue.append(user_input)
+        steering["pending"] = queue[0]
         steering["processed"] = False
 
     consumer_task: asyncio.Task | None = None
@@ -644,6 +805,11 @@ async def run_mission(
             f"置信度：{category_decision.confidence:.0%}\n"
             f"证据：{'; '.join(category_decision.evidence)}\n"
         )
+        if declared_network_targets:
+            plan_prompt += (
+                "用户任务说明中明确声明并已自动授权的网络目标："
+                f"{', '.join(declared_network_targets)}\n"
+            )
         if category_decision.secondary:
             plan_prompt += f"候选题型：{', '.join(category_decision.secondary)}\n"
         if initial_context:
@@ -662,12 +828,35 @@ async def run_mission(
 
         # 流式调用 Brain，实时打印前缀 [Brain] 并转发事件。
         # Brain 通过 AddPlan 工具直接登记 plan_items（每次登记即持久化并推送前端）。
-        plan_result = await stream_agent_reply(
-            brain,
-            UserMsg(name="user", content=plan_prompt),
-            prefix="[Brain] ",
-            on_event=event_callback,
-        )
+        # 规划阶段同样允许操作员插话：不能因为此时尚未进入 Orchestrator
+        # 循环，就让新情报被取消事件吞掉。
+        while True:
+            try:
+                plan_result = await run_interruptible_agent_reply(
+                    brain,
+                    UserMsg(name="user", content=plan_prompt),
+                    prefix="[Brain] ",
+                    on_event=event_callback,
+                )
+                break
+            except asyncio.CancelledError:
+                if steering.get("cancel_requested"):
+                    raise
+                new_intel = _next_steering_input()
+                if not new_intel:
+                    raise
+                plan_prompt += (
+                    "\n\n## 操作员中途补充的新情报\n"
+                    f"{new_intel}\n"
+                    "请立即基于此情报更新后续计划；已有计划条目无需重复登记。"
+                )
+                if event_callback is not None:
+                    event_callback(
+                        "message",
+                        content="已接收操作员新情报，正在据此更新战略计划。",
+                        agent=brain.name,
+                        event_type="agent_acknowledged",
+                    )
         # 保存计划文本（无输出时回退到内置四阶段计划）
         mission.plan = plan_result.get_text_content() or "使用内置四阶段计划"
         phase_experts, expert_section = build_expert_assignments(
@@ -779,7 +968,7 @@ async def run_mission(
         malformed_retry_budget = 2
         while True:
             try:
-                final_result = await stream_agent_reply(
+                final_result = await run_interruptible_agent_reply(
                     orchestrator,
                     UserMsg(name="user", content=orch_content),
                     prefix="[Orchestrator] ",
@@ -812,6 +1001,16 @@ async def run_mission(
                         "或调用 complete_mission 如实收尾。"
                     )
                     continue
+                # Agent 正常结束时，若用户在回复末尾追加了情报，也无需等待
+                # 下一次工具调用，立即开启新一轮 Orchestrator 回复。
+                pending = _next_steering_input()
+                if pending:
+                    orch_content = (
+                        f"[用户中途指令] {pending}\n\n"
+                        "请立即确认已收到该新情报，并基于已有证据调整行动方向。"
+                        "无需重复已完成的侦察步骤。"
+                    )
+                    continue
                 break
             except AgentMaxIterationsError as exc:
                 # P1：Orchestrator 自身超迭代 → 确定性收敛 FAILED，避免静默失败
@@ -841,15 +1040,15 @@ async def run_mission(
                 #  2) steering 已被 dispatch_* 工具快速路径消费但 Orchestrator
                 #     自身 reply 仍被打断 → 仅恢复，继续推进
                 #  3) 真正的停止请求 → re-raise 让外层 finally 处理清理
-                pending = steering.get("pending")
-                if pending and not steering.get("processed"):
+                if steering.get("cancel_requested"):
+                    raise
+                pending = _next_steering_input()
+                if pending:
                     # 兜底注入：dispatch 工具未消费（Orchestrator 不在工具内），
                     # 主循环直接把指令作为新一轮输入。
-                    steering["processed"] = True
-                    steering["pending"] = None
                     orch_content = (
                         f"[用户中途指令] {pending}\n\n"
-                        f"请基于已有侦察证据和此指令调整行动方向。"
+                        f"请立即确认已收到该新情报，并基于已有侦察证据调整行动方向。"
                         f"无需重复已完成的侦察步骤。"
                     )
                     continue

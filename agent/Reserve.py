@@ -20,7 +20,7 @@ from agentscope.tool import Toolkit
 from agent.Attack import _build_skill_list
 from Tools.IntelPwn import create_intelpwn_tool
 from Tools.ScopeRegistry import ScopeRegistry
-from Tools.tooling import AllowedFunctionTool, create_scoped_shell_tool, stream_agent_reply
+from Tools.tooling import AllowedFunctionTool, create_scoped_shell_tool, run_interruptible_agent_reply
 from agent.experts import REVERSE_EXPERT
 
 RESERVE_SYS_PROMPT = """你是二进制逆向分析专家（Reserve）。
@@ -83,7 +83,7 @@ async def create_reverse_agent(
         Args:
             service_info: Recon 得到的文件信息和初步结论。
         """
-        result = await stream_agent_reply(
+        result = await run_interruptible_agent_reply(
             analysis_agent,
             UserMsg(name="Reserve", content=service_info),
             prefix="[Analysis] ",

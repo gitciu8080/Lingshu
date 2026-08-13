@@ -14,6 +14,24 @@ from pydantic import BaseModel
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
+
+def _load_dotenv_for_auth() -> None:
+    """认证在配置模块之前导入，因此在此尽早读取项目 .env。"""
+    dotenv_path = Path(__file__).with_name(".env")
+    if not dotenv_path.is_file():
+        return
+    for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value.strip().strip("\"'")
+
+
+_load_dotenv_for_auth()
+
 JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "10080"))
@@ -44,6 +62,10 @@ class TokenResponse(BaseModel):
     expires_in: int
 
 
+class PasswordReset(BaseModel):
+    password: str
+
+
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -65,6 +87,11 @@ def init_db():
                 last_login TIMESTAMP
             )
         """)
+        # 旧数据库的兼容迁移。auth_epoch 变更后，旧 Token 将立即失效，
+        # 用于在管理员重置密码时撤销该用户现有的所有登录态。
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+        if "auth_epoch" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 0")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS user_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +104,7 @@ def init_db():
             )
         """)
         _create_default_admin(conn)
+        _create_configured_superadmin(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -126,6 +154,26 @@ def _create_default_admin(conn: sqlite3.Connection):
         pass
 
 
+def _create_configured_superadmin(conn: sqlite3.Connection):
+    """首次启动时按环境变量创建独立的最高管理员账户。
+
+    不提供内置密码，避免把可公开猜到的最高权限账号带到部署环境。
+    账户一旦创建，后续修改环境变量不会覆盖其密码；请通过管理页重置。
+    """
+    username = os.getenv("LINGSHU_SUPERADMIN_USERNAME", "superadmin").strip()
+    password = os.getenv("LINGSHU_SUPERADMIN_PASSWORD", "")
+    if not username or not password:
+        return
+    row = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+    if row:
+        conn.execute("UPDATE users SET role = 'superadmin' WHERE id = ?", (row["id"],))
+        return
+    conn.execute(
+        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'superadmin')",
+        (username, pwd_context.hash(password)),
+    )
+
+
 def get_user_by_username(username: str) -> Optional[dict]:
     conn = get_db()
     try:
@@ -166,12 +214,52 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 
-def create_access_token(user_id: int, username: str, role: str):
+def list_users() -> list[dict]:
+    """用于超级管理员页面的最小化用户信息，不泄露密码散列。"""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT id, username, email, role, created_at, last_login FROM users ORDER BY id ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def reset_user_password(user_id: int, password: str) -> None:
+    if len(password) < 8:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="新密码长度不能少于 8 位")
+    conn = get_db()
+    try:
+        cursor = conn.execute(
+            "UPDATE users SET password_hash = ?, auth_epoch = auth_epoch + 1 WHERE id = ?",
+            (pwd_context.hash(password), user_id),
+        )
+        if cursor.rowcount != 1:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_user(user_id: int) -> None:
+    conn = get_db()
+    try:
+        cursor = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        if cursor.rowcount != 1:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def create_access_token(user_id: int, username: str, role: str, auth_epoch: int = 0):
     expires = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES)
     payload = {
         "sub": str(user_id),
         "username": username,
         "role": role,
+        "auth_epoch": auth_epoch,
         "exp": expires,
         "iat": datetime.now(timezone.utc),
         "jti": secrets.token_hex(16),
@@ -211,6 +299,8 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户不存在",
         )
+    if int(payload.get("auth_epoch", -1)) != int(user.get("auth_epoch", 0)):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录状态已失效，请重新登录")
     return {
         "id": user["id"],
         "username": user["username"],
