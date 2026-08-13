@@ -105,9 +105,24 @@ export const api = {
     request<Session & Record<string, unknown>>(
       `/api/session/${encodeURIComponent(id)}`,
     ),
-  messages: async (id: string, after = 0) => {
-    const data = await request<{ messages?: unknown; snapshots?: unknown }>(
-      `/api/session/${encodeURIComponent(id)}/messages?after_seq=${after}&limit=5000`,
+  messages: async (
+    id: string,
+    options: { beforeSeq?: number; afterSeq?: number; limit?: number } = {},
+  ) => {
+    const params = new URLSearchParams();
+    params.set("limit", String(options.limit || 200));
+    if (options.beforeSeq !== undefined)
+      params.set("before_seq", String(options.beforeSeq));
+    if (options.afterSeq !== undefined)
+      params.set("after_seq", String(options.afterSeq));
+    const data = await request<{
+      messages?: unknown;
+      snapshots?: unknown;
+      has_more?: unknown;
+      oldest_seq?: unknown;
+      newest_seq?: unknown;
+    }>(
+      `/api/session/${encodeURIComponent(id)}/messages?${params.toString()}`,
     );
     const messages = Array.isArray(data?.messages)
       ? data.messages.map((item) =>
@@ -137,7 +152,13 @@ export const api = {
           ];
         })
       : [];
-    return { messages, snapshots };
+    return {
+      messages,
+      snapshots,
+      hasMore: data?.has_more === true,
+      oldestSeq: Number(data?.oldest_seq || 0),
+      newestSeq: Number(data?.newest_seq || 0),
+    };
   },
   create: (data: Record<string, string>) =>
     request<{ session_id: string }>("/api/session/start", {

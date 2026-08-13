@@ -470,3 +470,23 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 .tool-arg-array-item>span:first-child{position:absolute;left:0;top:1px;display:grid;width:16px;height:16px;place-items:center;border-radius:50%;background:var(--line2);color:var(--dim);font-size:8px}
 .tool-arg-value>.tool-args-structured{margin:-3px;border-color:var(--line2)}
 @media(max-width:700px){.tool-arg-row{grid-template-columns:1fr}.tool-arg-name{border-right:0;border-bottom:1px solid var(--line2);padding:6px 8px}.tool-arg-name code{display:none}.tool-arg-value{padding:8px}}
+
+/* 右侧任务情报面板：桌面端 2×2 战术矩阵，移动端顺序单列。 */
+@media(min-width:1021px){
+  .app-frame{grid-template-columns:244px minmax(0,1fr) clamp(430px,36vw,560px)}
+  .intel-panel{display:block;overflow:hidden;padding:12px}
+  .intel-grid{display:grid;height:100%;min-height:0;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:minmax(210px,.8fr) minmax(280px,1.2fr);gap:10px}
+  .intel-grid>.side-section{display:flex;min-width:0;min-height:0;flex-direction:column;margin:0;padding:11px;border:1px solid var(--line);overflow:hidden;background:color-mix(in srgb,var(--panel) 62%,transparent)}
+  .intel-grid .tool-history-list{height:auto;min-height:0;flex:1 1 auto}
+  .intel-grid .plan-list,.intel-grid .agent-roster{min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
+  .intel-grid .plan-list{margin-top:8px}
+  .intel-grid .agent-roster{margin-top:8px}
+  .intel-grid .radar{width:104px;height:104px;margin:10px auto 4px}
+}
+@media(max-width:1020px){
+  .intel-grid{display:grid;grid-template-columns:1fr;gap:12px;min-width:0}
+  .intel-grid>.side-section{min-width:0;margin:0;padding:0 0 14px}
+  .intel-grid .tool-history-list{height:clamp(280px,46vh,580px);min-height:280px}
+  .intel-grid .plan-list{max-height:420px;overflow-y:auto;overflow-x:hidden}
+  .intel-grid .agent-roster{max-height:360px;overflow-y:auto;overflow-x:hidden}
+}

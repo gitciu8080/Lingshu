@@ -84,6 +84,16 @@ def init_sessions_db():
             conn.execute(
                 "ALTER TABLE session_messages ADD COLUMN source_id TEXT DEFAULT ''"
             )
+        # 会话列表按用户/状态和创建时间分页，显式复合索引避免用户与
+        # 历史会话增长后重复扫描、排序整张 sessions 表。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_user_created "
+            "ON sessions(user_id, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_user_status_created "
+            "ON sessions(user_id, status, created_at DESC)"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -227,6 +237,88 @@ def add_message(
         conn.close()
 
 
+def apply_persistence_batch(operations: list[dict]) -> list[int | None]:
+    """在单个事务中顺序应用消息和流快照操作。
+
+    返回值与 operations 对齐；只有 message 操作返回分配到的 seq。
+    BEGIN IMMEDIATE 保证本批次与用户消息等其他写入者之间不会产生序号
+    冲突，同时把多次 fsync 合并为一次事务提交。
+    """
+    if not operations:
+        return []
+    conn = get_db()
+    results: list[int | None] = []
+    next_sequences: dict[str, int] = {}
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for operation in operations:
+            operation_type = operation.get("type")
+            session_id = str(operation.get("session_id") or "")
+            if operation_type == "message":
+                if session_id not in next_sequences:
+                    row = conn.execute(
+                        "SELECT COALESCE(MAX(seq), 0) FROM session_messages "
+                        "WHERE session_id = ?",
+                        (session_id,),
+                    ).fetchone()
+                    next_sequences[session_id] = int(row[0] or 0)
+                next_sequences[session_id] += 1
+                seq = next_sequences[session_id]
+                conn.execute(
+                    """INSERT INTO session_messages
+                       (session_id, seq, role, content, event_type, agent_name, source_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        seq,
+                        operation.get("role", "agent"),
+                        operation.get("content", ""),
+                        operation.get("event_type", ""),
+                        operation.get("agent_name", ""),
+                        operation.get("source_id", ""),
+                    ),
+                )
+                results.append(seq)
+            elif operation_type == "snapshot_upsert":
+                conn.execute(
+                    """INSERT INTO session_stream_snapshots
+                       (session_id, reply_id, block_id, agent_name, stream_type, content, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(session_id, block_id) DO UPDATE SET
+                         reply_id = excluded.reply_id,
+                         agent_name = excluded.agent_name,
+                         stream_type = excluded.stream_type,
+                         content = excluded.content,
+                         updated_at = excluded.updated_at""",
+                    (
+                        session_id,
+                        operation.get("reply_id", ""),
+                        operation.get("block_id", ""),
+                        operation.get("agent_name", ""),
+                        operation.get("stream_type", "text"),
+                        operation.get("content", ""),
+                        datetime.now().isoformat(),
+                    ),
+                )
+                results.append(None)
+            elif operation_type == "snapshot_delete":
+                conn.execute(
+                    "DELETE FROM session_stream_snapshots "
+                    "WHERE session_id = ? AND block_id = ?",
+                    (session_id, operation.get("block_id", "")),
+                )
+                results.append(None)
+            else:
+                results.append(None)
+        conn.commit()
+        return results
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def get_messages(
     session_id: str,
     after_seq: int = 0,
@@ -330,6 +422,71 @@ def get_history_snapshot(
         ).fetchall()
         conn.commit()
         return [dict(row) for row in messages], [dict(row) for row in snapshots]
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_history_page(
+    session_id: str,
+    *,
+    before_seq: int | None = None,
+    after_seq: int = 0,
+    limit: int = 200,
+    include_snapshots: bool = True,
+) -> tuple[list[dict], list[dict], bool]:
+    """读取一页历史消息及未完成流快照。
+
+    默认返回最新一页；``before_seq`` 用于向更早历史翻页；保留
+    ``after_seq`` 供 SSE/旧客户端正向补偿。额外读取一条判断 has_more。
+    """
+    page_size = max(1, limit)
+    conn = get_db()
+    try:
+        conn.execute("BEGIN")
+        if before_seq is not None:
+            rows = conn.execute(
+                """SELECT * FROM session_messages
+                   WHERE session_id = ? AND seq < ?
+                   ORDER BY seq DESC LIMIT ?""",
+                (session_id, before_seq, page_size + 1),
+            ).fetchall()
+            has_more = len(rows) > page_size
+            messages = list(reversed(rows[:page_size]))
+        elif after_seq > 0:
+            rows = conn.execute(
+                """SELECT * FROM session_messages
+                   WHERE session_id = ? AND seq > ?
+                   ORDER BY seq ASC LIMIT ?""",
+                (session_id, after_seq, page_size + 1),
+            ).fetchall()
+            has_more = len(rows) > page_size
+            messages = rows[:page_size]
+        else:
+            rows = conn.execute(
+                """SELECT * FROM session_messages
+                   WHERE session_id = ?
+                   ORDER BY seq DESC LIMIT ?""",
+                (session_id, page_size + 1),
+            ).fetchall()
+            has_more = len(rows) > page_size
+            messages = list(reversed(rows[:page_size]))
+
+        snapshots = []
+        if include_snapshots:
+            snapshots = conn.execute(
+                """SELECT * FROM session_stream_snapshots
+                   WHERE session_id = ? ORDER BY updated_at ASC""",
+                (session_id,),
+            ).fetchall()
+        conn.commit()
+        return (
+            [dict(row) for row in messages],
+            [dict(row) for row in snapshots],
+            has_more,
+        )
     except Exception:
         conn.rollback()
         raise

@@ -353,17 +353,38 @@ const TOOL_LABELS: Record<string, string> = {
   ListPlan: "查看计划",
 };
 
-function findLastEventIndex(
-  list: Event[],
-  predicate: (event: Event) => boolean,
-) {
-  for (let index = list.length - 1; index >= 0; index -= 1) {
-    if (predicate(list[index])) return index;
-  }
-  return -1;
+type EventStore = {
+  items: Event[];
+  toolItems: Event[];
+  streamIndex: Map<string, number>;
+  familyIndex: Map<string, number>;
+  toolIndex: Map<string, number>;
+  toolListIndex: Map<string, number>;
+};
+
+function emptyEventStore(): EventStore {
+  return {
+    items: [],
+    toolItems: [],
+    streamIndex: new Map(),
+    familyIndex: new Map(),
+    toolIndex: new Map(),
+    toolListIndex: new Map(),
+  };
 }
 
-function mergeEvent(list: Event[], value: Event): Event[] {
+function cloneEventStore(store: EventStore): EventStore {
+  return {
+    items: [...store.items],
+    toolItems: [...store.toolItems],
+    streamIndex: new Map(store.streamIndex),
+    familyIndex: new Map(store.familyIndex),
+    toolIndex: new Map(store.toolIndex),
+    toolListIndex: new Map(store.toolListIndex),
+  };
+}
+
+function mergeEventInto(store: EventStore, value: Event): void {
   const event = safeEvent(value);
   const kind = kindOf(event);
   const data = dataOf(event);
@@ -375,18 +396,24 @@ function mergeEvent(list: Event[], value: Event): Event[] {
         ? "thinking"
         : "text";
   const streamKey = String(
-    data.block_id || data.reply_id || `${agent}:${family}`,
+    data.block_id || data.reply_id || data._streamKey || event._streamKey || `${agent}:${family}`,
   );
+  const familyKey = `${agent}:${family}`;
 
-  if (["plan_updated", "target_info"].includes(kind)) return list;
+  if (["plan_updated", "target_info"].includes(kind)) return;
+
+  // 已归并的 EventStore 在操作员发送状态更新等低频场景会重建索引；
+  // 重建时必须重新登记仍在流式输出的块，后续 delta 才能 O(1) 命中。
+  if (["text_stream", "thinking_stream"].includes(kind)) {
+    const index = store.items.length;
+    store.items.push({ ...event, _streamKey: streamKey, _family: family });
+    store.streamIndex.set(streamKey, index);
+    store.familyIndex.set(familyKey, index);
+    return;
+  }
 
   if (kind === "stream_snapshot") {
-    const index = findLastEventIndex(
-      list,
-      (item) =>
-        item._streamKey === streamKey ||
-        (item._family === family && agentOf(item).name === agent),
-    );
+    const index = store.streamIndex.get(streamKey) ?? store.familyIndex.get(familyKey) ?? -1;
     const snapshot: Event = {
       ...event,
       event_type: `${family}_stream`,
@@ -394,36 +421,39 @@ function mergeEvent(list: Event[], value: Event): Event[] {
       _streamKey: streamKey,
       _family: family,
     };
-    if (index < 0) return snapshot.content ? [...list, snapshot] : list;
-    const next = [...list];
-    next[index] = { ...next[index], ...snapshot };
-    return next;
+    if (index < 0) {
+      if (!snapshot.content) return;
+      const nextIndex = store.items.length;
+      store.items.push(snapshot);
+      store.streamIndex.set(streamKey, nextIndex);
+      store.familyIndex.set(familyKey, nextIndex);
+      return;
+    }
+    store.items[index] = { ...store.items[index], ...snapshot };
+    store.streamIndex.set(streamKey, index);
+    store.familyIndex.set(familyKey, index);
+    return;
   }
 
   if (["text_start", "thinking_start"].includes(kind)) {
-    return [
-      ...list,
-      { ...event, content: "", _streamKey: streamKey, _family: family },
-    ];
+    const index = store.items.length;
+    store.items.push({ ...event, content: "", _streamKey: streamKey, _family: family });
+    store.streamIndex.set(streamKey, index);
+    store.familyIndex.set(familyKey, index);
+    return;
   }
 
   if (["text_delta", "thinking_delta", "text_end", "thinking_end"].includes(kind)) {
-    const index = findLastEventIndex(
-      list,
-      (item) =>
-        item._streamKey === streamKey ||
-        (item._family === family && agentOf(item).name === agent),
-    );
+    const index = store.streamIndex.get(streamKey) ?? store.familyIndex.get(familyKey) ?? -1;
     const isEnd = kind.endsWith("_end");
     const full = String(data.full_text || "");
     const delta = String(data.delta || "");
     if (index >= 0) {
-      const previous = list[index];
+      const previous = store.items[index];
       const content = isEnd
         ? full || String(previous.content || "")
         : String(previous.content || "") + delta;
-      const next = [...list];
-      next[index] = {
+      store.items[index] = {
         ...previous,
         ...event,
         event_type: isEnd ? kind : `${family}_stream`,
@@ -431,33 +461,30 @@ function mergeEvent(list: Event[], value: Event): Event[] {
         _streamKey: streamKey,
         _family: family,
       };
-      return next;
+      store.streamIndex.set(streamKey, index);
+      store.familyIndex.set(familyKey, index);
+      return;
     }
     const content = full || delta || eventText(event);
-    return content
-      ? [
-          ...list,
-          {
-            ...event,
-            event_type: isEnd ? kind : `${family}_stream`,
-            content,
-            _streamKey: streamKey,
-            _family: family,
-          },
-        ]
-      : list;
+    if (!content) return;
+    const nextIndex = store.items.length;
+    store.items.push({
+      ...event,
+      event_type: isEnd ? kind : `${family}_stream`,
+      content,
+      _streamKey: streamKey,
+      _family: family,
+    });
+    store.streamIndex.set(streamKey, nextIndex);
+    store.familyIndex.set(familyKey, nextIndex);
+    return;
   }
 
   if (kind.startsWith("tool_call")) {
     const id = String(data.tool_call_id || data.reply_id || "");
-    const index = id
-      ? findLastEventIndex(
-          list,
-          (item) => String(dataOf(item).tool_call_id || "") === id,
-        )
-      : -1;
-    if (kind === "tool_call_delta" && index < 0) return list;
-    const previous = index >= 0 ? list[index] : undefined;
+    const index = id ? store.toolIndex.get(id) ?? -1 : -1;
+    if (kind === "tool_call_delta" && index < 0) return;
+    const previous = index >= 0 ? store.items[index] : undefined;
     const previousData = previous ? dataOf(previous) : {};
     const fullArgs = String(
       data.full_args ||
@@ -472,31 +499,41 @@ function mergeEvent(list: Event[], value: Event): Event[] {
       full_args: fullArgs,
     };
     if (index >= 0) {
-      const next = [...list];
-      next[index] = merged;
-      return next;
+      store.items[index] = merged;
+      const toolListIndex = store.toolListIndex.get(id);
+      if (toolListIndex !== undefined) store.toolItems[toolListIndex] = merged;
+      return;
     }
-    return [...list, merged];
+    const nextIndex = store.items.length;
+    store.items.push(merged);
+    store.toolItems.push(merged);
+    if (id) {
+      store.toolIndex.set(id, nextIndex);
+      store.toolListIndex.set(id, store.toolItems.length - 1);
+    }
+    return;
   }
 
   const text = eventText(event);
-  const previous = list.at(-1);
+  const previous = store.items.at(-1);
   if (
     text &&
     previous &&
     eventText(previous) === text &&
     agentOf(previous).name === agent
   )
-    return list;
-  return [...list, event];
+    return;
+  store.items.push(event);
 }
 
-function normalizeEvents(values: Event[]) {
-  return values.reduce<Event[]>((result, event) => mergeEvent(result, event), []);
+function normalizeEvents(values: Event[]): EventStore {
+  const store = emptyEventStore();
+  values.forEach((event) => mergeEventInto(store, event));
+  return store;
 }
 
-function mergeEventBatch(list: Event[], values: Event[]): Event[] {
-  if (!values.length) return list;
+function mergeEventBatch(store: EventStore, values: Event[]): EventStore {
+  if (!values.length) return store;
   // Responses API 经常按单个汉字产生 delta。先把同一内容块的相邻
   // 增量压成一段，再进入 mergeEvent，避免一帧内反复复制整个事件数组。
   const compacted: Event[] = [];
@@ -523,7 +560,13 @@ function mergeEventBatch(list: Event[], values: Event[]): Event[] {
       compacted.push(event);
     }
   }
-  return compacted.reduce<Event[]>((result, event) => mergeEvent(result, event), list);
+  const next = cloneEventStore(store);
+  compacted.forEach((event) => mergeEventInto(next, event));
+  return next;
+}
+
+function mapEventStore(store: EventStore, mapper: (event: Event) => Event): EventStore {
+  return normalizeEvents(store.items.map(mapper));
 }
 
 const MarkdownContent = memo(function MarkdownContent({ children }: { children: string }) {
@@ -724,7 +767,7 @@ const ToolHistoryEntry = memo(function ToolHistoryEntry({
 });
 
 const ToolHistoryPanel = memo(function ToolHistoryPanel({ events }: { events: Event[] }) {
-  const calls = events.filter((event) => kindOf(event).startsWith("tool_call"));
+  const calls = events;
   const [visibleTools, setVisibleTools] = useState(60);
   const listRef = useRef<HTMLDivElement>(null);
   const followLatestRef = useRef(true);
@@ -1531,8 +1574,9 @@ function PlanPanel({ mission, phase }: { mission: Mission; phase?: string }) {
         <ClipboardList size={15} />
         作战计划 <span>{items.length}</span>
       </div>
-      {items.length ? (
-        items.map((item) => (
+      <div className="plan-list">
+        {items.length ? (
+          items.map((item) => (
           <article
             className={`plan-line ${item.status} ${item.phase === phase ? "active" : ""}`}
             key={item.id}
@@ -1553,10 +1597,11 @@ function PlanPanel({ mission, phase }: { mission: Mission; phase?: string }) {
               {item.evidence && <em>{item.evidence}</em>}
             </div>
           </article>
-        ))
-      ) : (
-        <p className="empty-note">Brain 制定计划后将在此处显示。</p>
-      )}
+          ))
+        ) : (
+          <p className="empty-note">Brain 制定计划后将在此处显示。</p>
+        )}
+      </div>
     </section>
   );
 }
@@ -1717,8 +1762,9 @@ function ConsoleApp() {
     [hasMoreSessions, setHasMoreSessions] = useState(false),
     [loadingMoreSessions, setLoadingMoreSessions] = useState(false),
     [active, setActive] = useState(""),
-    [events, setEvents] = useState<Event[]>([]),
+    [eventStore, setEventStore] = useState<EventStore>(() => emptyEventStore()),
     [visibleCount, setVisibleCount] = useState(120),
+    [historyHasMore, setHistoryHasMore] = useState(false),
     [detail, setDetail] = useState<Mission>({}),
     [text, setText] = useState(""),
     [autoScrollEnabled, setAutoScrollEnabled] = useState(
@@ -1741,6 +1787,10 @@ function ConsoleApp() {
   const autoScrollEnabledRef = useRef(autoScrollEnabled);
   const sessionsRef = useRef<Session[]>([]);
   const eventsRef = useRef<Event[]>([]);
+  const historyHasMoreRef = useRef(false);
+  const oldestSeqRef = useRef(0);
+  const loadingHistoryRef = useRef(false);
+  const visibleCountRef = useRef(visibleCount);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const activeSessionRef = useRef(active);
   const outgoingQueueRef = useRef<OutgoingMessage[]>([]);
@@ -1750,6 +1800,7 @@ function ConsoleApp() {
     () => sessions.find((s) => s.id === active),
     [sessions, active],
   );
+  const events = eventStore.items;
   const phase = String(detail.phase || current?.phase || "");
   const modelLevel = String(
     detail.model_level || detail.model || current?.model_level || current?.model || "Min",
@@ -1765,6 +1816,8 @@ function ConsoleApp() {
   activeSessionRef.current = active;
   sessionsRef.current = sessions;
   eventsRef.current = events;
+  historyHasMoreRef.current = historyHasMore;
+  visibleCountRef.current = visibleCount;
   const hiddenCount = Math.max(0, events.length - visibleCount);
   const renderedEvents = hiddenCount > 0 ? events.slice(-visibleCount) : events;
   const load = async (append = false) => {
@@ -1814,7 +1867,12 @@ function ConsoleApp() {
     if (!active) return;
     const controller = new AbortController();
     autoScroll.current = autoScrollEnabledRef.current;
-    setEvents([]);
+    setEventStore(emptyEventStore());
+    setVisibleCount(120);
+    visibleCountRef.current = 120;
+    setHistoryHasMore(false);
+    historyHasMoreRef.current = false;
+    oldestSeqRef.current = 0;
     setDetail({});
     setPendingApproval(null);
     api
@@ -1839,7 +1897,7 @@ function ConsoleApp() {
         if (controller.signal.aborted || !pendingEvents.length) return;
         const batch = pendingEvents;
         pendingEvents = [];
-        setEvents((currentEvents) => mergeEventBatch(currentEvents, batch));
+        setEventStore((currentEvents) => mergeEventBatch(currentEvents, batch));
       };
       const enqueueEvent = (event: Event) => {
         pendingEvents.push(event);
@@ -1853,14 +1911,16 @@ function ConsoleApp() {
         }
       };
       try {
-        const history = await api.messages(active);
+        const history = await api.messages(active, { limit: 200 });
         if (controller.signal.aborted) return;
         const historyEvents = history.messages || [];
         afterSeq = historyEvents.reduce(
           (maximum, event) => Math.max(maximum, Number(event.seq || 0)),
           0,
         );
-        setEvents(
+        oldestSeqRef.current = history.oldestSeq;
+        setHistoryHasMore(history.hasMore);
+        setEventStore(
           normalizeEvents([...historyEvents, ...(history.snapshots || [])]),
         );
       } catch (err) {
@@ -1951,18 +2011,54 @@ function ConsoleApp() {
   );
   // 聊天懒加载：只渲染最近 visibleCount 条，向上滚动经哨兵分批加载更早历史
   const loadMoreEvents = useCallback(() => {
+    if (loadingHistoryRef.current) return;
     const feed = feedRef.current;
     const previousHeight = feed ? feed.scrollHeight : 0;
-    setVisibleCount((count) => Math.min(count + 120, eventsRef.current.length));
-    requestAnimationFrame(() => {
-      const nextFeed = feedRef.current;
-      if (nextFeed) nextFeed.scrollTop += nextFeed.scrollHeight - previousHeight;
-    });
+    const currentLength = eventsRef.current.length;
+    if (visibleCountRef.current < currentLength) {
+      const nextCount = Math.min(visibleCountRef.current + 120, currentLength);
+      visibleCountRef.current = nextCount;
+      setVisibleCount(nextCount);
+      requestAnimationFrame(() => {
+        const nextFeed = feedRef.current;
+        if (nextFeed) nextFeed.scrollTop += nextFeed.scrollHeight - previousHeight;
+      });
+      return;
+    }
+    if (!historyHasMoreRef.current || !oldestSeqRef.current) return;
+
+    const sessionId = activeSessionRef.current;
+    loadingHistoryRef.current = true;
+    void api
+      .messages(sessionId, { beforeSeq: oldestSeqRef.current, limit: 200 })
+      .then((page) => {
+        if (activeSessionRef.current !== sessionId) return;
+        const olderEvents = page.messages || [];
+        if (olderEvents.length) {
+          setEventStore((currentStore) =>
+            normalizeEvents([...olderEvents, ...currentStore.items]),
+          );
+          const nextVisibleCount = visibleCountRef.current + olderEvents.length;
+          visibleCountRef.current = nextVisibleCount;
+          setVisibleCount(nextVisibleCount);
+          oldestSeqRef.current = page.oldestSeq || oldestSeqRef.current;
+        }
+        setHistoryHasMore(page.hasMore);
+        historyHasMoreRef.current = page.hasMore;
+        requestAnimationFrame(() => {
+          const nextFeed = feedRef.current;
+          if (nextFeed) nextFeed.scrollTop += nextFeed.scrollHeight - previousHeight;
+        });
+      })
+      .catch((error) => toast.error(`读取更早记录失败：${String(error)}`))
+      .finally(() => {
+        loadingHistoryRef.current = false;
+      });
   }, []);
   useEffect(() => {
     const sentinel = sentinelRef.current;
     const feed = feedRef.current;
-    if (!sentinel || !feed || events.length <= visibleCount) return;
+    if (!sentinel || !feed || (events.length <= visibleCount && !historyHasMore)) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0]?.isIntersecting) loadMoreEvents();
@@ -1971,7 +2067,7 @@ function ConsoleApp() {
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [visibleCount, events.length, loadMoreEvents]);
+  }, [visibleCount, events.length, historyHasMore, loadMoreEvents]);
   if (!ready)
     return (
       <>
@@ -1993,8 +2089,8 @@ function ConsoleApp() {
         try {
           await api.send(item.sessionId, item.content);
           if (activeSessionRef.current === item.sessionId) {
-            setEvents((currentEvents) =>
-              currentEvents.map((event) =>
+            setEventStore((currentEvents) =>
+              mapEventStore(currentEvents, (event) =>
                 event.client_id === item.clientId
                   ? { ...event, delivery_state: "sent" }
                   : event,
@@ -2003,8 +2099,8 @@ function ConsoleApp() {
           }
         } catch (err) {
           if (activeSessionRef.current === item.sessionId) {
-            setEvents((currentEvents) =>
-              currentEvents.map((event) =>
+            setEventStore((currentEvents) =>
+              mapEventStore(currentEvents, (event) =>
                 event.client_id === item.clientId
                   ? { ...event, delivery_state: "failed" }
                   : event,
@@ -2034,14 +2130,14 @@ function ConsoleApp() {
     // 操作员仍可连续补充多条情报，队列会按顺序提交给后端。
     outgoingQueueRef.current.push({ sessionId, content, clientId });
     setOutgoingQueue([...outgoingQueueRef.current]);
-    setEvents((currentEvents) =>
-      mergeEvent(currentEvents, {
+    setEventStore((currentEvents) =>
+      mergeEventBatch(currentEvents, [{
         event_type: "user_message",
         agent_name: "user",
         content,
         client_id: clientId,
         delivery_state: "queued",
-      }),
+      }]),
     );
     setText("");
     void flushOutgoing();
@@ -2317,14 +2413,14 @@ function ConsoleApp() {
                 feed.scrollHeight - feed.scrollTop - feed.clientHeight < 96;
             }}
           >
-            {hiddenCount > 0 && (
+            {(hiddenCount > 0 || historyHasMore) && (
               <div
                 className="history-sentinel"
                 ref={sentinelRef}
                 onClick={loadMoreEvents}
               >
-                <span>更早 {hiddenCount} 条消息</span>
-                <small>向上滚动或点击加载</small>
+                <span>{hiddenCount > 0 ? `更早 ${hiddenCount} 条消息` : "加载更早历史"}</span>
+                <small>{loadingHistoryRef.current ? "正在读取…" : "向上滚动或点击加载"}</small>
               </div>
             )}
             {renderedEvents.length ? (
@@ -2381,54 +2477,56 @@ function ConsoleApp() {
           >
             <X size={18} />
           </button>
-          <section className="side-section status-card">
-            <div className="side-title">
-              <ShieldAlert size={15} />
-              任务态势 <span className="live-dot" />
-            </div>
-            <div className="radar">
-              <i />
-              <i />
-              <i />
-              <b>{phaseLabel(phase)}</b>
-            </div>
-            {detail.flag && (
-              <div className="flag-box">
-                FLAG<code>{detail.flag}</code>
+          <div className="intel-grid">
+            <section className="side-section status-card">
+              <div className="side-title">
+                <ShieldAlert size={15} />
+                任务态势 <span className="live-dot" />
               </div>
-            )}
-          </section>
-          <ToolHistoryPanel events={events} />
-          <PlanPanel mission={detail} phase={phase} />
-          <section className="side-section">
-            <div className="side-title">
-              <Terminal size={15} />
-              智能体活动
-            </div>
-            <div className="agent-roster">
-              {Object.entries(AGENTS)
-                .filter(([n]) => !["system", "user"].includes(n))
-                .slice(0, 6)
-                .map(([name, a]) => {
-                  const Icon = a.icon;
-                  const activeAgent = events
-                    .slice(-8)
-                    .some((e) => agentOf(e).agentKey === name);
-                  return (
-                    <div key={name} className={activeAgent ? "working" : ""}>
-                      <span className={a.tone}>
-                        <Icon size={13} />
-                      </span>
-                      <b>
-                        {name}
-                        <em>{a.expert}</em>
-                      </b>
-                      <small>{activeAgent ? "工作中" : "待命"}</small>
-                    </div>
-                  );
-                })}
-            </div>
-          </section>
+              <div className="radar">
+                <i />
+                <i />
+                <i />
+                <b>{phaseLabel(phase)}</b>
+              </div>
+              {detail.flag && (
+                <div className="flag-box">
+                  FLAG<code>{detail.flag}</code>
+                </div>
+              )}
+            </section>
+            <section className="side-section activity-section">
+              <div className="side-title">
+                <Terminal size={15} />
+                智能体活动
+              </div>
+              <div className="agent-roster">
+                {Object.entries(AGENTS)
+                  .filter(([n]) => !["system", "user"].includes(n))
+                  .slice(0, 6)
+                  .map(([name, a]) => {
+                    const Icon = a.icon;
+                    const activeAgent = events
+                      .slice(-8)
+                      .some((e) => agentOf(e).agentKey === name);
+                    return (
+                      <div key={name} className={activeAgent ? "working" : ""}>
+                        <span className={a.tone}>
+                          <Icon size={13} />
+                        </span>
+                        <b>
+                          {name}
+                          <em>{a.expert}</em>
+                        </b>
+                        <small>{activeAgent ? "工作中" : "待命"}</small>
+                      </div>
+                    );
+                  })}
+              </div>
+            </section>
+            <ToolHistoryPanel events={eventStore.toolItems} />
+            <PlanPanel mission={detail} phase={phase} />
+          </div>
         </aside>
         {mobileIntel && (
           <button

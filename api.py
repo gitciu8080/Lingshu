@@ -7,7 +7,7 @@ import logging
 import sys
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -170,9 +170,16 @@ _SYSTEM_ROLE_EVENTS = frozenset({
     "report_ready",
 })
 
+_persistence_queue: asyncio.Queue[list[dict]] | None = None
+_persistence_task: asyncio.Task | None = None
 
-def _persist_event(session_id: str, event_type: str, payload: dict) -> int | None:
-    """持久化重要事件并返回消息序号，供重连去重与补偿。"""
+
+def _event_persistence_operation(
+    session_id: str,
+    event_type: str,
+    payload: dict,
+) -> dict | None:
+    """将事件转换为可批量写入的纯数据操作。"""
     if event_type not in _PERSIST_EVENT_TYPES:
         return None
     agent_name = payload.get("agent", "")
@@ -241,9 +248,75 @@ def _persist_event(session_id: str, event_type: str, payload: dict) -> int | Non
         content = payload.get("content", payload.get("message", ""))
     # 系统事件 role="system"，Agent 流式/消息事件 role="agent"
     role = "system" if event_type in _SYSTEM_ROLE_EVENTS else "agent"
-    return session_store.add_message(
-        session_id, role, content, event_type, agent_name,
-    )
+    return {
+        "type": "message",
+        "session_id": session_id,
+        "role": role,
+        "content": content,
+        "event_type": event_type,
+        "agent_name": agent_name,
+        "source_id": "",
+    }
+
+
+def _persist_event(session_id: str, event_type: str, payload: dict) -> int | None:
+    """同步持久化兼容入口；API lifespan 内实时路径使用批量队列。"""
+    operation = _event_persistence_operation(session_id, event_type, payload)
+    if operation is None:
+        return None
+    return session_store.apply_persistence_batch([operation])[0]
+
+
+def _queue_persistence_operations(operations: list[dict]) -> bool:
+    """将操作加入批量队列；测试或队列满时由调用方同步回退。"""
+    if not operations or _persistence_queue is None:
+        return False
+    try:
+        _persistence_queue.put_nowait(operations)
+        return True
+    except asyncio.QueueFull:
+        logger.warning("持久化队列已满，回退同步写入")
+        return False
+
+
+async def _persistence_worker() -> None:
+    """聚合短时间内的会话事件，以单个 SQLite 事务批量提交。"""
+    assert _persistence_queue is not None
+    queue = _persistence_queue
+    while True:
+        first = await queue.get()
+        groups = [first]
+        operation_count = len(first)
+        deadline = asyncio.get_running_loop().time() + 0.02
+        while operation_count < 128:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                group = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            groups.append(group)
+            operation_count += len(group)
+        operations = [operation for group in groups for operation in group]
+        try:
+            await asyncio.to_thread(session_store.apply_persistence_batch, operations)
+        except Exception:
+            logger.exception("批量持久化失败，正在重试")
+            await asyncio.sleep(0.05)
+            try:
+                await asyncio.to_thread(session_store.apply_persistence_batch, operations)
+            except Exception:
+                logger.exception("批量持久化重试失败")
+        finally:
+            for _ in groups:
+                queue.task_done()
+
+
+async def _flush_persistence() -> None:
+    """等待此前排队的持久化操作完成，用于报告、删除和关闭边界。"""
+    if _persistence_queue is not None:
+        await _persistence_queue.join()
 
 
 # ── 靶机信息持久化 ──
@@ -294,6 +367,8 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
     """
     def callback(event_type: str, **payload: Any) -> None:
         stream_key = ""
+        persistence_operations: list[dict] = []
+        queued_persistence = _persistence_queue is not None
         # 全文缓冲：text_delta / thinking_delta → 累积
         if event_type in ("text_delta", "thinking_delta"):
             agent = payload.get("agent", "")
@@ -314,10 +389,21 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                 # 写一次；大块输出累计 512 字符时提前落盘。首个非空
                 # delta 会立即写入，崩溃恢复能力不受影响。
                 if now - last_write >= 0.2 or len(full_text) - last_size >= 512:
-                    session_store.upsert_stream_snapshot(
-                        session_id, "", block_id, agent,
-                        event_type.removesuffix("_delta"), full_text,
-                    )
+                    if queued_persistence:
+                        persistence_operations.append({
+                            "type": "snapshot_upsert",
+                            "session_id": session_id,
+                            "reply_id": "",
+                            "block_id": block_id,
+                            "agent_name": agent,
+                            "stream_type": event_type.removesuffix("_delta"),
+                            "content": full_text,
+                        })
+                    else:
+                        session_store.upsert_stream_snapshot(
+                            session_id, "", block_id, agent,
+                            event_type.removesuffix("_delta"), full_text,
+                        )
                     ctx.stream_snapshot_writes[stream_key] = (now, len(full_text))
         # 全文终结：text_end → 注入 full_text 并清除缓冲区
         elif event_type in ("text_end", "thinking_end"):
@@ -326,7 +412,14 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             block_id = ctx.stream_blocks.pop(stream_key, "")
             if block_id:
                 payload["block_id"] = block_id
-                session_store.delete_stream_snapshot(session_id, block_id)
+                if queued_persistence:
+                    persistence_operations.append({
+                        "type": "snapshot_delete",
+                        "session_id": session_id,
+                        "block_id": block_id,
+                    })
+                else:
+                    session_store.delete_stream_snapshot(session_id, block_id)
             full = ctx.stream_buffers.pop(stream_key, "")
             ctx.stream_snapshot_writes.pop(stream_key, None)
             if full:
@@ -376,8 +469,23 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             payload["output"] = payload.get("output", "") or (tool or {}).get("output", "")
 
         payload["session_id"] = session_id
-        # 先持久化再广播，确保刷新/重连可以从数据库补偿事件。
-        seq = _persist_event(session_id, event_type, payload)
+        # API 正常运行时交给后台队列批量提交；未启动 lifespan 的单元测试、
+        # 脚本调用以及队列满载时保留同步可靠回退。
+        seq = None
+        message_operation = _event_persistence_operation(
+            session_id, event_type, payload,
+        )
+        if queued_persistence:
+            if message_operation is not None:
+                persistence_operations.append(message_operation)
+            if persistence_operations and not _queue_persistence_operations(
+                persistence_operations,
+            ):
+                results = session_store.apply_persistence_batch(persistence_operations)
+                if message_operation is not None:
+                    seq = results[-1]
+        else:
+            seq = _persist_event(session_id, event_type, payload)
         event = {"type": event_type, **payload}
         if seq is not None:
             event["seq"] = seq
@@ -497,7 +605,12 @@ async def _session_event_generator(
     queue: asyncio.Queue = asyncio.Queue()
     ctx.subscribers.add(queue)
     # 注册订阅和读取补偿消息之间不 await，不会产生事件丢失窗口。
-    catchup = session_store.get_messages(session_id, after_seq=after_seq, limit=5000)
+    catchup = await asyncio.to_thread(
+        session_store.get_messages,
+        session_id,
+        after_seq,
+        5000,
+    )
     stream_snapshot = dict(ctx.stream_buffers)
     tool_snapshot = {
         tool_call_id: dict(tool)
@@ -637,6 +750,8 @@ async def _summarize_and_generate_report(
     callback,
 ) -> str:
     """调用 Summary Agent，总结完整会话并原子生成 PDF。"""
+    # Summary 必须读取到本轮所有已完成回复，不能与异步写入队列竞速。
+    await _flush_persistence()
     messages = await asyncio.to_thread(session_store.get_messages, session_id, 0, 5000)
     mission_data = mission_state.to_dict()
     mission_data.pop("events", None)
@@ -800,6 +915,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                 tool_name=tool.get("tool_name", ""),
             )
         callback("mission_end", message="任务已结束", status=status_val)
+        await _flush_persistence()
         await asyncio.to_thread(
             lambda: session_store.update_session(
                 session_id, status=status_val, phase=phase,
@@ -820,6 +936,12 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
 
 @asynccontextmanager
 async def _app_lifespan(_: FastAPI):
+    global _persistence_queue, _persistence_task
+    _persistence_queue = asyncio.Queue(maxsize=10000)
+    _persistence_task = asyncio.create_task(
+        _persistence_worker(),
+        name="lingshu-sqlite-persistence",
+    )
     async with agentscope_lifespan():
         rag = get_rag_service(_PROJECT_ROOT)
         await rag.start()
@@ -827,6 +949,14 @@ async def _app_lifespan(_: FastAPI):
             yield
         finally:
             await rag.close()
+            if _persistence_queue is not None:
+                await _persistence_queue.join()
+            if _persistence_task is not None:
+                _persistence_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await _persistence_task
+            _persistence_task = None
+            _persistence_queue = None
 
 
 app = FastAPI(
@@ -1032,7 +1162,10 @@ def _build_initial_context(source_session_id: str, user_id: str) -> str | None:
 @app.post("/auth/register", response_model=TokenResponse)
 async def register(data: UserCreate):
     try:
-        user = create_user(data.username, data.password, data.email)
+        # bcrypt 哈希属于 CPU 密集操作，不能阻塞 FastAPI 事件循环。
+        user = await asyncio.to_thread(
+            create_user, data.username, data.password, data.email,
+        )
         token, expires_in = create_access_token(user["id"], user["username"], user["role"], user.get("auth_epoch", 0))
         return TokenResponse(access_token=token, username=user["username"], expires_in=expires_in)
     except HTTPException:
@@ -1044,20 +1177,30 @@ async def register(data: UserCreate):
 @app.post("/auth/login", response_model=TokenResponse)
 async def login(data: UserLogin):
     from auth import get_user_by_username as _get_user
-    user = _get_user(data.username)
-    if not user or not verify_password(data.password, user["password_hash"]):
+
+    def authenticate_and_touch() -> dict | None:
+        user = _get_user(data.username)
+        if not user or not verify_password(data.password, user["password_hash"]):
+            return None
+        # 与密码校验放入同一工作线程，避免 SQLite 与 bcrypt 分别阻塞
+        # 主事件循环。
+        from auth import get_db
+        from datetime import datetime, timezone
+        conn = get_db()
+        try:
+            conn.execute(
+                "UPDATE users SET last_login = ? WHERE username = ?",
+                (datetime.now(timezone.utc).isoformat(), data.username),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return user
+
+    user = await asyncio.to_thread(authenticate_and_touch)
+    if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
     token, expires_in = create_access_token(user["id"], user["username"], user["role"], user.get("auth_epoch", 0))
-    # 登录时更新 last_login
-    from auth import get_db
-    from datetime import datetime, timezone
-    conn = get_db()
-    try:
-        conn.execute("UPDATE users SET last_login = ? WHERE username = ?",
-                     (datetime.now(timezone.utc).isoformat(), data.username))
-        conn.commit()
-    finally:
-        conn.close()
     return TokenResponse(access_token=token, username=user["username"], expires_in=expires_in)
 
 
@@ -1552,20 +1695,32 @@ async def download_session_report(
 async def get_session_messages(
     session_id: str,
     after_seq: int = 0,
+    before_seq: int | None = None,
     limit: int = 200,
     current_user: dict = Depends(get_current_user),
 ):
     """获取会话消息历史。"""
     await _verify_session_owner(session_id, current_user["id"])
-    messages, snapshots = await asyncio.to_thread(
-        session_store.get_history_snapshot,
+    page_size = max(20, min(limit, 500))
+    messages, snapshots, has_more = await asyncio.to_thread(
+        session_store.get_history_page,
         session_id,
-        after_seq,
-        limit,
+        before_seq=before_seq,
+        after_seq=max(0, after_seq),
+        limit=page_size,
+        # 翻阅旧页时未完成快照不会变化，无需重复传输。
+        include_snapshots=before_seq is None,
     )
     # 与 SSE 补偿保持同一事件协议；尤其要把 role=user 的记录还原为
     # user_message 气泡，而不是让 React 将其误作 system/message。
-    return {"messages": [_message_to_event(message) for message in messages], "snapshots": snapshots}
+    converted = [_message_to_event(message) for message in messages]
+    return {
+        "messages": converted,
+        "snapshots": snapshots,
+        "has_more": has_more,
+        "oldest_seq": int(messages[0]["seq"]) if messages else None,
+        "newest_seq": int(messages[-1]["seq"]) if messages else None,
+    }
 
 
 @app.get("/api/session/{session_id}/pending_approval")
@@ -1619,6 +1774,7 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
         except (asyncio.CancelledError, Exception):
             pass
     # 删除 DB 记录
+    await _flush_persistence()
     await asyncio.to_thread(session_store.delete_session, session_id)
     # 删除 JSON 文件
     session_file = _sessions_dir / f"{session_id}.json"
