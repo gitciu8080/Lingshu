@@ -38,7 +38,7 @@ import httpx
 NSS_API_BASE = "https://www.nssctf.cn/api"
 
 # 默认 Agent Token：优先读环境变量 NSSCTF_AGENT_TOKEN，否则使用此默认值
-DEFAULT_TOKEN = "nss_agent_Iphszr5-9jztFIHR75dmxml7Bljre7c8QI7ruXAVAxM"
+DEFAULT_TOKEN = "nss_agent_iS3-7xkoaVlLcOk3HkkJXB7H9M9gb8SEZrNkrRhtV9I"
 
 # ── 灵枢 Web 后端 ──
 DEFAULT_API_URL = os.environ.get("LINGSHU_API_URL", "http://localhost:8080")

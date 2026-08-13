@@ -208,6 +208,14 @@ cp .env.example .env
 # 编辑 .env 填入 API Key
 ```
 
+OCR 功能还需要系统安装 Tesseract。Debian/Kali/Ubuntu 可执行：
+
+```bash
+sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim
+```
+
+未安装时主系统仍可启动，但 `ocr_image` 工具会返回明确的依赖缺失提示。
+
 ### 基本用法
 
 ```bash

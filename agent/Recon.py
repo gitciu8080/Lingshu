@@ -11,6 +11,7 @@ from pathlib import Path
 from agentscope.agent import Agent, ReActConfig
 from agentscope.tool import Toolkit
 from Tools.CVE_Search import create_cve_search_tool
+from Tools.OCR import create_tesseract_ocr_tool
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.tooling import create_scoped_shell_tool
 from agent.experts import ARTIFACT_TRIAGE_EXPERT, NETWORK_RECON_EXPERT
@@ -75,6 +76,7 @@ ARTIFACT_TRIAGE_SYS_PROMPT = """你是 CTF 文件分析专家（ArtifactTriage�
 - 使用 scoped_shell 仅在工作目录内执行只读分析命令。
 - 先获取文件列表，识别文件类型（ELF/PE/PCAP/镜像/脚本/加密文件等）。
 - 对 ELF 执行 checksec/readelf；对 PCAP 执行 tcpdump/capinfos；对压缩包执行 file/unzip -l。
+- 对图片、截图或扫描文档可调用 ocr_image，使用 Tesseract 提取文本。
 - 绝不直接执行二进制文件（./chall 等）— 这属于 Attack 阶段的职责。
 - 不执行漏洞利用、口令爆破或破坏性操作。
 - 不修改文件、不联网。
@@ -97,7 +99,10 @@ def create_artifact_triage_agent(
 ) -> Agent:
     """创建文件分析 Agent，工作目录约束在 workdir 内。"""
     toolkit = Toolkit(
-        tools=[create_scoped_shell_tool(str(workdir), project_dir, timeout)],
+        tools=[
+            create_scoped_shell_tool(str(workdir), project_dir, timeout),
+            create_tesseract_ocr_tool(workdir, timeout=min(timeout, 90)),
+        ],
     )
     return Agent(
         name=ARTIFACT_TRIAGE_EXPERT,

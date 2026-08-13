@@ -13,5 +13,6 @@ CHANGES.md
 WorkDir/
 venv/
 .bak2
+.Reports/
 webui/node_modules/
 webui/dist/

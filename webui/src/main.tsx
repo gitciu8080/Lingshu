@@ -4,6 +4,7 @@ import { Toaster } from "sonner";
 import App from "./App";
 import { ErrorBoundary } from "./ErrorBoundary";
 import "./styles.css";
+import "./theme-overrides.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

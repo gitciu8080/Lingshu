@@ -15,7 +15,7 @@ _ATTACK_EXPERTS = {
     "web": "Mike - WEB渗透专家",
     "pwn": "Victor - 二进制利用专家",
     "reverse": "Ryan - 逆向利用专家",
-    "crypto": "Alice - 密码分析专家",
+    "crypto": "Alice - 密码学安全专家",
     "forensics": "Iris - 数字取证专家",
     "malware": "Morgan - 恶意代码分析专家",
     "misc": "Taylor - 综合安全专家",

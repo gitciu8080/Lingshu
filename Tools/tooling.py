@@ -120,11 +120,24 @@ def reset_expert_roster(token: Token) -> None:
     _EXPERT_ROSTER.reset(token)
 
 
-async def cancel_agent_tasks(tasks: set[asyncio.Task[Any]]) -> None:
-    """按 AgentScope 官方中断方式取消承载 reply_stream 的 task。"""
+def interrupt_agent_tasks(tasks: set[asyncio.Task[Any]]) -> int:
+    """立即发出 AgentScope 官方中断信号，绝不等待清理完成。
+
+    对正在运行的 ``Agent.reply_stream``，官方方式是取消承载它的
+    ``asyncio.Task``。HTTP 插话请求必须在发出该信号后马上返回，否则某个
+    慢模型调用/工具收尾会把下一条情报也堵在网络层。任务自身会在事件循环的
+    下一次调度中完成 AgentScope 的 interrupted 清理和 shell 子进程终止。
+    """
     active = tuple(task for task in tasks if not task.done())
     for task in active:
         task.cancel()
+    return len(active)
+
+
+async def cancel_agent_tasks(tasks: set[asyncio.Task[Any]]) -> None:
+    """中断并等待 Agent reply task 清理；仅用于任务终止/资源回收。"""
+    active = tuple(task for task in tasks if not task.done())
+    interrupt_agent_tasks(tasks)
     if active:
         try:
             await asyncio.wait_for(
@@ -133,6 +146,34 @@ async def cancel_agent_tasks(tasks: set[asyncio.Task[Any]]) -> None:
             )
         except asyncio.TimeoutError:
             pass  # 强制推进，task 的 finally 会自行完成清理
+
+
+async def run_interruptible_agent_reply(
+    agent: Agent,
+    inputs: Msg | list[Msg] | None = None,
+    prefix: str = "",
+    on_event: Callable[..., None] | None = None,
+) -> Msg:
+    """在独立任务中运行 Agent 回复，确保嵌套 Agent 可以被会话中断。
+
+    Orchestrator 的 ``dispatch_attack`` 等函数会作为 AgentScope 的工具协程
+    执行。仅取消其内部的 ``reply_stream`` task 时，部分 AgentScope 版本会
+    继续等待尚未退出的工具协程，导致用户新情报无法及时生效。这里额外登记
+    包住整个子 Agent 调用的 task；取消时可直接打断工具协程，并让
+    ``CancelledError`` 回传到 Orchestrator 主循环。
+    """
+    task = asyncio.create_task(
+        stream_agent_reply(agent, inputs, prefix, on_event),
+        name=f"agent-call:{getattr(agent, 'name', 'unknown')}",
+    )
+    agent_tasks = _AGENT_TASKS.get()
+    if agent_tasks is not None:
+        agent_tasks.add(task)
+    try:
+        return await task
+    finally:
+        if agent_tasks is not None:
+            agent_tasks.discard(task)
 
 
 async def stream_agent_reply(
@@ -235,10 +276,19 @@ async def stream_agent_reply(
                       delta=evt_or_msg.delta)
             elif isinstance(evt_or_msg, ToolCallEndEvent):
                 print("", flush=True)
+                # AgentScope 版本/工具类型不同，结果字段可能叫 output/result/content；
+                # 有则一并转发给 WebUI 的工具审计面板，缺失时仍保留完整参数。
+                tool_output = (
+                    getattr(evt_or_msg, "output", None)
+                    or getattr(evt_or_msg, "result", None)
+                    or getattr(evt_or_msg, "content", None)
+                    or ""
+                )
                 _emit("tool_call_end",
                       agent=agent_name,
                       tool_call_id=evt_or_msg.tool_call_id,
-                      tool_name=getattr(evt_or_msg, "tool_call_name", ""))
+                      tool_name=getattr(evt_or_msg, "tool_call_name", ""),
+                      output=str(tool_output))
 
     # 官方中断机制要求 cancel 直接承载 reply_stream 的 task。
     reply_task = asyncio.create_task(

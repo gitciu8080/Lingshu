@@ -99,7 +99,7 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
 
         Args:
             credential: OpenAI 兼容凭证（指向 DeepSeek base_url）。
-            model: DeepSeek 模型名（Responses API 仅支持 deepseek-v4-flash）。
+            model: DeepSeek 模型名（默认支持 deepseek-v4-flash / deepseek-v4-pro）。
             parameters: Responses API 参数。
             web_search: 是否注入服务端联网搜索工具。
             **kwargs: 透传给 OpenAIResponseModel 的其他参数。
@@ -194,9 +194,9 @@ def DeepSeek(
     """创建 DeepSeek 模型，自带联网搜索开关（可开关）。
 
     模型选择：
-      - 模型名在 ``deepseek_responses_models`` 内（默认仅 deepseek-v4-flash）
+      - 模型名在 ``deepseek_responses_models`` 内（默认包含 V4 Flash / V4 Pro）
         → 走 Responses API（``DeepSeekResponsesModel``），联网搜索可用；
-      - 其他模型（如 deepseek-v4-pro）→ 自动回退到普通
+      - 其他模型 → 自动回退到普通
         ``DeepSeekChatModel``（Chat Completions），联网搜索不可用。
 
     Args:
@@ -209,7 +209,7 @@ def DeepSeek(
         config: 运行时配置。
 
     Returns:
-        DeepSeekResponsesModel（flash）或 DeepSeekChatModel（pro）实例。
+        DeepSeekResponsesModel（默认 Flash / Pro）或 DeepSeekChatModel 实例。
     """
     runtime = config or RuntimeConfig.from_env()
     if web_search is None:
@@ -217,8 +217,8 @@ def DeepSeek(
 
     model_name = runtime.model_name(Ver, provider="deepseek")
 
-    # 非 Responses API 模型（如 pro）→ 回退到普通 Chat Completions，
-    # 联网搜索仅 Responses API 提供，此处忽略 web_search 开关。
+    # 未被配置为 Responses API 的模型回退到 Chat Completions；联网搜索
+    # 仅 Responses API 提供，此处忽略 web_search 开关。
     if model_name not in runtime.deepseek_responses_models:
         if not think:
             _effort = None

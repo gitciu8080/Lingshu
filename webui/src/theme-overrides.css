@@ -1,0 +1,479 @@
+/* Final theme corrections kept separate so they reliably override the compact
+   tactical stylesheet without increasing its already dense rule block. */
+
+/* Unified Lingshu wordmark: red on light surfaces, pure white on dark ones. */
+.brand b,
+.login-card h1,
+.login-card h1 small,
+.superadmin-logo b {
+  background: none;
+  background-clip: border-box;
+  -webkit-background-clip: border-box;
+  -webkit-text-fill-color: currentColor;
+  color: var(--accent);
+}
+
+:root[data-theme="dark"] .brand b,
+:root[data-theme="dark"] .login-card h1,
+:root[data-theme="dark"] .login-card h1 small,
+:root[data-theme="dark"] .superadmin-logo b,
+:root[data-theme="liquid"] .brand b,
+:root[data-theme="liquid"] .login-card h1,
+:root[data-theme="liquid"] .login-card h1 small,
+:root[data-theme="liquid"] .superadmin-logo b {
+  color: #ffffff;
+  text-shadow: 0 0 14px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* Superadmin navigation must remain readable without relying on hover. */
+.superadmin-sidebar {
+  width: 238px;
+  flex: 0 0 238px;
+}
+
+.superadmin-sidebar .superadmin-logo b,
+.superadmin-sidebar > p,
+.superadmin-sidebar button span {
+  opacity: 1;
+}
+
+/* Keep the user database inside the viewport. The table body owns scrolling,
+   while the page header, statistics, database toolbar and footer stay visible. */
+.superadmin-page {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.superadmin-content {
+  height: 100dvh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.superadmin-header,
+.superadmin-stats {
+  flex: 0 0 auto;
+}
+
+.superadmin-database {
+  flex: 1 1 auto;
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.superadmin-database > header,
+.superadmin-database > footer {
+  flex: 0 0 auto;
+}
+
+.superadmin-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.superadmin-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* Cool porcelain light surface with restrained red illumination. */
+:root[data-theme="light"] {
+  --bg: #eef1f5;
+  --side: #f7f8fa;
+  --panel: #ffffff;
+  --panel2: #f5f7f9;
+  --line: #cbd1d8;
+  --line2: #e2e6eb;
+  --text: #15181c;
+  --dim: #606872;
+  --soft-red: #fff3f3;
+  --glow: #d8191820;
+}
+
+:root[data-theme="light"] body,
+:root[data-theme="light"] #root {
+  background: #eef1f5;
+}
+
+:root[data-theme="light"] .console-shell {
+  background:
+    radial-gradient(ellipse 72% 48% at 50% -14%, rgba(227, 25, 24, 0.105), transparent 66%),
+    radial-gradient(circle at 6% 92%, rgba(116, 134, 157, 0.09), transparent 27%),
+    linear-gradient(145deg, #f8f9fb 0%, #eef1f5 48%, #e8edf2 100%);
+}
+
+:root[data-theme="light"] .console-shell::before {
+  content: "";
+  position: absolute;
+  inset: 28px 14px 14px;
+  pointer-events: none;
+  z-index: 0;
+  background: linear-gradient(118deg, rgba(255, 255, 255, 0.72), transparent 35%, rgba(255, 255, 255, 0.22) 68%, transparent);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+}
+
+:root[data-theme="light"] .console-shell::after {
+  opacity: 0.048;
+  color: #43505e;
+  background-size: 22px 22px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.75), transparent 82%);
+}
+
+:root[data-theme="light"] .scanlines {
+  opacity: 0.018;
+  background: repeating-linear-gradient(0deg, #1f2937 0, #1f2937 1px, transparent 1px, transparent 5px);
+}
+
+:root[data-theme="light"] .top-rail {
+  background: transparent;
+  color: #68727d;
+  border-bottom-color: #cbd1d8;
+}
+
+:root[data-theme="light"] .app-frame {
+  background: rgba(255, 255, 255, 0.94);
+  border-color: #c8ced6;
+  box-shadow: 0 22px 55px rgba(43, 53, 66, 0.14), 0 2px 8px rgba(43, 53, 66, 0.08);
+}
+
+:root[data-theme="light"] .session-sidebar,
+:root[data-theme="light"] .intel-panel {
+  background: linear-gradient(180deg, rgba(250, 251, 252, 0.98), rgba(243, 246, 248, 0.98));
+}
+
+:root[data-theme="light"] .mission-main {
+  background: rgba(255, 255, 255, 0.88);
+}
+
+:root[data-theme="light"] .agent-feed {
+  background: linear-gradient(180deg, rgba(239, 243, 247, 0.72), rgba(247, 249, 251, 0.92));
+}
+
+:root[data-theme="light"] .agent-card {
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 3px 12px rgba(45, 55, 68, 0.055);
+}
+
+:root[data-theme="light"] .tool-card,
+:root[data-theme="light"] .expert-arrival {
+  background: rgba(248, 249, 251, 0.96);
+}
+
+:root[data-theme="light"] .command-input-row {
+  background: #ffffff;
+  box-shadow: inset 0 1px 2px rgba(28, 35, 44, 0.035);
+}
+
+:root[data-theme="light"] .login-page {
+  background-color: #eef1f5;
+  background-image:
+    radial-gradient(#56616d16 1px, transparent 1px),
+    radial-gradient(circle at 18% 18%, rgba(227, 25, 24, 0.11), transparent 31%),
+    linear-gradient(145deg, #fafbfc, #e9edf2);
+  background-size: 22px 22px, auto, auto;
+}
+
+:root[data-theme="light"] .login-card {
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 14px 14px 0 rgba(227, 25, 24, 0.075), 0 24px 55px rgba(45, 55, 68, 0.15);
+}
+
+@media (max-width: 640px) {
+  .superadmin-sidebar {
+    width: 100%;
+    flex: 0 0 auto;
+  }
+
+  .superadmin-sidebar .superadmin-logo b,
+  .superadmin-sidebar > p,
+  .superadmin-sidebar button span {
+    display: none;
+  }
+
+  .superadmin-content {
+    height: 100dvh;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .superadmin-database {
+    min-height: 220px;
+  }
+}
+
+/* Responsive access to the third column on tablets and phones. */
+.mobile-intel-toggle,
+.mobile-intel-close,
+.mobile-intel-scrim {
+  display: none;
+}
+
+@media (max-width: 1020px) {
+  .mobile-intel-toggle {
+    display: grid;
+    flex: 0 0 30px;
+  }
+
+  .mobile-intel-toggle.active {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .app-frame > .intel-panel {
+    display: flex !important;
+    position: fixed;
+    z-index: 1202;
+    top: 12px;
+    right: 0;
+    bottom: 12px;
+    width: min(390px, calc(100vw - 28px));
+    max-width: none;
+    padding: 48px 16px 18px;
+    border: 1px solid var(--line);
+    border-right: 0;
+    background: var(--side);
+    box-shadow: -18px 0 55px rgba(0, 0, 0, 0.42);
+    overflow-x: hidden;
+    overflow-y: auto;
+    transform: translateX(105%);
+    transition: transform 0.24s ease;
+  }
+
+  .app-frame > .intel-panel.mobile-open {
+    transform: translateX(0);
+  }
+
+  .mobile-intel-close {
+    display: grid;
+    place-items: center;
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    color: var(--dim);
+    background: var(--panel);
+    border: 1px solid var(--line);
+  }
+
+  .mobile-intel-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 1201;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(2px);
+  }
+
+  .app-frame > .intel-panel .tool-history-list {
+    height: auto;
+    max-height: 52vh;
+  }
+
+  /* Reset desktop flex sizing inside the drawer. Without these overrides the
+     history section consumes the same flex track as the plan and they overlap. */
+  .app-frame > .intel-panel {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .app-frame > .intel-panel > .side-section,
+  .app-frame > .intel-panel > .tool-history-section,
+  .app-frame > .intel-panel > .plan-section {
+    position: static;
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    min-height: 0;
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+
+  .app-frame > .intel-panel > .tool-history-section {
+    display: block;
+    padding-bottom: 18px;
+    margin-bottom: 18px;
+  }
+
+  .app-frame > .intel-panel .tool-history-list {
+    display: flex;
+    flex: none;
+    min-height: 0;
+    height: min(42dvh, 420px);
+    max-height: none;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+
+  .app-frame > .intel-panel > .plan-section {
+    display: block;
+    clear: both;
+    padding-top: 2px;
+    padding-bottom: 18px;
+    margin-bottom: 18px;
+    background: var(--side);
+  }
+
+  .app-frame > .intel-panel > .plan-section .plan-line {
+    position: relative;
+    flex: 0 0 auto;
+  }
+}
+
+@media (max-width: 700px) {
+  .console-shell {
+    padding-right: 0;
+    padding-left: 0;
+  }
+
+  .app-frame {
+    border-right: 0;
+    border-left: 0;
+  }
+
+  .mission-ident {
+    min-width: 70px;
+  }
+
+  .header-actions {
+    min-width: 0;
+  }
+
+  .auto-scroll-toggle {
+    width: 30px;
+    height: 30px;
+    justify-content: center;
+    padding: 0;
+    font-size: 0 !important;
+  }
+
+  .knowledge-drawer {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    max-height: 88dvh;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    padding: 16px;
+  }
+
+  .modal {
+    width: calc(100vw - 16px);
+    max-height: 94dvh;
+    padding: 16px;
+  }
+
+  .modal::before {
+    margin: -16px -16px 14px;
+  }
+
+  .select-row {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .modal-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .modal-actions button {
+    min-height: 40px;
+  }
+
+  .login-page {
+    min-height: 100dvh;
+    height: auto;
+    padding: max(16px, env(safe-area-inset-top)) 12px max(16px, env(safe-area-inset-bottom));
+    overflow-y: auto;
+  }
+
+  .login-card {
+    width: min(100%, 430px);
+    padding: 24px 20px;
+  }
+}
+
+@media (max-width: 420px) {
+  .app-frame > .session-sidebar {
+    flex-basis: 158px;
+    max-height: 158px;
+  }
+
+  .app-frame > .session-sidebar .brand small {
+    display: none;
+  }
+
+  .app-frame > .session-sidebar .new-mission {
+    font-size: 0 !important;
+    width: 34px;
+    height: 32px;
+    padding: 0;
+    align-items: center;
+  }
+
+  .mission-header {
+    gap: 4px !important;
+  }
+
+  .header-actions {
+    gap: 3px;
+  }
+
+  .header-actions > button {
+    width: 28px !important;
+    height: 28px !important;
+  }
+
+  .agent-feed {
+    padding: 8px !important;
+  }
+
+  .agent-body {
+    padding: 9px 10px;
+  }
+
+  .command-bar {
+    padding: 7px;
+  }
+
+  .command-input-row {
+    padding-left: 5px;
+  }
+
+  .superadmin-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .superadmin-stats article {
+    min-height: 64px;
+  }
+
+  .superadmin-toolbar {
+    flex-direction: column;
+  }
+
+  .superadmin-toolbar .quiet-button {
+    min-height: 38px;
+  }
+
+  .app-frame > .intel-panel .tool-history-list {
+    height: min(38dvh, 340px);
+  }
+}

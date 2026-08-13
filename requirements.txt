@@ -1,6 +1,7 @@
 # Core Framework + Agent Service + async SQL persistence
 agentscope[service,storage-sql,rag,vdb-milvus]==2.0.5
 aiosqlite>=0.20.0
+reportlab>=4.2,<5
 
 # Web API (FastAPI + ASGI server)
 fastapi>=0.109.0

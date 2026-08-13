@@ -21,7 +21,7 @@ from Tools.ScopeRegistry import ScopeRegistry
 from Tools.tooling import (
     AgentMaxIterationsError,
     AllowedFunctionTool,
-    stream_agent_reply,
+    run_interruptible_agent_reply,
 )
 from agent.experts import ORCHESTRATOR_EXPERT
 
@@ -80,25 +80,25 @@ def create_orchestrator_agent(
     mission: MissionState,
     store: MissionStore,
     event_callback: Callable[[str, dict[str, Any]], None] | None = None,
-    approval_callback: Callable[[str, dict | None], Awaitable[bool]] | None = None,
+    approval_callback: Callable[[str, dict | None], Awaitable[bool | dict[str, Any]]] | None = None,
     scope_registry: ScopeRegistry | None = None,
     scope_auditor: Agent | None = None,
     steering_state: dict[str, Any] | None = None,
     nss_context: dict[str, Any] | None = None,
 ) -> Agent:
-    steering = steering_state if steering_state else {"pending": None, "processed": False}
+    steering = steering_state if steering_state is not None else {"pending": None, "processed": False, "queue": []}
+    steering.setdefault("queue", [])
 
     def _check_steering() -> str | None:
         """入口检查 + 中断后检查：消费待处理的用户指令。"""
-        pending = steering.get("pending")
-        if pending and not steering.get("processed"):
-            steering["processed"] = True
-            steering["pending"] = None
-            return (
-                f"[用户指令] {pending}\n\n"
-                f"请基于已有侦察证据和此指令调整行动方向。"
-                f"无需重复已完成的侦察步骤。"
-            )
+        if steering.get("cancel_requested"):
+            raise asyncio.CancelledError()
+        # 新情报统一交由 run_mission 主循环注入成下一轮 Orchestrator 输入。
+        # 这里不消费指令，避免子 Agent 被取消时消息只留在工具返回值中而丢失。
+        if steering.get("queue") or (
+            steering.get("pending") and not steering.get("processed")
+        ):
+            raise asyncio.CancelledError()
         return None
 
     async def dispatch_recon(focus: str = "全面但低影响的信息收集") -> str:
@@ -118,7 +118,7 @@ def create_orchestrator_agent(
         mission.record("Orchestrator", "dispatch_recon", focus=focus)
         store.save(mission)
         try:
-            result = await stream_agent_reply(
+            result = await run_interruptible_agent_reply(
                 recon_agent,
                 UserMsg(
                     name="Orchestrator",
@@ -197,7 +197,7 @@ def create_orchestrator_agent(
         mission.record("Orchestrator", "dispatch_attack", objective=objective)
         store.save(mission)
         try:
-            result = await stream_agent_reply(
+            result = await run_interruptible_agent_reply(
                 attack_agent,
                 UserMsg(
                     name="Orchestrator",
@@ -245,7 +245,7 @@ def create_orchestrator_agent(
         mission.record("Orchestrator", "dispatch_reverse", binary_path=binary_path, objective=objective)
         store.save(mission)
         try:
-            result = await stream_agent_reply(
+            result = await run_interruptible_agent_reply(
                 reserve_agent,
                 UserMsg(
                     name="Orchestrator",
@@ -299,6 +299,41 @@ def create_orchestrator_agent(
                 "请继续只做分析，或调用 complete_mission 如实结束任务。"
             )
 
+        pending_plan_steps = [
+            str(item.get("content") or "")
+            for item in mission.plan_items
+            if item.get("status") in {"pending", "in_progress"} and item.get("content")
+        ]
+        evidence_hint = (
+            str(mission.findings[-1].get("report") or "")[:240]
+            if mission.findings else "当前仅有计划上下文，执行前需再次核验证据"
+        )
+        base_steps = pending_plan_steps[:3] or ["依据现有证据确认目标与利用前置条件"]
+        # 固定生成三个不同风险/深度的候选方案；用户可选择并调整执行优先级。
+        approval_options: list[dict[str, Any]] = [
+            {
+                "id": "minimal-validation",
+                "title": "最小化安全验证",
+                "risk": "低",
+                "summary": "优先使用单次、低影响、可回滚的验证动作确认漏洞，不扩大战果。",
+                "steps": [base_steps[0], "执行最小化 PoC 并保存可复核证据", "获得结论后立即停止"],
+            },
+            {
+                "id": "evidence-driven",
+                "title": "证据驱动验证",
+                "risk": "中",
+                "summary": "按侦察证据和作战计划逐项验证，兼顾覆盖率与影响控制。",
+                "steps": base_steps + ["确认成功条件、失败尝试与风险边界"],
+            },
+            {
+                "id": "goal-oriented",
+                "title": "目标导向验证",
+                "risk": "中高",
+                "summary": f"围绕任务目标“{mission.goal}”优先验证最可能形成完整攻击链的路径。",
+                "steps": ["优先处理最高置信度攻击路径", *base_steps[:2], "达到任务目标或边界条件后立即停止"],
+            },
+        ]
+
         # ── 构建扫描摘要，帮助操作员决策 ──
         scan_summary: dict[str, Any] = {
             "target": mission.target,
@@ -308,19 +343,54 @@ def create_orchestrator_agent(
             "findings_count": len(mission.findings),
             "plan_items": mission.plan_items,
             "attack_steps": mission.attack_chain[-5:] if len(mission.attack_chain) > 5 else mission.attack_chain,
+            "evidence_hint": evidence_hint,
+            "approval_options": approval_options,
         }
 
-        approved = await approval_callback(reason, scan_summary)
+        approval_result = await approval_callback(reason, scan_summary)
+        if isinstance(approval_result, dict):
+            approved = bool(approval_result.get("approved"))
+            selected_id = str(approval_result.get("selected_plan_id") or approval_options[0]["id"])
+            selected_option = next(
+                (option for option in approval_options if option["id"] == selected_id),
+                approval_options[0],
+            )
+            priority_order = [
+                str(value) for value in approval_result.get("priority_order", [])
+                if any(option["id"] == str(value) for option in approval_options)
+            ]
+            for option in approval_options:
+                if option["id"] not in priority_order:
+                    priority_order.append(option["id"])
+            decision = str(approval_result.get("decision") or ("批准" if approved else "拒绝"))
+        else:
+            approved = bool(approval_result)
+            selected_option = approval_options[0]
+            priority_order = [option["id"] for option in approval_options]
+            decision = "批准" if approved else "拒绝"
         mission.record(
             "Orchestrator",
             "exploitation_approval",
             reason=reason,
             approved=approved,
+            decision=decision,
+            selected_plan_id=selected_option["id"],
+            priority_order=priority_order,
         )
         if approved:
             mission.exploitation_approved = True
+            mission.approved_attack_plan = {
+                "selected": selected_option,
+                "priority_order": priority_order,
+                "approved_at_phase": mission.phase.value,
+            }
             store.save(mission)
-            return "[批准] 人工已批准进入攻击阶段，可调用 dispatch_attack 执行验证/利用动作。"
+            return (
+                "[批准] 人工已批准进入攻击阶段。\n"
+                f"选定方案：{selected_option['title']}（{selected_option['id']}）\n"
+                f"方案优先级：{' > '.join(priority_order)}\n"
+                "后续 dispatch_attack 必须优先遵循选定方案及用户调整后的顺序。"
+            )
         store.save(mission)
         return (
             "[拒绝] 人工拒绝了本次攻击阶段授权。你可以选择：补充侦察收集更多依据、"
@@ -372,7 +442,7 @@ def create_orchestrator_agent(
             f"近期侦察/攻击报告（证据上下文）：\n{context}\n\n"
             f"请审核是否批准将 {ip_or_cidr} 纳入授权范围。"
         )
-        result = await stream_agent_reply(
+        result = await run_interruptible_agent_reply(
             scope_auditor,
             UserMsg(name="Orchestrator", content=audit_prompt),
             prefix="[ScopeAuditor] ",
