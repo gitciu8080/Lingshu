@@ -43,5 +43,44 @@ class LegacyStreamSnapshotThrottleTest(unittest.TestCase):
         self.assertEqual(end_payload["full_text"], "甲乙丙")
 
 
+class AsyncPersistenceBatchTest(unittest.IsolatedAsyncioTestCase):
+    async def test_live_callback_batches_snapshot_and_message_operations(self) -> None:
+        context = api.SessionContext(
+            session_id="batch-test",
+            user_id=1,
+            input_queue=asyncio.Queue(),
+        )
+        captured: list[list[dict]] = []
+
+        def apply_batch(operations: list[dict]):
+            captured.append(operations)
+            return [1 if operation.get("type") == "message" else None for operation in operations]
+
+        api._persistence_queue = asyncio.Queue(maxsize=100)
+        worker = asyncio.create_task(api._persistence_worker())
+        try:
+            with patch.object(api.session_store, "apply_persistence_batch", side_effect=apply_batch):
+                callback = api._make_session_callback("batch-test", context)
+                callback("text_start", agent="Brain")
+                callback("text_delta", agent="Brain", delta="流")
+                callback("text_end", agent="Brain")
+                await api._flush_persistence()
+        finally:
+            worker.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await worker
+            api._persistence_queue = None
+
+        operation_types = [
+            operation["type"]
+            for batch in captured
+            for operation in batch
+        ]
+        self.assertEqual(
+            operation_types,
+            ["message", "snapshot_upsert", "snapshot_delete", "message"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
