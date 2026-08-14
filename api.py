@@ -45,6 +45,12 @@ from config import RuntimeConfig
 from LLM.model import create_model
 from TaskState import MissionStore
 from Tools.Report import generate_mission_pdf
+from workspace_service import get_workspace_service
+from api_workspace import (
+    list_artifacts as _list_workspace_artifacts,
+    resolve_artifact_path as _resolve_artifact_path,
+    workspace_summary as _workspace_summary,
+)
 from Tools.tooling import (
     cancel_agent_tasks,
     interrupt_agent_tasks,
@@ -611,7 +617,10 @@ async def _session_event_generator(
         after_seq,
         5000,
     )
-    stream_snapshot = dict(ctx.stream_buffers)
+    stream_snapshot = [
+        (key, full_text, ctx.stream_blocks.get(key, ""))
+        for key, full_text in ctx.stream_buffers.items()
+    ]
     tool_snapshot = {
         tool_call_id: dict(tool)
         for tool_call_id, tool in ctx.tool_buffers.items()
@@ -619,12 +628,13 @@ async def _session_event_generator(
     try:
         for message in catchup:
             yield f"data: {json.dumps(_message_to_event(message), ensure_ascii=False)}\n\n"
-        for key, full_text in stream_snapshot.items():
+        for key, full_text, block_id in stream_snapshot:
             stream_type, agent = key.split(":", 1)
             snapshot = {
                 "type": "stream_snapshot",
                 "stream_type": stream_type,
                 "agent": agent,
+                "block_id": block_id,
                 "full_text": full_text,
                 "session_id": session_id,
             }
@@ -837,7 +847,7 @@ async def _summarize_and_generate_report(
 
 async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, goal: str,
                            model_ver: str, provider: str, callback, initial_context: str | None = None,
-                           nss_context: dict | None = None):
+                           nss_context: dict | None = None, resume: bool = False):
     """运行任务并处理清理逻辑。"""
     status_val = "completed"
     phase = "completed"
@@ -854,6 +864,8 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             agent_tasks=ctx.agent_tasks,
             steering_state=ctx.steering_state,
             nss_context=nss_context,
+            resume=resume,
+            user_id=ctx.user_id,
         )
         # AgentScope 的 reply_stream 可能吞掉 CancelledError 而正常返回，
         # 此时必须按用户停止意图收敛终态为 cancelled（而非 failed）。
@@ -1418,6 +1430,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         _recent_session_creations[fingerprint] = (now, session_id)
 
     # 持久化到 DB（传入 API 层生成的 session_id）
+    workspace_id = get_workspace_service().workspace_id(current_user["id"], session_id)
     await asyncio.to_thread(
         session_store.create_session,
         user_id=current_user["id"],
@@ -1427,6 +1440,15 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         model=req.model,
         title=f"[{session_id[:8]}] 安全测试任务",
         session_id=session_id,
+    )
+    # v0.3.0：登记 Workspace v2 标识与恢复状态（fresh=新建）
+    await asyncio.to_thread(
+        session_store.update_session,
+        session_id,
+        workspace_id=workspace_id,
+        workspace_version=2,
+        resume_status="fresh",
+        checkpoint_seq=0,
     )
 
     # 构建 session-aware callback
@@ -1671,6 +1693,10 @@ async def get_session_detail(session_id: str, current_user: dict = Depends(get_c
         target_info["exploitation_approved"] = bool(
             mission_state["exploitation_approved"]
         )
+    # v0.3.0：Workspace v2 摘要（不暴露宿主绝对路径）
+    session["workspace"] = _workspace_summary(
+        get_workspace_service(), session["user_id"], session_id,
+    )
     return session
 
 
@@ -1756,7 +1782,12 @@ async def get_pending_approval(
 
 @app.delete("/api/session/{session_id}")
 async def delete_session(session_id: str, current_user: dict = Depends(get_current_user)):
-    """删除会话。"""
+    """删除会话。
+
+    固定流程（v0.3.0）：校验所有权 → 停止任务和 MCP（关闭 Workspace）→
+    将 Workspace 原子移动到内部 trash → 删除消息和状态记录 → 更新 blob
+    引用（孤儿 blob 后台物理删除）→ 返回。
+    """
     await _verify_session_owner(session_id, current_user["id"])
     # 如果会话仍在运行，先取消并等待
     ctx = _active_sessions.get(session_id)
@@ -1773,9 +1804,22 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
             await ctx.task
         except (asyncio.CancelledError, Exception):
             pass
-    # 删除 DB 记录
+    # v0.3.0：关闭并原子移动 Workspace 到 trash（MCP 随 close 释放）
+    svc = get_workspace_service()
+    try:
+        await svc.delete(current_user["id"], session_id)
+    except FileNotFoundError:
+        pass  # 工作区不存在不阻塞删除
+    # 删除 DB 记录（返回孤儿 blob：最后引用被移除的共享 blob）
     await _flush_persistence()
-    await asyncio.to_thread(session_store.delete_session, session_id)
+    orphaned_blobs = await asyncio.to_thread(
+        session_store.delete_session, session_id,
+    )
+    # 后台清除孤儿 blob 与 trash（不阻塞响应）
+    if orphaned_blobs:
+        asyncio.get_running_loop().create_task(
+            _purge_orphaned_blobs(svc, orphaned_blobs),
+        )
     # 删除 JSON 文件
     session_file = _sessions_dir / f"{session_id}.json"
     if session_file.is_file():
@@ -1784,6 +1828,109 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
     if report_file.is_file():
         report_file.unlink()
     return {"status": "deleted"}
+
+
+async def _purge_orphaned_blobs(
+    svc: Any,
+    orphaned_blobs: list[str],
+) -> None:
+    """后台物理删除不再被引用的共享 blob（删除失败静默保留，可重试）。"""
+    for sha256 in orphaned_blobs:
+        try:
+            svc.remove_blob_if_unreferenced(sha256, referenced=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@app.get("/api/session/{session_id}/artifacts")
+async def get_session_artifacts(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """列出会话的可下载产物（相对路径 + 大小 + 修改时间）。"""
+    await _verify_session_owner(session_id, current_user["id"])
+    return {
+        "session_id": session_id,
+        "artifacts": _list_workspace_artifacts(
+            get_workspace_service(), current_user["id"], session_id,
+        ),
+    }
+
+
+@app.get("/api/session/{session_id}/artifacts/file")
+async def get_session_artifact_file(
+    session_id: str,
+    path: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """下载会话产物（仅限工作区内相对路径，拒绝逃逸）。"""
+    await _verify_session_owner(session_id, current_user["id"])
+    try:
+        target = _resolve_artifact_path(
+            get_workspace_service(), current_user["id"], session_id, path,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="产物不存在") from None
+    except (PermissionError, ValueError):
+        raise HTTPException(status_code=403, detail="路径超出工作区范围") from None
+    return FileResponse(target, filename=Path(path).name)
+
+
+@app.post("/api/session/{session_id}/resume")
+async def resume_session(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """继续任务：校验所有权与可恢复状态后，把会话重新投入运行。
+
+    v0.3.0 语义：
+    - 终态（completed/failed/cancelled）不重复执行，返回已终态；
+    - uncertain 存在不确定动作，要求用户明确确认（resume_status 置
+      resumable 后调用方走正常恢复路径）；
+    - 其余状态（fresh/running/resumable）重新创建后台任务。
+    具体恢复执行由 run_mission 的 resume 分支完成；此处负责闸门与状态登记。
+    """
+    session = await _verify_session_owner(session_id, current_user["id"])
+    if session_id in _active_sessions:
+        raise HTTPException(status_code=409, detail="会话正在运行中")
+    summary = _workspace_summary(
+        get_workspace_service(), current_user["id"], session_id,
+    )
+    status = (summary or {}).get("resume_status", "fresh")
+    if status == "uncertain":
+        raise HTTPException(
+            status_code=409,
+            detail="会话存在未确认的不确定动作，请先确认或放弃后重试",
+        )
+    terminal_phases = {"completed", "failed", "cancelled"}
+    if session.get("phase") in terminal_phases or status == "terminal":
+        return {
+            "session_id": session_id,
+            "status": "terminal",
+            "phase": session.get("phase"),
+        }
+    # 登记恢复状态并重新启动任务
+    await asyncio.to_thread(
+        session_store.update_session, session_id, resume_status="running",
+    )
+    goal = session.get("goal") or ""
+    provider = session.get("provider") or "deepseek"
+    model = session.get("model") or "Min"
+    target = session.get("target") or ""
+    ctx = SessionContext(
+        session_id=session_id,
+        user_id=current_user["id"],
+        input_queue=asyncio.Queue(),
+    )
+    _active_sessions[session_id] = ctx
+    callback = _make_session_callback(session_id, ctx)
+    callback("mission_resume", target=target, goal=goal)
+    task = asyncio.create_task(
+        _run_and_cleanup(session_id, ctx, target, goal, model, provider, callback,
+                         resume=True),
+    )
+    ctx.task = task
+    return {"session_id": session_id, "status": "resumed"}
 
 
 @app.post("/api/session/{session_id}/cancel")

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from agentscope.agent import Agent, ReActConfig
-from agentscope.tool import Toolkit
+from Tools.tooling import StrictJSONToolkit
 from agent.experts import SCOPE_AUDITOR_EXPERT
 
 SCOPE_AUDITOR_SYS_PROMPT = """你是授权范围审核专家（ScopeAuditor）。
@@ -37,6 +37,6 @@ def create_scope_auditor_agent(model) -> Agent:
         name=SCOPE_AUDITOR_EXPERT,
         system_prompt=SCOPE_AUDITOR_SYS_PROMPT,
         model=model,
-        toolkit=Toolkit(tools=[]),
+        toolkit=StrictJSONToolkit(tools=[]),
         react_config=ReActConfig(max_iters=3, interruption_raise_cancelled_error=True),
     )

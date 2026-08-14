@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
+import itertools
+import json
 import os
 import re
 import signal
 from collections.abc import Callable
 from contextvars import ContextVar, Token
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
+
+from jsonschema import Draft202012Validator
 
 from agentscope.agent import Agent
 
@@ -26,10 +32,11 @@ from agentscope.event import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
 )
-from agentscope.message import Msg
+from agentscope.message import Msg, TextBlock, ToolCallBlock, ToolResultState
 from agentscope.permission import PermissionBehavior, PermissionDecision
 from agentscope.types import ReplyFinishedReason
-from agentscope.tool import FunctionTool
+from agentscope.tool import FunctionTool, Toolkit, ToolChunk, ToolResponse
+from agentscope.state import AgentState
 
 
 class AgentMaxIterationsError(RuntimeError):
@@ -39,6 +46,110 @@ class AgentMaxIterationsError(RuntimeError):
     EXCEED_MAX_ITERS 时抛出，供调用方将"超迭代"收敛为可恢复事件，
     而不是把 AgentScope 的固定文本当正常结果。
     """
+
+
+class ToolJSONValidationError(RuntimeError):
+    """模型连续两次返回损坏或不符合 schema 的工具参数。"""
+
+
+_TOOL_JSON_FAILURE_HANDLER: ContextVar[
+    Callable[[dict[str, Any]], None] | None
+] = ContextVar("lingshu_tool_json_failure_handler", default=None)
+
+
+def bind_tool_json_failure_handler(
+    handler: Callable[[dict[str, Any]], None],
+) -> Token:
+    """绑定当前任务的工具 JSON 失败审计处理器。"""
+    return _TOOL_JSON_FAILURE_HANDLER.set(handler)
+
+
+def reset_tool_json_failure_handler(token: Token) -> None:
+    _TOOL_JSON_FAILURE_HANDLER.reset(token)
+
+
+class StrictJSONToolkit(Toolkit):
+    """在 AgentScope 的宽松 JSON 修复器之前执行严格工具参数闸门。
+
+    第一次格式/schema 失败仅向模型返回一条短纠错提示；连续第二次失败
+    记录审计证据并抛出异常，使任务进入安全收尾。损坏参数永远不会传给工具。
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._consecutive_json_failures = 0
+
+    async def call_tool(
+        self,
+        tool_call: ToolCallBlock,
+        state: AgentState,
+    ):
+        validation_error: Exception | None = None
+        try:
+            def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                result: dict[str, Any] = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError(f"JSON 包含重复字段: {key}")
+                    result[key] = value
+                return result
+
+            def _reject_non_finite(value: str) -> None:
+                raise ValueError(f"JSON 包含非标准数值: {value}")
+
+            parsed = json.loads(
+                tool_call.input,
+                object_pairs_hook=_strict_object,
+                parse_constant=_reject_non_finite,
+            )
+            if not isinstance(parsed, dict):
+                raise ValueError("工具参数顶层必须是 JSON object")
+            available = await self._get_available_tools(
+                state.tool_context.activated_groups,
+            )
+            registered = available.get(tool_call.name)
+            if registered is not None and registered.tool.input_schema is not None:
+                Draft202012Validator(
+                    registered.tool.input_schema,
+                ).validate(parsed)
+        except Exception as exc:  # JSONDecodeError + schema ValidationError
+            validation_error = exc
+
+        if validation_error is None:
+            self._consecutive_json_failures = 0
+            async for chunk in super().call_tool(tool_call, state):
+                yield chunk
+            return
+
+        self._consecutive_json_failures += 1
+        raw = tool_call.input or ""
+        evidence = {
+            "tool_name": tool_call.name,
+            "tool_call_id": tool_call.id,
+            "attempt": self._consecutive_json_failures,
+            "error": str(validation_error),
+            "arguments_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            "arguments_preview": raw[:500],
+        }
+        if self._consecutive_json_failures >= 2:
+            handler = _TOOL_JSON_FAILURE_HANDLER.get()
+            if handler is not None:
+                handler(evidence)
+            raise ToolJSONValidationError(
+                f"工具 {tool_call.name} 的 JSON 参数连续两次校验失败，已阻止执行并安全终止",
+            ) from validation_error
+
+        prompt = (
+            "ToolJSONValidationError: 参数必须是严格 JSON 对象并符合工具 schema；"
+            "只允许再重试一次，请仅重新调用工具。"
+        )
+        response = ToolResponse(id=tool_call.id)
+        chunk = ToolChunk(
+            content=[TextBlock(text=prompt)],
+            state=ToolResultState.ERROR,
+        )
+        yield chunk
+        yield response.append_chunk(chunk)
 
 
 class ProcessTracker:
@@ -218,77 +329,104 @@ async def stream_agent_reply(
         text_started = False
         thinking_started = False
 
-        async for evt_or_msg in agent.reply_stream(
-            inputs=inputs,
-            yield_final_msg=True,
-        ):
-            if isinstance(evt_or_msg, Msg):
-                final_msg = evt_or_msg
-                content = evt_or_msg.get_text_content() or ""
-                if content:
-                    _emit("message", content=content)
-            elif isinstance(evt_or_msg, TextBlockStartEvent):
-                text_started = False  # 重置，等待首个非空 delta
-            elif isinstance(evt_or_msg, TextBlockDeltaEvent):
-                delta = evt_or_msg.delta or ""
-                if not text_started and not delta.strip():
-                    continue  # 块开头纯空白：不建气泡
-                if not text_started:
-                    text_started = True
-                    print(f"{prefix}", end="", flush=True)
-                    _emit("text_start", agent=agent_name)
-                if delta:
-                    print(delta, end="", flush=True)
-                    _emit("text_delta", delta=delta, agent=agent_name)
-            elif isinstance(evt_or_msg, TextBlockEndEvent):
-                if text_started:
-                    print(flush=True)
-                    _emit("text_end", agent=agent_name)
+        def _finish_open_blocks(*, interrupted: bool = False) -> None:
+            """终结已经展示的流式块，确保中断不会留下可被覆盖的临时消息。"""
+            nonlocal text_started, thinking_started
+            if text_started:
+                print(flush=True)
+                _emit("text_end", agent=agent_name, interrupted=interrupted)
                 text_started = False
-            elif isinstance(evt_or_msg, ThinkingBlockStartEvent):
-                thinking_started = False  # 重置，等待首个非空思考 delta
-            elif isinstance(evt_or_msg, ThinkingBlockDeltaEvent):
-                delta = _clean_thinking_delta(evt_or_msg.delta)
-                if not delta:
-                    continue  # 空 <think> 标签残留/纯空白：不打印、不广播、不入库
-                if not thinking_started:
-                    thinking_started = True
-                    print(f"{prefix}🧠 ", end="", flush=True)
-                    _emit("thinking_start", agent=agent_name)
-                print(delta, end="", flush=True)
-                _emit("thinking_delta", delta=delta, agent=agent_name)
-            elif isinstance(evt_or_msg, ThinkingBlockEndEvent):
-                if thinking_started:
-                    print(flush=True)
-                    _emit("thinking_end", agent=agent_name)
+            if thinking_started:
+                print(flush=True)
+                _emit("thinking_end", agent=agent_name, interrupted=interrupted)
                 thinking_started = False
-            elif isinstance(evt_or_msg, ToolCallStartEvent):
-                print(f"\n{prefix}🔧 [{evt_or_msg.tool_call_name}] ", end="", flush=True)
-                _emit("tool_call_start",
-                      agent=agent_name,
-                      tool_call_id=evt_or_msg.tool_call_id,
-                      tool_name=evt_or_msg.tool_call_name)
-            elif isinstance(evt_or_msg, ToolCallDeltaEvent):
-                print(evt_or_msg.delta, end="", flush=True)
-                _emit("tool_call_delta",
-                      agent=agent_name,
-                      tool_call_id=evt_or_msg.tool_call_id,
-                      delta=evt_or_msg.delta)
-            elif isinstance(evt_or_msg, ToolCallEndEvent):
-                print("", flush=True)
-                # AgentScope 版本/工具类型不同，结果字段可能叫 output/result/content；
-                # 有则一并转发给 WebUI 的工具审计面板，缺失时仍保留完整参数。
-                tool_output = (
-                    getattr(evt_or_msg, "output", None)
-                    or getattr(evt_or_msg, "result", None)
-                    or getattr(evt_or_msg, "content", None)
-                    or ""
-                )
-                _emit("tool_call_end",
-                      agent=agent_name,
-                      tool_call_id=evt_or_msg.tool_call_id,
-                      tool_name=getattr(evt_or_msg, "tool_call_name", ""),
-                      output=str(tool_output))
+
+        try:
+            async for evt_or_msg in agent.reply_stream(
+                inputs=inputs,
+                yield_final_msg=True,
+            ):
+                if isinstance(evt_or_msg, Msg):
+                    # 某些模型适配器不会在最终 Msg 前发送 BlockEnd。先封口，
+                    # 后续 message 事件才能与刚完成的全文稳定去重。
+                    _finish_open_blocks()
+                    final_msg = evt_or_msg
+                    content = evt_or_msg.get_text_content() or ""
+                    if content:
+                        _emit("message", content=content)
+                elif isinstance(evt_or_msg, TextBlockStartEvent):
+                    # 防御异常事件序列：新块开始前先保留上一块的已有内容。
+                    if text_started:
+                        print(flush=True)
+                        _emit("text_end", agent=agent_name)
+                    text_started = False  # 重置，等待首个非空 delta
+                elif isinstance(evt_or_msg, TextBlockDeltaEvent):
+                    delta = evt_or_msg.delta or ""
+                    if not text_started and not delta.strip():
+                        continue  # 块开头纯空白：不建气泡
+                    if not text_started:
+                        text_started = True
+                        print(f"{prefix}", end="", flush=True)
+                        _emit("text_start", agent=agent_name)
+                    if delta:
+                        print(delta, end="", flush=True)
+                        _emit("text_delta", delta=delta, agent=agent_name)
+                elif isinstance(evt_or_msg, TextBlockEndEvent):
+                    if text_started:
+                        print(flush=True)
+                        _emit("text_end", agent=agent_name)
+                    text_started = False
+                elif isinstance(evt_or_msg, ThinkingBlockStartEvent):
+                    if thinking_started:
+                        print(flush=True)
+                        _emit("thinking_end", agent=agent_name)
+                    thinking_started = False  # 重置，等待首个非空思考 delta
+                elif isinstance(evt_or_msg, ThinkingBlockDeltaEvent):
+                    delta = _clean_thinking_delta(evt_or_msg.delta)
+                    if not delta:
+                        continue  # 空 <think> 标签残留/纯空白：不打印、不广播、不入库
+                    if not thinking_started:
+                        thinking_started = True
+                        print(f"{prefix}🧠 ", end="", flush=True)
+                        _emit("thinking_start", agent=agent_name)
+                    print(delta, end="", flush=True)
+                    _emit("thinking_delta", delta=delta, agent=agent_name)
+                elif isinstance(evt_or_msg, ThinkingBlockEndEvent):
+                    if thinking_started:
+                        print(flush=True)
+                        _emit("thinking_end", agent=agent_name)
+                    thinking_started = False
+                elif isinstance(evt_or_msg, ToolCallStartEvent):
+                    print(f"\n{prefix}🔧 [{evt_or_msg.tool_call_name}] ", end="", flush=True)
+                    _emit("tool_call_start",
+                          agent=agent_name,
+                          tool_call_id=evt_or_msg.tool_call_id,
+                          tool_name=evt_or_msg.tool_call_name)
+                elif isinstance(evt_or_msg, ToolCallDeltaEvent):
+                    print(evt_or_msg.delta, end="", flush=True)
+                    _emit("tool_call_delta",
+                          agent=agent_name,
+                          tool_call_id=evt_or_msg.tool_call_id,
+                          delta=evt_or_msg.delta)
+                elif isinstance(evt_or_msg, ToolCallEndEvent):
+                    print("", flush=True)
+                    # AgentScope 版本/工具类型不同，结果字段可能叫 output/result/content；
+                    # 有则一并转发给 WebUI 的工具审计面板，缺失时仍保留完整参数。
+                    tool_output = (
+                        getattr(evt_or_msg, "output", None)
+                        or getattr(evt_or_msg, "result", None)
+                        or getattr(evt_or_msg, "content", None)
+                        or ""
+                    )
+                    _emit("tool_call_end",
+                          agent=agent_name,
+                          tool_call_id=evt_or_msg.tool_call_id,
+                          tool_name=getattr(evt_or_msg, "tool_call_name", ""),
+                          output=str(tool_output))
+        finally:
+            # 官方中断是 task.cancel()。无论取消落在哪个 await 点，都先把已
+            # 展示的部分内容固化为 end 事件，避免 UI/DB 只剩悬挂快照。
+            _finish_open_blocks(interrupted=asyncio.current_task().cancelling() > 0)
 
     # 官方中断机制要求 cancel 直接承载 reply_stream 的 task。
     reply_task = asyncio.create_task(
@@ -447,9 +585,29 @@ def create_scoped_shell_tool(
     cwd: str | Path,
     timeout: int,
     registry: ScopeRegistry | None = None,
+    *,
+    role: str = "",
+    artifact_root: str | Path | None = None,
+    return_tail: int = 4000,
 ) -> AllowedFunctionTool:
-    """创建仅允许触达指定目标的 Shell 工具。"""
+    """创建仅允许触达指定目标的 Shell 工具。
+
+    Args:
+        target: 授权目标（用于命令范围校验）。
+        cwd: 命令执行目录。
+        timeout: 命令超时秒数。
+        registry: 动态授权范围注册表（可选）。
+        role: 调用方角色（recon/attack/...），用于 artifacts 子目录。
+        artifact_root: Workspace v2 根（WorkDir/v2/sessions/...）。提供时
+            启用流式 artifacts：stdout/stderr 直接写入
+            ``artifacts/{role}/tool-{seq}/``，返回值只含尾部+摘要+相对引用，
+            不再硬截断 20KB/6KB；同时维护 ``artifacts/manifest.jsonl``。
+            为 None 时保持旧行为（内存截断，向后兼容）。
+        return_tail: v2 模式下返回值携带的尾部字节数。
+    """
     workdir = str(Path(cwd).resolve())
+    artifacts_root = Path(artifact_root).resolve() if artifact_root is not None else None
+    seq_counter = itertools.count(1)
 
     async def scoped_shell(command: str) -> str:
         """在 Kali 中执行受范围约束的命令。
@@ -458,6 +616,19 @@ def create_scoped_shell_tool(
             command: 要执行的 shell 命令；所有网络命令必须显式包含授权目标。
         """
         _validate_scoped_command(command, target, registry)
+        started_at = datetime.now(timezone.utc).astimezone().isoformat()
+
+        # ── v2 模式：准备 artifacts 目录 ──
+        tool_dir: Path | None = None
+        stdout_path: Path | None = None
+        stderr_path: Path | None = None
+        if artifacts_root is not None:
+            seq = next(seq_counter)
+            tool_dir = artifacts_root / "artifacts" / (role or "agent") / f"tool-{seq:04d}"
+            tool_dir.mkdir(parents=True, exist_ok=True)
+            stdout_path = tool_dir / "stdout.txt"
+            stderr_path = tool_dir / "stderr.txt"
+
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=workdir,
@@ -468,28 +639,125 @@ def create_scoped_shell_tool(
         tracker = _PROCESS_TRACKER.get()
         if tracker is not None:
             tracker.register(proc.pid)
+
+        timed_out = False
+        cancelled = False
         try:
+            if stdout_path is not None:
+                # v2：流式落盘，内存只保留尾部与哈希
+                out_size, err_size, out_tail, err_tail, out_sha, err_sha = (
+                    await asyncio.wait_for(
+                        _stream_to_artifact(proc, stdout_path, stderr_path, return_tail),
+                        timeout=timeout,
+                    )
+                )
+                stdout_text = out_tail
+                stderr_text = err_tail
+                # drain 完成后进程可能尚未被事件循环收割，显式等待退出码
+                await proc.wait()
+                finished_at = datetime.now(timezone.utc).astimezone().isoformat()
+                returncode = proc.returncode
+                # 追加 manifest 条目
+                _append_manifest(
+                    artifacts_root,
+                    {
+                        "timestamp": finished_at,
+                        "role": role or "agent",
+                        "tool": "scoped_shell",
+                        "command": command,
+                        "started_at": started_at,
+                        "finished_at": finished_at,
+                        "returncode": returncode,
+                        "timed_out": False,
+                        "stdout": {
+                            "path": f"artifacts/{role or 'agent'}/tool-{seq:04d}/stdout.txt",
+                            "bytes": out_size,
+                            "sha256": out_sha,
+                        },
+                        "stderr": {
+                            "path": f"artifacts/{role or 'agent'}/tool-{seq:04d}/stderr.txt",
+                            "bytes": err_size,
+                            "sha256": err_sha,
+                        },
+                    },
+                )
+                relative_out = f"artifacts/{role or 'agent'}/tool-{seq:04d}/stdout.txt"
+                return (
+                    f"<returncode>{returncode}</returncode>"
+                    f"<stdout_artifact>{relative_out} bytes={out_size} sha256={out_sha[:16]}</stdout_artifact>"
+                    f"<stdout_tail>{stdout_text}</stdout_tail>"
+                    f"<stderr_tail>{stderr_text}</stderr_tail>"
+                )
+            # ── legacy：内存截断（向后兼容） ──
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            out = stdout.decode("utf-8", errors="replace")[-20000:]
+            err = stderr.decode("utf-8", errors="replace")[-6000:]
+            return (
+                f"<returncode>{proc.returncode}</returncode>"
+                f"<stdout>{out}</stdout><stderr>{err}</stderr>"
+            )
         except asyncio.TimeoutError:
+            timed_out = True
             if tracker is not None:
                 await tracker.terminate_group(proc.pid)
             else:
                 os.killpg(proc.pid, signal.SIGKILL)
             await proc.wait()
+            if artifacts_root is not None and stdout_path is not None:
+                # 超时后把剩余输出收尾落盘
+                try:
+                    out_size, err_size, out_tail, err_tail, out_sha, err_sha = (
+                        await _stream_to_artifact(proc, stdout_path, stderr_path, return_tail)
+                    )
+                except Exception:  # noqa: BLE001
+                    out_size = err_size = 0
+                    out_tail = err_tail = out_sha = err_sha = ""
+                _append_manifest(
+                    artifacts_root,
+                    {
+                        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
+                        "role": role or "agent",
+                        "tool": "scoped_shell",
+                        "command": command,
+                        "started_at": started_at,
+                        "finished_at": datetime.now(timezone.utc).astimezone().isoformat(),
+                        "returncode": -1,
+                        "timed_out": True,
+                        "stdout": {
+                            "path": f"artifacts/{role or 'agent'}/tool-{seq:04d}/stdout.txt",
+                            "bytes": out_size,
+                            "sha256": out_sha,
+                        },
+                        "stderr": {
+                            "path": f"artifacts/{role or 'agent'}/tool-{seq:04d}/stderr.txt",
+                            "bytes": err_size,
+                            "sha256": err_sha,
+                        },
+                    },
+                )
+                return (
+                    f"<returncode>-1</returncode>"
+                    f"<stdout_artifact>artifacts/{role or 'agent'}/tool-{seq:04d}/stdout.txt"
+                    f" bytes={out_size} sha256={out_sha[:16] if out_sha else ''}</stdout_artifact>"
+                    f"<stderr>命令超过 {timeout} 秒，已终止（完整输出已落盘）</stderr>"
+                    f"<stdout_tail>{out_tail}</stdout_tail>"
+                )
             return f"<returncode>-1</returncode><stderr>命令超过 {timeout} 秒，已终止</stderr>"
         except asyncio.CancelledError:
+            cancelled = True
             if tracker is not None:
                 await tracker.terminate_group(proc.pid)
             else:
                 os.killpg(proc.pid, signal.SIGKILL)
             await proc.wait()
             raise
-        out = stdout.decode("utf-8", errors="replace")[-20000:]
-        err = stderr.decode("utf-8", errors="replace")[-6000:]
-        return (
-            f"<returncode>{proc.returncode}</returncode>"
-            f"<stdout>{out}</stdout><stderr>{err}</stderr>"
-        )
+        finally:
+            if cancelled and artifacts_root is not None:
+                # 取消时尽量留痕
+                try:
+                    await _stream_to_artifact(proc, stdout_path, stderr_path, return_tail)
+                except Exception:  # noqa: BLE001
+                    pass
 
     return AllowedFunctionTool(
         scoped_shell,
@@ -497,3 +765,62 @@ def create_scoped_shell_tool(
         description="在 Kali 中执行仅限当前授权目标的命令，并返回退出码、标准输出和错误。",
         is_concurrency_safe=False,
     )
+
+
+async def _stream_to_artifact(
+    proc: asyncio.subprocess.Process,
+    stdout_path: Path,
+    stderr_path: Path,
+    tail_bytes: int,
+) -> tuple[int, int, str, str, str, str]:
+    """把子进程 stdout/stderr 流式写入文件，返回 (out_size, err_size,
+    out_tail_text, err_tail_text, out_sha256, err_sha256)。
+
+    边写边维护 SHA-256 与有限尾部，避免把完整输出加载进内存。
+    """
+    out_hasher = hashlib.sha256()
+    err_hasher = hashlib.sha256()
+    out_tail = bytearray()
+    err_tail = bytearray()
+    out_size = 0
+    err_size = 0
+
+    async def _drain(stream, handle, hasher, tail, size_holder: list[int]) -> None:
+        while True:
+            chunk = await stream.read(65536)
+            if not chunk:
+                break
+            handle.write(chunk)
+            hasher.update(chunk)
+            size_holder[0] += len(chunk)
+            tail.extend(chunk)
+            if len(tail) > tail_bytes:
+                del tail[: len(tail) - tail_bytes]
+
+    with stdout_path.open("wb") as out_f, stderr_path.open("wb") as err_f:
+        size_out: list[int] = [0]
+        size_err: list[int] = [0]
+        tasks = [
+            asyncio.create_task(_drain(proc.stdout, out_f, out_hasher, out_tail, size_out)),
+            asyncio.create_task(_drain(proc.stderr, err_f, err_hasher, err_tail, size_err)),
+        ]
+        await asyncio.gather(*tasks)
+    return (
+        size_out[0],
+        size_err[0],
+        bytes(out_tail).decode("utf-8", errors="replace"),
+        bytes(err_tail).decode("utf-8", errors="replace"),
+        out_hasher.hexdigest(),
+        err_hasher.hexdigest(),
+    )
+
+
+def _append_manifest(artifacts_root: Path, entry: dict[str, Any]) -> None:
+    """向 artifacts/manifest.jsonl 追加一条记录（原子追加）。"""
+    manifest_path = artifacts_root / "artifacts" / "manifest.jsonl"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with manifest_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass  # manifest 写入失败不阻断工具执行

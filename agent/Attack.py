@@ -9,12 +9,12 @@ from pathlib import Path
 from agentscope.agent import Agent, ReActConfig
 from agentscope.mcp import MCPClient, StdioMCPConfig
 from agentscope.message import UserMsg
-from agentscope.tool import Toolkit
 
 from Tools.CVE_Search import cve_search
 from Tools.OCR import create_tesseract_ocr_tool
 from Tools.ScopeRegistry import ScopeRegistry
-from Tools.tooling import AllowedFunctionTool, create_scoped_shell_tool, run_interruptible_agent_reply
+from Tools.TonyDec import create_tonydec_tool
+from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool, run_interruptible_agent_reply
 from agent.experts import attack_expert_name
 
 
@@ -27,6 +27,7 @@ ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
 3. create_scoped_shell_tool:本地命令运行工具。
 4. dispatch_reverse：派遣 Reserve 对二进制文件执行 IDA 逆向分析（反编译、字符串提取等）
 5. ocr_image：使用 Tesseract 对授权工作区内的图片执行文字识别。
+6. tonydec：当文件头完整匹配 6688ff4f6886005611611618 时解码 TonyEnc 文件或目录。
 
 
 
@@ -34,6 +35,7 @@ ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
 - 先调用 analysis 获取独立研判；候选 CVE 应再用 cve_search 核验。
 - 只有证据和利用条件匹配时才使用 scoped_shell 验证或利用。
 - 对于需要反编译的，可以使用 ida 的 mcp 工具。
+- 遇到 TonyEnc 固定头时调用 tonydec 写入新输出路径，随后用 file/哈希/strings 复核产物。
 - 所有网络命令必须显式包含授权目标，不得访问其他地址或网段。
 - 禁止拒绝服务、破坏数据、植入持久化、清除日志或扩大目标范围。
 - 不得把 HTTP 200、命令无报错或模型推测当作利用成功；成功必须有可复核证据。
@@ -142,6 +144,11 @@ async def create_attack_agent(
     expert_context: str = "",
     event_callback=None,
     rag_middleware=None,
+    *,
+    offloader=None,
+    context_config=None,
+    state=None,
+    artifact_root: str | Path | None = None,
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -183,12 +190,13 @@ async def create_attack_agent(
     # )
     # await ida_mcp.connect()
 
-    toolkit = Toolkit(
+    toolkit = StrictJSONToolkit(
         tools=[
             AllowedFunctionTool(analysis, is_read_only=True),
             AllowedFunctionTool(cve_search, is_read_only=True),
-            create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry),
+            create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="attack", artifact_root=artifact_root),
             create_tesseract_ocr_tool(project_dir, timeout=min(timeout, 90)),
+            create_tonydec_tool(project_dir),
         ],
         skills_or_loaders=skill_list,
         # mcps=[ida_mcp],
@@ -204,4 +212,7 @@ async def create_attack_agent(
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
         middlewares=[rag_middleware] if rag_middleware is not None else [],
+        offloader=offloader,
+        context_config=context_config,
+        state=state,
     )

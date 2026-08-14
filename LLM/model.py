@@ -9,6 +9,7 @@ DeepSeek 走 Responses API（联网搜索工具仅在该 API 下可用），
 通过 web_search 参数（或环境变量 DEEPSEEK_WEB_SEARCH）开启/关闭
 服务端内置联网搜索。
 """
+import logging
 from typing import Any, AsyncGenerator, Literal, Union
 
 from agentscope.formatter import (
@@ -16,6 +17,7 @@ from agentscope.formatter import (
     OpenAIMultiAgentFormatter,
 )
 from pydantic import Field, SecretStr
+from openai import AsyncOpenAI
 
 from agentscope.credential import DeepSeekCredential, OpenAICredential
 from agentscope.model import DeepSeekChatModel, OpenAIResponseModel, OpenAIChatModel
@@ -23,6 +25,58 @@ from agentscope.model import ChatResponse
 from agentscope.message import ThinkingBlock
 
 from config import RuntimeConfig
+
+
+logger = logging.getLogger(__name__)
+
+
+class QwenModelUnavailableError(RuntimeError):
+    """Qwen 服务端没有可安全选择的已加载模型。"""
+
+
+async def resolve_qwen_model(runtime: RuntimeConfig) -> tuple[str, bool]:
+    """读取 llama.cpp ``/v1/models`` 并解析实际模型名。
+
+    配置模型存在时原样使用；配置不存在且服务端仅加载一个模型时采用该
+    唯一模型。零个模型、多个无法判定的模型或模型接口不可用都拒绝启动，
+    避免请求被服务端隐式路由到不可审计的模型。
+
+    Returns:
+        ``(实际模型名, 是否发生别名解析)``。
+    """
+    client = AsyncOpenAI(
+        api_key=runtime.get_api_key("qwen"),
+        base_url=runtime.get_base_url("qwen"),
+        timeout=15.0,
+        max_retries=1,
+    )
+    try:
+        response = await client.models.list()
+    except Exception as exc:  # noqa: BLE001 - 转为任务启动的稳定错误类型
+        raise QwenModelUnavailableError(
+            f"无法读取 Qwen 模型列表 {runtime.get_base_url('qwen')}/models: {exc}",
+        ) from exc
+    finally:
+        await client.close()
+
+    model_ids = list(dict.fromkeys(
+        str(getattr(item, "id", "")).strip()
+        for item in getattr(response, "data", [])
+        if str(getattr(item, "id", "")).strip()
+    ))
+    configured = runtime.qwen_model.strip()
+    if configured in model_ids:
+        return configured, False
+    if len(model_ids) == 1:
+        resolved = model_ids[0]
+        logger.info("Qwen 模型别名解析: %s -> %s", configured, resolved)
+        return resolved, True
+    if not model_ids:
+        raise QwenModelUnavailableError("Qwen 服务端当前没有已加载模型，拒绝启动任务")
+    raise QwenModelUnavailableError(
+        "配置的 Qwen 模型不存在，且服务端加载了多个模型，无法安全选择: "
+        + ", ".join(model_ids),
+    )
 
 
 class _ResponseEventAlias:
@@ -166,14 +220,24 @@ class QwenChatModel(OpenAIChatModel):
         tool_choice=None,
         **generate_kwargs: Any,
     ):
-        if tools and self.extra_body is not None:
-            extra_body = dict(self.extra_body)
-            template_kwargs = dict(
-                extra_body.get("chat_template_kwargs") or {},
-            )
+        extra_body = dict(self.extra_body or {})
+        template_kwargs = dict(
+            extra_body.get("chat_template_kwargs") or {},
+        )
+        if tools:
             template_kwargs["enable_thinking"] = False
-            extra_body["chat_template_kwargs"] = template_kwargs
-            generate_kwargs["extra_body"] = extra_body
+            # 工具调用固定低温，降低函数名/参数结构漂移概率。
+            generate_kwargs["temperature"] = 0.1
+            # 当前 Qwen GGUF 的模板声明支持并行工具调用，但本项目的计划、
+            # 状态流转工具均是有序状态机。显式禁止并行，避免模型在同一轮
+            # 交错 DeletePlan / UpdatePlan 等相互依赖的操作。
+            generate_kwargs["parallel_tool_calls"] = False
+            # 同时从 API 层关闭推理，而不只依赖 Jinja 的模板变量；部分
+            # llama.cpp/Qwen 模板仍会预填 <think> 标签，二者配合可避免
+            # 推理文本污染函数参数。
+            generate_kwargs["reasoning_effort"] = "none"
+        extra_body["chat_template_kwargs"] = template_kwargs
+        generate_kwargs["extra_body"] = extra_body
 
         return await super()._call_api(
             model_name,
@@ -273,13 +337,14 @@ def Qwen(
         Ver: str = "Min",
         temperature: float = 0.7,
         config: RuntimeConfig | None = None,
-) -> QwenChatModel:
+) -> OpenAIChatModel:
     """创建 Qwen 模型（llama.cpp OpenAI 兼容 API）。
 
-    思考级别通过 extra_body 传递给 llama.cpp 服务器:
-      Low  → thinking=false (快速、低延迟)
-      Min  → thinking=true  (默认平衡)
-      Max  → thinking=true + max_tokens=8192 (深度推理)
+    思考级别通过 ``chat_template_kwargs.enable_thinking`` 传递给 llama.cpp:
+      Low  → 所有调用关闭 thinking
+      Min  → 纯文本开启 thinking
+      Max  → 纯文本开启 thinking + max_tokens=8192
+      任意带 tools 的调用 → 强制关闭 thinking，温度固定 0.1
 
     Args:
         Ver: 思考级别（Low/Min/Max）。
@@ -290,14 +355,9 @@ def Qwen(
     model_name = runtime.model_name(Ver, provider="qwen")
 
     # 思考级别 → 推理参数
-    _think_levels = {
-        "Low": {"thinking": False, "max_tokens": 2048},
-        "Min": {"thinking": True,  "max_tokens": 4096},
-        "Max": {"thinking": True,  "max_tokens": 8192},
-    }
-    level = _think_levels.get(Ver, _think_levels["Min"])
+    # level = _think_levels.get(Ver, _think_levels["Min"])
 
-    return QwenChatModel(
+    return OpenAIChatModel(
         credential=OpenAICredential(
             api_key=SecretStr(runtime.get_api_key("qwen")),
             base_url=runtime.get_base_url("qwen"),
@@ -305,7 +365,11 @@ def Qwen(
         model=model_name,
         parameters=OpenAIChatModel.Parameters(
             temperature=temperature,
-            max_tokens=level["max_tokens"],
+            reasoning_effort="medium",
+            thinking_enable=True,
+            top_p=0.95,
+
+
         ),
         stream=True,
         max_retries=3,

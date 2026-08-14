@@ -82,5 +82,27 @@ class AsyncPersistenceBatchTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class StreamReconnectSnapshotTest(unittest.IsolatedAsyncioTestCase):
+    async def test_reconnect_snapshot_keeps_active_block_id(self) -> None:
+        context = api.SessionContext(
+            session_id="reconnect-test",
+            user_id=1,
+            input_queue=asyncio.Queue(),
+        )
+        context.stream_buffers["text:Attack"] = "中断前已经返回的内容"
+        context.stream_blocks["text:Attack"] = "text:Attack:7"
+
+        async def empty_messages(*_args, **_kwargs):
+            return []
+
+        with patch.object(asyncio, "to_thread", side_effect=empty_messages):
+            generator = api._session_event_generator("reconnect-test", context, 0)
+            frame = await anext(generator)
+            await generator.aclose()
+
+        self.assertIn('"type": "stream_snapshot"', frame)
+        self.assertIn('"block_id": "text:Attack:7"', frame)
+
+
 if __name__ == "__main__":
     unittest.main()

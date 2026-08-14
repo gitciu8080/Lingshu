@@ -64,6 +64,23 @@ def init_sessions_db():
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             )
         """)
+        # blob 引用表：session_id/sha256/original_name/size；删除最后一个
+        # 引用后才删除共享 blob（内容寻址存储，多会话可共享同一文件）。
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS blob_refs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                original_name TEXT DEFAULT '',
+                size INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id) REFERENCES sessions(id),
+                UNIQUE(session_id, sha256)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_blob_refs_sha ON blob_refs(sha256)"
+        )
         # CREATE TABLE IF NOT EXISTS 不会给旧表补列，显式执行幂等迁移。
         session_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
@@ -71,6 +88,11 @@ def init_sessions_db():
         migrations = {
             "target_info": "TEXT DEFAULT NULL",
             "pending_approval": "TEXT DEFAULT NULL",
+            # ── v0.3.0 Workspace v2 ──
+            "workspace_id": "TEXT DEFAULT ''",
+            "workspace_version": "INTEGER DEFAULT 0",
+            "resume_status": "TEXT DEFAULT 'fresh'",
+            "checkpoint_seq": "INTEGER DEFAULT 0",
         }
         for column, definition in migrations.items():
             if column not in session_columns:
@@ -130,7 +152,12 @@ def create_session(
 
 
 # update_session 允许更新的字段白名单
-_UPDATABLE_FIELDS = {'phase', 'status', 'success', 'flag', 'summary', 'title', 'target_info', 'pending_approval', 'updated_at'}
+_UPDATABLE_FIELDS = {
+    'phase', 'status', 'success', 'flag', 'summary', 'title', 'target_info',
+    'pending_approval', 'updated_at',
+    # v0.3.0 Workspace v2
+    'workspace_id', 'workspace_version', 'resume_status', 'checkpoint_seq',
+}
 
 
 def update_session(session_id: str, **fields) -> None:
@@ -189,14 +216,66 @@ def get_session(session_id: str) -> dict | None:
         conn.close()
 
 
-def delete_session(session_id: str) -> None:
-    """删除会话及其所有关联消息。"""
+def delete_session(session_id: str) -> list[str]:
+    """删除会话及其所有关联消息、快照与 blob 引用。
+
+    返回本次删除后成为孤儿的 blob sha256 列表（调用方负责物理删除共享
+    blob）；没有孤儿时返回空列表。删除失败时保留 tombstone（调用方可
+    依据返回值重试）。
+    """
     conn = get_db()
+    orphaned: list[str] = []
     try:
+        # 1) 收集本会话引用的 blob
+        refs = conn.execute(
+            "SELECT sha256 FROM blob_refs WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        # 2) 删除引用
+        conn.execute("DELETE FROM blob_refs WHERE session_id = ?", (session_id,))
+        # 3) 删除消息/快照/会话
         conn.execute("DELETE FROM session_stream_snapshots WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM session_messages WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         conn.commit()
+        # 4) 判定孤儿：其他会话是否还引用同一 blob
+        for (sha256,) in refs:
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM blob_refs WHERE sha256 = ?",
+                (sha256,),
+            ).fetchone()
+            if (remaining[0] or 0) == 0:
+                orphaned.append(sha256)
+    finally:
+        conn.close()
+    return orphaned
+
+
+def add_blob_ref(session_id: str, sha256: str, original_name: str = '', size: int = 0) -> None:
+    """为会话登记一条 blob 引用（幂等：同会话同 sha256 只记一次）。"""
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT OR IGNORE INTO blob_refs
+               (session_id, sha256, original_name, size)
+               VALUES (?, ?, ?, ?)""",
+            (session_id, sha256, original_name, size),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_blob_refs(session_id: str) -> list[dict]:
+    """列出会话登记的 blob 引用。"""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT sha256, original_name, size, created_at FROM blob_refs "
+            "WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 

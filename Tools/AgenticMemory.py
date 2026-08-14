@@ -4,13 +4,87 @@
 """
 import json
 import os
+import hashlib
+import re
 from datetime import datetime
+from pathlib import Path
 
 from Tools.tooling import AllowedFunctionTool
 
 # 记忆文件路径
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 _MEMORY_FILE = os.path.join(_PROJECT_ROOT, "../.LongMemory", "agentic_memory.json")
+_RAG_ARCHIVE_DIR = Path(_PROJECT_ROOT).parent / ".RAG" / "long-memory"
+_MAX_HOT_MISSIONS = 50
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """原子写入归档卡片，避免任务中断产生半个 Markdown 文件。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    temporary.replace(path)
+
+
+def _redact(text: object) -> str:
+    """移除冷记忆中不应进入 RAG 的目标、URL、flag 和疑似凭据。"""
+    value = str(text or "")
+    value = re.sub(r"https?://\S+", "[已脱敏 URL]", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "[已脱敏目标]", value)
+    value = re.sub(r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b", "[已脱敏域名]", value)
+    value = re.sub(r"(?:flag|ctf|nssctf)\{[^}\r\n]{1,512}\}", "[已脱敏 Flag]", value, flags=re.IGNORECASE)
+    value = re.sub(r"(?i)\b(api[_-]?key|token|password|secret)\s*[:=]\s*\S+", r"\1=[已脱敏]", value)
+    return " ".join(value.split())[:300]
+
+
+def _collect_technique_tags(mission: dict) -> list[str]:
+    """只提取结构化/明确标记，绝不把原始报告或命令写入知识库。"""
+    tags: set[str] = set()
+    for value in (mission.get("goal"), mission.get("plan"), mission.get("summary")):
+        tags.update(re.findall(r"\bCVE-\d{4}-\d{4,8}\b", str(value or ""), re.IGNORECASE))
+    for step in mission.get("attack_chain") or []:
+        if not isinstance(step, dict):
+            continue
+        for key in ("service", "cve", "technique", "category"):
+            value = step.get(key)
+            if isinstance(value, str) and value.strip():
+                tags.add(_redact(value.strip())[:80])
+    return sorted(tag for tag in tags if tag)[:12]
+
+
+def _archive_cold_mission(mission: dict) -> Path:
+    """将超出热记忆上限的任务压缩为脱敏经验卡片。"""
+    timestamp = str(mission.get("timestamp") or "unknown")
+    digest = hashlib.sha256(timestamp.encode("utf-8")).hexdigest()[:12]
+    safe_date = re.sub(r"[^0-9]", "", timestamp)[:14] or "unknown"
+    destination = _RAG_ARCHIVE_DIR / f"mission-{safe_date}-{digest}.md"
+    tags = _collect_technique_tags(mission)
+    outcome = "成功" if mission.get("success") else "未成功"
+    goal = _redact(mission.get("goal")) or "未记录任务目标"
+    tag_text = ", ".join(tags) if tags else "无可确认的服务或漏洞标识"
+    content = "\n".join([
+        "---",
+        "type: mission_lesson",
+        "source: long_memory_archive",
+        f"outcome: {outcome}",
+        "sensitivity: sanitized",
+        "---",
+        "",
+        "# 历史任务经验卡片",
+        "",
+        f"- 归档时间：{safe_date}",
+        f"- 任务类型：{goal}",
+        f"- 关联技术：{tag_text}",
+        f"- 攻击链步骤数：{len(mission.get('attack_chain') or [])}",
+        "",
+        "## 使用约束",
+        "",
+        "该卡片仅用于提供历史方向；必须以当前授权目标的侦察证据重新验证。"
+        "卡片不包含原始目标、Flag、凭据、完整命令或原始工具输出。",
+        "",
+    ])
+    _atomic_write(destination, content)
+    return destination
 
 
 def _load():
@@ -66,9 +140,20 @@ def save_mission(target, goal, plan, attack_chain, success, summary, flag=None):
                     "success": True,
                 })
 
-    # 只保留最近 50 条任务
-    if len(data["missions"]) > 50:
-        data["missions"] = data["missions"][-50:]
+    # 热记忆只保留最近任务；较早记录先压缩成脱敏 Markdown 卡片，供 `.RAG`
+    # 在下次同步时索引。归档失败不能阻断任务收尾，原记录仍会留在热记忆中。
+    overflow = data["missions"][:-_MAX_HOT_MISSIONS]
+    if overflow:
+        archived = 0
+        for old_mission in overflow:
+            try:
+                _archive_cold_mission(old_mission)
+                archived += 1
+            except OSError:
+                # 保留未归档原记录，下一次保存时重试，避免静默丢失历史经验。
+                break
+        if archived:
+            data["missions"] = data["missions"][archived:]
 
     _save(data)
 

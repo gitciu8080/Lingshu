@@ -6,10 +6,15 @@ from typing import Any
 
 from agentscope.agent import Agent, ReActConfig
 from agentscope.message import UserMsg
-from agentscope.tool import Toolkit
 
 from Tools.AgenticMemory import create_query_memory_tool, save_mission
 from TaskState import MissionState, MissionStore, Phase
+from Tools.fingerprint import (
+    compute_action_fingerprint,
+    error_type,
+    mark_plan_item_blocked,
+    should_meltdown,
+)
 from Tools.Plan import (
     create_add_plan_tool,
     create_delete_plan_tool,
@@ -20,6 +25,7 @@ from Tools.Plan import (
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.tooling import (
     AgentMaxIterationsError,
+    StrictJSONToolkit,
     AllowedFunctionTool,
     run_interruptible_agent_reply,
 )
@@ -85,6 +91,10 @@ def create_orchestrator_agent(
     scope_auditor: Agent | None = None,
     steering_state: dict[str, Any] | None = None,
     nss_context: dict[str, Any] | None = None,
+    *,
+    offloader=None,
+    context_config=None,
+    state=None,
 ) -> Agent:
     steering = steering_state if steering_state is not None else {"pending": None, "processed": False, "queue": []}
     steering.setdefault("queue", [])
@@ -116,7 +126,7 @@ def create_orchestrator_agent(
         if mission.phase != Phase.RECON:
             mission.transition(Phase.RECON, f"需要补充侦察: {focus}")
         mission.record("Orchestrator", "dispatch_recon", focus=focus)
-        store.save(mission)
+        store.checkpoint(mission, "recon_dispatch_before")
         try:
             result = await run_interruptible_agent_reply(
                 recon_agent,
@@ -141,7 +151,7 @@ def create_orchestrator_agent(
             raise
         mission.add_finding("Recon", report)
         mission.transition(Phase.ANALYSIS, "收到新的侦察证据")
-        store.save(mission)
+        store.checkpoint(mission, "recon_report_received")
         return f"[Recon 侦察报告]\n{report}"
 
     async def dispatch_attack(
@@ -163,17 +173,43 @@ def create_orchestrator_agent(
             return msg
         if mission.phase not in {Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION}:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Attack"
-        # P3 去重：与最近一次已执行目标完全相同且无新证据 → 拒绝，堵住迭代黑洞
-        last_step = mission.attack_chain[-1] if mission.attack_chain else None
-        if last_step and last_step.get("objective", "").strip() == objective.strip():
+        # P3 去重（v0.3.0 升级为动作指纹）：工具名+目标+规范化参数+目标
+        # 描述+证据版本，防止只改写 objective 措辞绕过；相同动作+相同
+        # 错误达到阈值自动熔断。
+        evidence_version = len(mission.findings) + len(mission.attack_chain)
+        fingerprint = compute_action_fingerprint(
+            "dispatch_attack", mission.target,
+            {"target_info": target_info, "objective": objective, "service": service, "cve": cve},
+            objective, evidence_version,
+        )
+        if should_meltdown(mission.retry_counters, fingerprint):
+            mission.record(
+                "Orchestrator",
+                "attack_meltdown",
+                objective=objective,
+                fingerprint=fingerprint,
+                retries=mission.retry_counters.get(fingerprint, 0),
+            )
+            marked = mark_plan_item_blocked(
+                mission, fingerprint, f"相同动作+相同错误已执行 {mission.retry_counters.get(fingerprint, 0)} 次，自动熔断",
+            )
+            store.save(mission)
+            blocked_note = f"（已熔断计划项 {marked}）" if marked else ""
+            return (
+                f"[熔断] 该 Attack 动作（指纹 {fingerprint[:12]}…）已连续失败达到阈值，"
+                f"禁止通过改写措辞重试。请补充侦察收集新证据后再调度。{blocked_note}"
+            )
+        # 与最近一次执行的动作指纹完全相同且无新证据 → 拒绝（无意义重放）
+        if mission.last_action_fingerprint == fingerprint and evidence_version == len(mission.attack_chain):
             mission.record(
                 "Orchestrator",
                 "attack_duplicate_rejected",
                 objective=objective,
+                fingerprint=fingerprint,
             )
             store.save(mission)
             return (
-                "[拒绝] 该 Attack 目标与最近一次完全相同，且无新证据。"
+                "[拒绝] 该 Attack 动作与最近一次完全相同（指纹一致）且无新证据。"
                 "请基于最新侦察/攻击结果调整 target_info 或 objective，"
                 "或先补充侦察收集新证据后再调度。"
             )
@@ -195,6 +231,7 @@ def create_orchestrator_agent(
             if mission.phase == Phase.EXPLOITATION:
                 mission.transition(Phase.POST_EXPLOITATION, f"开始执行: {objective}")
         mission.record("Orchestrator", "dispatch_attack", objective=objective)
+        store.checkpoint(mission, "attack_dispatch_before")
         store.save(mission)
         try:
             result = await run_interruptible_agent_reply(
@@ -223,7 +260,20 @@ def create_orchestrator_agent(
             # 不在此处消费 steering：统一由主循环捕获 CancelledError 后注入。
             raise
         mission.add_attack_step(objective, report, service, cve)
-        store.save(mission)
+        # 循环收敛：记录指纹与错误类型计数（确定性错误按类型累计；
+        # 无确定性错误或结果含成功信号时不再累加，避免误熔断）
+        mission.last_action_fingerprint = fingerprint
+        err = error_type(report)
+        if err is not None and "成功" not in report and "flag{" not in report.lower():
+            mission.retry_counters[fingerprint] = (
+                mission.retry_counters.get(fingerprint, 0) + 1
+            )
+            mission.record(
+                "Orchestrator", "attack_error_counted",
+                error_type=err, fingerprint=fingerprint,
+                retries=mission.retry_counters[fingerprint],
+            )
+        store.checkpoint(mission, "attack_report_received")
         return f"[Attack 报告]\n{report}"
 
     async def dispatch_reverse(binary_path: str, objective: str = "二进制逆向分析") -> str:
@@ -384,7 +434,8 @@ def create_orchestrator_agent(
                 "priority_order": priority_order,
                 "approved_at_phase": mission.phase.value,
             }
-            store.save(mission)
+            # 审批结果入检查点：崩溃恢复后不重复询问常规利用审批
+            store.checkpoint(mission, "exploitation_approved")
             return (
                 "[批准] 人工已批准进入攻击阶段。\n"
                 f"选定方案：{selected_option['title']}（{selected_option['id']}）\n"
@@ -500,7 +551,7 @@ def create_orchestrator_agent(
                 item["status"] = "completed" if success else "failed"
             elif item.get("status") == "pending":
                 item["status"] = "skipped"
-        store.save(mission)
+        store.checkpoint(mission, "mission_terminal")
         push_plan_update(mission, event_callback)
         save_mission(
             target=mission.target,
@@ -569,16 +620,27 @@ def create_orchestrator_agent(
             "Orchestrator", "nss_submit",
             flag=candidate, correct=correct, remaining_wrong_attempts=remaining,
         )
-        store.save(mission)
+        store.checkpoint(mission, "nss_flag_submitted")
         if event_callback:
             event_callback("nss_submit", **mission.nss_submit)
         if correct:
             mission.flag = candidate
             mission.success = True
-            store.save(mission)
+            # MissionFinalizer：在线判定正确立即进入 COMPLETED，不再依赖
+            # LLM 调用 complete_mission；残留计划项确定性收尾
+            if mission.phase not in {Phase.COMPLETED, Phase.FAILED, Phase.CANCELLED}:
+                mission.transition(Phase.COMPLETED, "NSS Flag 判定正确")
+                for item in mission.plan_items:
+                    if item.get("status") == "in_progress":
+                        item["status"] = "completed"
+                    elif item.get("status") == "pending":
+                        item["status"] = "skipped"
+            # 正确 Flag 提交立即固化终态信号，崩溃后仍能恢复为 completed
+            store.checkpoint(mission, "nss_flag_correct")
+            push_plan_update(mission, event_callback)
             return (
                 f"[提交成功] ✅ NSSCTF 判定 Flag 正确！attempt_id={attempt_id}。"
-                f"剩余错误次数: {remaining}。可调用 complete_mission 以成功状态结束任务。"
+                f"剩余错误次数: {remaining}。任务已标记完成，无需再调用 complete_mission。"
             )
         return (
             f"[提交失败] ❌ NSSCTF 判定 Flag 错误。剩余错误次数: {remaining}。"
@@ -605,8 +667,11 @@ def create_orchestrator_agent(
         name=ORCHESTRATOR_EXPERT,
         system_prompt=ORCHESTRATOR_SYS_PROMPT,
         model=model,
-        toolkit=Toolkit(tools=tools),
+        toolkit=StrictJSONToolkit(tools=tools),
         react_config=ReActConfig(max_iters=30, interruption_raise_cancelled_error=True),
+        offloader=offloader,
+        context_config=context_config,
+        state=state,
     )
 
 # 超过 20轮自动提出窗口显示是否迭代
