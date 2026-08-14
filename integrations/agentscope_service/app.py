@@ -65,7 +65,7 @@ agentscope_app = create_app(
     workspace_manager=workspace_manager,
     custom_agent_cls=LingshuMissionAgent,
     title="Lingshu Agent Service",
-    version="2.0.5-lingshu",
+    version="2.0.6-lingshu",
 )
 
 

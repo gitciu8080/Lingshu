@@ -1,6 +1,6 @@
 """Summary：在任务结束后总结完整会话并形成安全测试报告正文。"""
 from agentscope.agent import Agent, ReActConfig
-from agentscope.tool import Toolkit
+from Tools.tooling import StrictJSONToolkit
 
 SUMMARY_EXPERT = "Mia - 对话总结与报告专家"
 
@@ -13,12 +13,15 @@ SUMMARY_SYS_PROMPT = """你是灵枢系统的对话总结与安全报告专家�
 但避免逐字复制冗长日志。"""
 
 
-def create_summary_agent(model) -> Agent:
+def create_summary_agent(model, *, offloader=None, context_config=None, state=None) -> Agent:
     """创建只做总结、不调用任何外部工具的报告 Agent。"""
     return Agent(
         name=SUMMARY_EXPERT,
         system_prompt=SUMMARY_SYS_PROMPT,
         model=model,
-        toolkit=Toolkit(),
+        toolkit=StrictJSONToolkit(),
         react_config=ReActConfig(max_iters=1, interruption_raise_cancelled_error=True),
+        offloader=offloader,
+        context_config=context_config,
+        state=state,
     )

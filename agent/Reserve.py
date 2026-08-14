@@ -15,12 +15,11 @@ from pathlib import Path
 from agentscope.agent import Agent, ReActConfig
 from agentscope.mcp import MCPClient, StdioMCPConfig
 from agentscope.message import UserMsg
-from agentscope.tool import Toolkit
 
 from agent.Attack import _build_skill_list
 from Tools.IntelPwn import create_intelpwn_tool
 from Tools.ScopeRegistry import ScopeRegistry
-from Tools.tooling import AllowedFunctionTool, create_scoped_shell_tool, run_interruptible_agent_reply
+from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool, run_interruptible_agent_reply
 from agent.experts import REVERSE_EXPERT
 
 RESERVE_SYS_PROMPT = """你是二进制逆向分析专家（Reserve）。
@@ -76,6 +75,11 @@ async def create_reverse_agent(
     scope_registry: ScopeRegistry | None = None,
     max_iters: int = 20,
     event_callback=None,
+    *,
+    offloader=None,
+    context_config=None,
+    state=None,
+    artifact_root: str | Path | None = None,
 ) -> Agent:
     async def analysis(service_info: str) -> str:
         """委托 Analysis 专家研判真实证据。
@@ -192,11 +196,11 @@ async def create_reverse_agent(
             for block in result.content
         )
 
-    toolkit = Toolkit(
+    toolkit = StrictJSONToolkit(
         tools=[
             AllowedFunctionTool(analysis, is_read_only=True),
             create_intelpwn_tool(timeout),
-            create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry),
+            create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="reserve", artifact_root=artifact_root),
             AllowedFunctionTool(ida_open_binary, is_read_only=True),
             *exposed_ida_tools,
         ],
@@ -208,6 +212,9 @@ async def create_reverse_agent(
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
+        offloader=offloader,
+        context_config=context_config,
+        state=state,
     )
     agent._ida_mcp_client = ida_mcp
     return agent

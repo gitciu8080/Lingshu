@@ -1,6 +1,6 @@
 """Analysis：只进行漏洞研判，不执行命令。"""
 from agentscope.agent import Agent, ReActConfig
-from agentscope.tool import Toolkit
+from Tools.tooling import StrictJSONToolkit
 
 from Tools.CVE_Search import create_cve_search_tool
 from agent.experts import ANALYSIS_EXPERT
@@ -11,13 +11,16 @@ ANALYSIS_SYS_PROMPT = """你是网络安全漏洞分析专家（Analysis）。
 不得把版本相近当作漏洞成立，不得编造 CVE、PoC 或成功结果。输出结构化中文报告。"""
 
 
-def create_analysis_agent(model) -> Agent:
+def create_analysis_agent(model, *, offloader=None, context_config=None, state=None) -> Agent:
     return Agent(
         name=ANALYSIS_EXPERT,
         system_prompt=ANALYSIS_SYS_PROMPT,
         model=model,
         react_config=ReActConfig(max_iters=3, interruption_raise_cancelled_error=True),
-        toolkit=Toolkit(tools=[
+        toolkit=StrictJSONToolkit(tools=[
             create_cve_search_tool(),
-        ])
+        ]),
+        offloader=offloader,
+        context_config=context_config,
+        state=state,
     )

@@ -93,7 +93,7 @@ app = create_app(
         ),
     ],
     title="灵枢 Lingshu — Agent Service",
-    version="2.0.5-lingshu",
+    version="2.0.6-lingshu",
 )
 
 
@@ -295,7 +295,7 @@ async def health() -> dict[str, Any]:
     """健康探测端点：web_ui 连接前会 GET {server_url}/health 校验。"""
     return {
         "status": "ok",
-        "version": "2.0.5-lingshu",
+        "version": "2.0.6-lingshu",
         "components": {
             "storage": "ok",
             "message_bus": "ok",

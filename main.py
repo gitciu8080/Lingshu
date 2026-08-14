@@ -14,8 +14,11 @@ import json  # 审批方案选择协议与结构化消息解析
 import os  # 环境变量与路径操作
 import re  # 从最终证据中提取 CVE 等标题特征
 import sys  # 修改模块搜索路径，确保能 import 本目录下的包
+import uuid  # CLI 模式任务级 mission_id 生成
 from collections.abc import Callable  # 回调类型注解
+from dataclasses import replace
 from pathlib import Path  # 跨平台路径对象
+from types import SimpleNamespace  # resume 分支重建分类决策轻量对象
 from typing import Any  # 通用任意类型注解
 
 # 将本文件所在目录加入模块搜索路径，
@@ -26,7 +29,11 @@ from agentscope.message import UserMsg  # AgentScope 用户消息封装
 from agentscope.types import ReplyFinishedReason
 
 from config import RuntimeConfig  # 运行时配置（API Key、超时等，从环境变量读取）
-from LLM.model import create_model  # 创建 LLM 模型实例（deepseek / qwen）
+from LLM.model import (  # 创建 LLM 模型实例（deepseek / qwen）
+    QwenModelUnavailableError,
+    create_model,
+    resolve_qwen_model,
+)
 from TaskState import MissionState, MissionStore, Phase  # 任务状态、持久化存储、阶段枚举
 from agent.Analysis import create_analysis_agent  # 漏洞研判专家（纯推理）
 from Tools.archive import safe_extract, SafeExtractError  # 安全解压（防路径穿越等）
@@ -41,19 +48,31 @@ from agent.Recon import (
 from agent.Reserve import close_reverse_agent, create_reverse_agent  # 逆向分析 Agent（IDA MCP）
 from agent.ScopeAuditor import create_scope_auditor_agent  # IP 授权审核 Agent
 from agent.experts import build_expert_assignments
-from Tools.Plan import create_add_plan_tool, push_plan_update  # Brain 登记计划条目的工具
+from Tools.Plan import (  # Brain 计划登记工具
+    create_add_plan_tool,
+    create_submit_plan_tool,
+    push_plan_update,
+)
 from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
 from Tools.KnowledgeBase import get_rag_service
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
+from agent.context import (  # 内部 Agent 的统一 Offloader/ContextConfig/角色状态
+    build_agent_context_config,
+    build_role_agent_state,
+)
+from workspace_service import get_workspace_service  # Workspace v2 生命周期
 from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     AgentMaxIterationsError,
+    ToolJSONValidationError,
     bind_agent_tasks,
     bind_expert_roster,
     bind_process_tracker,
+    bind_tool_json_failure_handler,
     cancel_agent_tasks,
     reset_agent_tasks,
     reset_expert_roster,
     reset_process_tracker,
+    reset_tool_json_failure_handler,
     run_interruptible_agent_reply,
 )
 
@@ -546,6 +565,8 @@ async def run_mission(
     steering_state: dict[str, Any] | None = None,
     nss_context: dict[str, Any] | None = None,
     authorization_source: str = "cli",
+    resume: bool = False,
+    user_id: int | None = None,
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
@@ -626,67 +647,120 @@ async def run_mission(
     else:
         store = MissionStore(project_dir / ".TaskMemory" / "current_mission.json")
 
-    # 构建任务状态对象：记录授权信息、目标规格与分类结果
-    mission = MissionState(
-        session_id=session_id,
-        target=target_str,
-        goal=goal_text,
-        authorized=True,  # 系统默认所有操作均需授权
-        target_spec={
-            "kind": target_spec.kind,
-            "host": target_spec.host,
-            "port": target_spec.port,
-            "original_input": target_spec.original_input,
-            "authorization_scope": target_spec.authorization_scope,
-            "declared_network_targets": declared_network_targets,
-        },
-        category_decision={
-            "primary": category_decision.primary,
-            "secondary": category_decision.secondary,
-            "confidence": category_decision.confidence,
-            "scores": category_decision.scores,
-            "evidence": category_decision.evidence,
-            "stage": category_decision.stage,
-        },
-        authorization_evidence={
-            "source": authorization_source,
-            "scope": target_spec.authorization_scope,
-            "operator_confirmation": True,  # 操作员已确认
-            "declared_network_targets": declared_network_targets,
-            "declared_targets_auto_trusted": bool(declared_network_targets),
-        },
-    )
-    # 记录任务创建事件并立即持久化（防止后续异常丢失状态）
-    mission.record("system", "mission_created", model=f"{provider}/{model_ver}")
-    if event_callback is not None:
-        mission.bind_phase_callback(
-            lambda previous, current, reason: event_callback(
-                "phase_change",
-                phase=current.value,
-                previous_phase=previous.value,
-                reason=reason,
-                agent="system",
-            ),
+    # ── 4b. 崩溃恢复分支（resume=True）──
+    # 从权威 Mission JSON 恢复：终态不重放；不确定动作禁止自动重放；
+    # 其余从最近一次已提交 checkpoint 继续。
+    if resume:
+        existing = store.load()
+        if existing is None:
+            raise RuntimeError(f"无法恢复任务：状态文件不存在（{store.path}）")
+        if existing.phase in (Phase.COMPLETED, Phase.FAILED, Phase.CANCELLED):
+            print(f"[系统] 任务已处于终态 {existing.phase.value}，不重复执行")
+            return existing
+        if existing.resume_status == "uncertain":
+            raise RuntimeError(
+                "会话存在未确认的不确定动作，禁止自动重放；请先确认后重试"
+            )
+        mission = existing
+        mission.resume_status = "running"
+        # 从持久化恢复分类决策（重解析目标仅用于推导 workdir 与授权）
+        category_decision = SimpleNamespace(
+            primary=mission.category_decision.get("primary", "unknown")
+            if mission.category_decision else "unknown",
+            secondary=mission.category_decision.get("secondary", [])
+            if mission.category_decision else [],
+            confidence=mission.category_decision.get("confidence", 0.0)
+            if mission.category_decision else 0.0,
+            scores=mission.category_decision.get("scores", {})
+            if mission.category_decision else {},
+            evidence=mission.category_decision.get("evidence", [])
+            if mission.category_decision else [],
+            stage=mission.category_decision.get("stage", "")
+            if mission.category_decision else "",
         )
-    store.save(mission)
+        print(
+            f"[系统] 恢复任务: phase={mission.phase.value} "
+            f"checkpoint_seq={mission.checkpoint_seq} resume_status={mission.resume_status}"
+        )
+    else:
+        # 构建任务状态对象：记录授权信息、目标规格与分类结果
+        mission = MissionState(
+            session_id=session_id,
+            target=target_str,
+            goal=goal_text,
+            authorized=True,  # 系统默认所有操作均需授权
+            target_spec={
+                "kind": target_spec.kind,
+                "host": target_spec.host,
+                "port": target_spec.port,
+                "original_input": target_spec.original_input,
+                "authorization_scope": target_spec.authorization_scope,
+                "declared_network_targets": declared_network_targets,
+            },
+            category_decision={
+                "primary": category_decision.primary,
+                "secondary": category_decision.secondary,
+                "confidence": category_decision.confidence,
+                "scores": category_decision.scores,
+                "evidence": category_decision.evidence,
+                "stage": category_decision.stage,
+            },
+            authorization_evidence={
+                "source": authorization_source,
+                "scope": target_spec.authorization_scope,
+                "operator_confirmation": True,  # 操作员已确认
+                "declared_network_targets": declared_network_targets,
+                "declared_targets_auto_trusted": bool(declared_network_targets),
+            },
+        )
+        # 记录任务创建事件并立即持久化（防止后续异常丢失状态）
+        mission.record("system", "mission_created", model=f"{provider}/{model_ver}")
+        if event_callback is not None:
+            mission.bind_phase_callback(
+                lambda previous, current, reason: event_callback(
+                    "phase_change",
+                    phase=current.value,
+                    previous_phase=previous.value,
+                    reason=reason,
+                    agent="system",
+                ),
+            )
+        store.save(mission)
 
     # ── 动态授权范围注册表 ──
     scope_registry = ScopeRegistry()
     # 从持久化恢复（崩溃恢复场景）
     if mission.authorized_scope:
         scope_registry.restore(mission.authorized_scope)
-    # 注册初始目标
-    if target_spec.host:
-        scope_registry.add_base_target(target_spec.host)
-    for declared_target in declared_network_targets:
-        # 只注册 host，端口信息仍在审计记录中；scoped_shell 以 host/IP
-        # 作为网络范围判断依据，命令本身必须显式写出实际访问对象。
-        declared_spec = normalize_target(declared_target)
-        if declared_spec.host:
-            scope_registry.add_base_target(declared_spec.host)
-    # 持久化初始快照
-    mission.authorized_scope = scope_registry.snapshot()
-    store.save(mission)
+    if not resume:
+        # 注册初始目标
+        if target_spec.host:
+            scope_registry.add_base_target(target_spec.host)
+        for declared_target in declared_network_targets:
+            # 只注册 host，端口信息仍在审计记录中；scoped_shell 以 host/IP
+            # 作为网络范围判断依据，命令本身必须显式写出实际访问对象。
+            declared_spec = normalize_target(declared_target)
+            if declared_spec.host:
+                scope_registry.add_base_target(declared_spec.host)
+        # 持久化初始快照
+        mission.authorized_scope = scope_registry.snapshot()
+        store.save(mission)
+
+    # ── v0.3.0：Workspace v2 标识 ──
+    # CLI 模式（无 session_id）生成任务级 mission_id，保证 workspace 隔离；
+    # 角色会话 ID 统一为 {mission_id}-{role}，offload 落到各自分区。
+    ws_service = get_workspace_service()
+    if not session_id:
+        mission_id = uuid.uuid4().hex[:12]
+    else:
+        mission_id = session_id
+    use_v2_workspace = runtime.workspace_mode == "local"
+    if use_v2_workspace:
+        mission.workspace_id = ws_service.workspace_id(user_id, mission_id)
+        # 安全检查点镜像写入工作区 mission/checkpoint.json（权威 JSON 的原子副本）
+        store.bind_checkpoint_path(ws_service.checkpoint_path(user_id, mission_id))
+    if not resume:
+        store.save(mission)
 
     # ── 人工审批协调器（首次进入攻击阶段前的人工闸门） ──
     approval_broker = _ApprovalBroker(event_callback, input_queue)
@@ -758,23 +832,97 @@ async def run_mission(
     active_agent_tasks = agent_tasks if agent_tasks is not None else set()
     agent_tasks_token = bind_agent_tasks(active_agent_tasks)
     expert_roster_token = None
+    tool_json_token = None
     reserve = None
     try:
+        def _record_tool_json_failure(evidence: dict[str, Any]) -> None:
+            mission.record("system", "tool_json_validation_failed", **evidence)
+            store.save(mission)
+            if event_callback is not None:
+                event_callback(
+                    "system_notice",
+                    content="模型连续两次生成无效工具参数，已阻止工具执行并进入安全收尾。",
+                    agent="system",
+                )
+
+        tool_json_token = bind_tool_json_failure_handler(_record_tool_json_failure)
+
+        # ── v0.3.0：获取会话 Workspace（LocalWorkspace + 业务目录）──
+        # 同一会话所有内部 Agent 共享同一 Workspace：
+        #   - offloader：压缩上下文与超限工具结果卸载（角色分区）
+        #   - scoped_shell artifacts 根：完整工具输出落盘
+        # 任务结束时不删除磁盘数据；TTL 仅关闭 MCP/释放对象。
+        # legacy 模式（LINGSHU_WORKSPACE_MODE=legacy）跳过：旧行为使用
+        # 全局 WorkDir，仅用于打开旧会话。
+        if use_v2_workspace:
+            workspace = await ws_service.get(user_id, mission_id)
+            context_config = build_agent_context_config()
+            ws_root = ws_service.workspace_dir(user_id, mission_id)
+        else:
+            workspace = None
+            context_config = None
+            ws_root = None
+
         # ── 5. 模型与基础 Agent ──
-        # 创建共享的 LLM 模型实例（DeepSeek 0.7，Qwen 0.3 避免工具调用退化）
+        # Qwen 启动前必须核对 llama.cpp 实际加载的模型。只有服务端唯一模型
+        # 才允许替代不存在的配置别名，并将解析结果写入审计链。
+        if provider == "qwen":
+            resolved_model, alias_resolved = await resolve_qwen_model(runtime)
+            if alias_resolved:
+                configured_model = runtime.qwen_model
+                runtime = replace(runtime, qwen_model=resolved_model)
+                mission.record(
+                    "system",
+                    "model_alias_resolved",
+                    provider="qwen",
+                    configured_model=configured_model,
+                    resolved_model=resolved_model,
+                )
+                store.save(mission)
+                if event_callback is not None:
+                    event_callback(
+                        "model_alias_resolved",
+                        provider="qwen",
+                        configured_model=configured_model,
+                        resolved_model=resolved_model,
+                        agent="system",
+                    )
+
+        # 创建共享模型；Qwen 的纯文本温度沿用这里的配置，工具调用由模型
+        # 适配层固定为 0.1。
         qwen_temp = 0.3 if provider == "qwen" else 0.7
         model = create_model(provider=provider, Ver=model_ver, temperature=qwen_temp, config=runtime)
-        # Brain 通过 AddPlan 工具登记结构化计划条目（origin="brain"），
-        # 每次登记都会持久化并推送 plan_updated 事件到前端。
+        # Brain 通过 SubmitPlan 一次原子提交完整计划，避免 Qwen 长工具参数
+        # 被拆成多次 AddPlan 后留下半份持久化状态。
         rag_service = get_rag_service(project_dir)
         await rag_service.start()
+        # AgentWorld 等本地 Qwen 对扁平参数工具更可靠；旧版已验证其可用。
+        # DeepSeek 保持原子 SubmitPlan，避免多次写入产生半份计划。
+        qwen_flat_plan_tools = provider == "qwen"
+        brain_tools = (
+            [create_add_plan_tool(mission, store, event_callback, default_origin="brain")]
+            if qwen_flat_plan_tools
+            else [create_submit_plan_tool(mission, store, event_callback)]
+        )
         brain = create_brain_agent(
             model,
-            tools=[create_add_plan_tool(mission, store, event_callback, default_origin="brain")],
-            max_iters=_iter_budget(target_spec.kind, "brain", model_ver),
+            tools=brain_tools,
+            # Qwen 的逐条 AddPlan 通常需要 4~8 次登记加一次正文输出。
+            max_iters=(15 if qwen_flat_plan_tools else _iter_budget(
+                target_spec.kind, "brain", model_ver,
+            )),
             rag_middleware=rag_service.middleware(),
+            plan_tool_mode="item" if qwen_flat_plan_tools else "batch",
+            offloader=workspace,
+            context_config=context_config,
+            state=build_role_agent_state(mission_id, "brain") if use_v2_workspace else None,
         )
-        analysis = create_analysis_agent(model)  # 漏洞研判专家（纯推理）
+        analysis = create_analysis_agent(
+            model,
+            offloader=workspace,
+            context_config=context_config,
+            state=build_role_agent_state(mission_id, "analysis") if use_v2_workspace else None,
+        )
 
         # ── 6. Recon / Triage 路由 ──
         # 按目标类型选择侦察方式：
@@ -785,11 +933,19 @@ async def run_mission(
                 model, target_str, project_dir, runtime.command_timeout,
                 scope_registry=scope_registry,
                 max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
+                offloader=workspace,
+                context_config=context_config,
+                state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
+                artifact_root=ws_root,
             )
         else:
             recon = create_artifact_triage_agent(
                 model, workdir, project_dir, runtime.command_timeout,
                 max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
+                offloader=workspace,
+                context_config=context_config,
+                state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
+                artifact_root=ws_root,
             )
 
         # ── 7. Brain 战略规划（包含分类结果）──
@@ -820,16 +976,17 @@ async def run_mission(
         plan_prompt += (
             "\n你的任务：\n"
             "基于上述事实制定可审计的阶段计划。\n"
-            "先用 AddPlan 工具逐条登记结构化计划条目，再输出计划正文。\n"
+            "先用 SubmitPlan 工具一次性提交 4~8 条结构化计划，再输出计划正文。\n"
             "若证据不足，请在计划中加入「重新分类检查点」。\n"
             "若你认为题型需要修正，请输出结构化建议（proposed_category + reason）。\n"
             "不得擅自修改正式题型，修正需由 Orchestrator 审批。"
         )
 
         # 流式调用 Brain，实时打印前缀 [Brain] 并转发事件。
-        # Brain 通过 AddPlan 工具直接登记 plan_items（每次登记即持久化并推送前端）。
+        # Brain 通过 SubmitPlan 原子登记 plan_items（一次持久化并推送前端）。
         # 规划阶段同样允许操作员插话：不能因为此时尚未进入 Orchestrator
         # 循环，就让新情报被取消事件吞掉。
+        plan_text = ""
         while True:
             try:
                 plan_result = await run_interruptible_agent_reply(
@@ -838,6 +995,20 @@ async def run_mission(
                     prefix="[Brain] ",
                     on_event=event_callback,
                 )
+                plan_text = plan_result.get_text_content() or ""
+                break
+            except AgentMaxIterationsError:
+                if not mission.plan_items:
+                    raise
+                # Qwen 在系统已登记降级计划后仍可能继续空调用。计划本身已
+                # 持久化且不包含任何攻击动作，可以安全进入 Recon。
+                plan_text = "模型未能输出计划正文，已使用系统登记的保守阶段计划。"
+                mission.record(
+                    "system",
+                    "brain_max_iters_after_plan_fallback",
+                    provider=provider,
+                )
+                store.save(mission)
                 break
             except asyncio.CancelledError:
                 if steering.get("cancel_requested"):
@@ -858,7 +1029,7 @@ async def run_mission(
                         event_type="agent_acknowledged",
                     )
         # 保存计划文本（无输出时回退到内置四阶段计划）
-        mission.plan = plan_result.get_text_content() or "使用内置四阶段计划"
+        mission.plan = plan_text or "使用内置四阶段计划"
         phase_experts, expert_section = build_expert_assignments(
             category_decision.primary,
             target_spec.kind,
@@ -909,6 +1080,10 @@ async def run_mission(
             rag_middleware=rag_service.middleware(),
             expert_context=mission.plan,
             event_callback=event_callback,
+            offloader=workspace,
+            context_config=context_config,
+            state=build_role_agent_state(mission_id, "attack") if use_v2_workspace else None,
+            artifact_root=ws_root,
         )
 
         reserve = await create_reverse_agent(
@@ -921,6 +1096,10 @@ async def run_mission(
             scope_registry=scope_registry,
             max_iters=_iter_budget(target_spec.kind, "reserve", model_ver, len(mission.plan_items)),
             event_callback=event_callback,
+            offloader=workspace,
+            context_config=context_config,
+            state=build_role_agent_state(mission_id, "reserve") if use_v2_workspace else None,
+            artifact_root=ws_root,
         )
 
         scope_auditor = create_scope_auditor_agent(model)
@@ -941,6 +1120,9 @@ async def run_mission(
             scope_auditor=scope_auditor,
             steering_state=steering,
             nss_context=nss_context,
+            offloader=workspace,
+            context_config=context_config,
+            state=build_role_agent_state(mission_id, "orchestrator") if use_v2_workspace else None,
         )
         # 结构化计划清单文本（Orchestrator 需要知道条目 id 才能用 UpdatePlan 等工具维护）
         plan_items_text = "\n".join(
@@ -1083,6 +1265,25 @@ async def run_mission(
         _push_target_info()
         return mission
 
+    except (ToolJSONValidationError, QwenModelUnavailableError) as exc:
+        # 严格工具 JSON 二次失败或 Qwen 无可用模型都采用确定性安全收尾；
+        # 不执行损坏工具参数，也不让任务停留在 running。
+        mission.success = False
+        mission.summary = str(exc)
+        mission.record("system", "model_guard_safe_shutdown", error=str(exc))
+        if mission.phase not in {Phase.COMPLETED, Phase.FAILED, Phase.CANCELLED}:
+            mission.transition(Phase.FAILED, str(exc))
+        for item in mission.plan_items:
+            if item.get("status") == "in_progress":
+                item["status"] = "failed"
+            elif item.get("status") == "pending":
+                item["status"] = "skipped"
+        store.save(mission)
+        push_plan_update(mission, event_callback)
+        if event_callback is not None:
+            event_callback("task_error", error=str(exc), agent="system")
+        return mission
+
     finally:
         # AgentScope 官方方式：取消直接承载 reply_stream 的 task。
         await cancel_agent_tasks(active_agent_tasks)
@@ -1090,9 +1291,17 @@ async def run_mission(
         reset_agent_tasks(agent_tasks_token)
         if expert_roster_token is not None:
             reset_expert_roster(expert_roster_token)
+        if tool_json_token is not None:
+            reset_tool_json_failure_handler(tool_json_token)
         # 停止本任务启动的所有命令及后台子进程，避免取消后继续运行。
         await process_tracker.terminate_all()
         reset_process_tracker(process_tracker_token)
+        # v0.3.0：任务结束关闭本会话 Workspace（释放 MCP 与对象；磁盘
+        # 数据保留，供 resume 或审计使用）
+        try:
+            await ws_service.close_one(user_id, mission_id)
+        except Exception:  # noqa: BLE001
+            pass
         # 确保输入队列消费者在任务结束（无论正常/异常）后都被清理
         if consumer_task is not None and not consumer_task.done():
             consumer_task.cancel()

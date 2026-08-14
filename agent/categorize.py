@@ -6,10 +6,22 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
 from Tools.target import TargetKind, TargetSpec
+
+# 短英文关键词（≤4 个 ASCII 字母）必须词边界匹配，防止 "ai" 命中
+# "aicreate"、"des" 命中 "desktop" 等误报。
+_SHORT_ASCII_KEYWORD_RE = re.compile(r"^[A-Za-z]{1,4}$")
+
+
+def _keyword_matches(keyword: str, text: str) -> bool:
+    """关键词匹配：短英文关键词按词边界，其余按子串。"""
+    if _SHORT_ASCII_KEYWORD_RE.fullmatch(keyword):
+        return re.search(rf"\b{re.escape(keyword)}\b", text) is not None
+    return keyword in text
 
 # ---------------------------------------------------------------------------
 # 题型标识
@@ -88,6 +100,15 @@ _FILE_TYPE_SIGNALS: dict[str, list[str]] = {
 # 文件类型信号权重
 _FILE_SIGNAL_WEIGHT = 10
 
+# 扩展名强信号：独立于题面文本，文件类型证据优先于弱关键词
+_EXTENSION_SIGNALS: dict[str, list[str]] = {
+    "pwn": [".elf"],
+    "reverse": [".exe", ".dll", ".apk", ".dex", ".class", ".wasm", ".so", ".ko"],
+    "forensics": [".pcap", ".pcapng", ".raw", ".img", ".dd", ".mem", ".vmem"],
+    "crypto": [".pem", ".key", ".cer", ".crt", ".asc", ".gpg"],
+    "misc": [".py", ".js", ".sh", ".jar", ".tar", ".zip", ".gz"],
+}
+
 # 文件名关键词权重
 _FILENAME_WEIGHT = 5
 
@@ -160,21 +181,21 @@ def classify(
 
     goal_lower = goal.lower()
 
-    # ── 1. 关键词匹配（弱信号） ──
+    # ── 1. 关键词匹配（弱信号，短英文关键词按词边界） ──
     for cat, keywords in _KEYWORD_WEIGHTS.items():
         hits = 0
         for kw in keywords:
-            if kw in goal_lower:
+            if _keyword_matches(kw, goal_lower):
                 hits += 1
         if hits > 0:
             scores[cat] += hits * 1.0
             evidence.append(f"goal 关键词命中 {cat}: {hits} 个")
 
-    # ── 2. 文件名关键词（如果存在）──
+    # ── 2. 文件名关键词（如果存在；同样按词边界）──
     if target_spec.original_path is not None:
         fname = target_spec.original_path.name.lower()
         for cat, keywords in _KEYWORD_WEIGHTS.items():
-            if any(kw in fname for kw in keywords):
+            if any(_keyword_matches(kw, fname) for kw in keywords):
                 scores[cat] += _FILENAME_WEIGHT
                 evidence.append(f"文件名命中 {cat}: {target_spec.original_path.name}")
 
@@ -186,7 +207,7 @@ def classify(
                 scores[cat] += 0.5
         evidence.append(f"目标类型默认: {target_spec.kind} → {defaults}")
 
-    # ── 4. 文件内容信号（如果有 manifest） ──
+    # ── 4. 文件内容/扩展名信号（如果有 manifest；强证据优先于题面弱关键词） ──
     if manifest:
         manifest_text = str(manifest).lower()
         for cat, signals in _FILE_TYPE_SIGNALS.items():
@@ -194,6 +215,13 @@ def classify(
                 if signal.lower() in manifest_text:
                     scores[cat] += _FILE_SIGNAL_WEIGHT
                     evidence.append(f"文件信号命中 {cat}: {signal}")
+                    break
+        # 扩展名强信号（独立于题面文本，文件类型证据优先）
+        for cat, extensions in _EXTENSION_SIGNALS.items():
+            for ext in extensions:
+                if ext in manifest_text:
+                    scores[cat] += _FILE_SIGNAL_WEIGHT
+                    evidence.append(f"扩展名信号命中 {cat}: {ext}")
                     break
 
     # ── 5. 确定 primary ──
@@ -263,14 +291,22 @@ def reclassify(
             scores[cat] = scores.get(cat, 0) + sc
             evidence.append(f"Recon 信号: {cat} +{sc}")
 
-    # Recon 证据中的关键词弱匹配
+    # Recon 证据中的关键词弱匹配（短英文关键词按词边界）
     all_text = " ".join(recon_evidence).lower()
     for cat, keywords in _KEYWORD_WEIGHTS.items():
-        hits = sum(1 for kw in keywords if kw in all_text)
+        hits = sum(1 for kw in keywords if _keyword_matches(kw, all_text))
         if hits > 0:
             scores[cat] = scores.get(cat, 0) + hits * 0.5
             if hits >= 2:
                 evidence.append(f"Recon 关键词命中 {cat}: {hits} 个")
+
+    # Recon 证据中的文件魔法强信号（ELF/PE/PCAP 等，优先于弱关键词）
+    for cat, signals in _FILE_TYPE_SIGNALS.items():
+        for signal in signals:
+            if signal.lower() in all_text:
+                scores[cat] = scores.get(cat, 0) + _FILE_SIGNAL_WEIGHT
+                evidence.append(f"Recon 文件信号命中 {cat}: {signal}")
+                break
 
     # 重新排名
     if all(v == 0 for v in scores.values()):

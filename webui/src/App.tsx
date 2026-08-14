@@ -104,7 +104,7 @@ function LiquidGlassLayer() {
             <feDisplacementMap
               in="SourceGraphic"
               in2="liquid-map"
-              scale="54"
+              scale="42"
               xChannelSelector="R"
               yChannelSelector="G"
             />
@@ -120,7 +120,7 @@ function LiquidGlassLayer() {
             <feDisplacementMap
               in="SourceGraphic"
               in2="liquid-map-soft"
-              scale="24"
+              scale="18"
               xChannelSelector="R"
               yChannelSelector="G"
             />
@@ -353,7 +353,8 @@ const TOOL_LABELS: Record<string, string> = {
   ListPlan: "查看计划",
 };
 
-type EventStore = {
+export type EventStore = {
+  sessionId: string;
   items: Event[];
   toolItems: Event[];
   streamIndex: Map<string, number>;
@@ -362,8 +363,9 @@ type EventStore = {
   toolListIndex: Map<string, number>;
 };
 
-function emptyEventStore(): EventStore {
+export function emptyEventStore(sessionId = ""): EventStore {
   return {
+    sessionId,
     items: [],
     toolItems: [],
     streamIndex: new Map(),
@@ -375,6 +377,7 @@ function emptyEventStore(): EventStore {
 
 function cloneEventStore(store: EventStore): EventStore {
   return {
+    sessionId: store.sessionId,
     items: [...store.items],
     toolItems: [...store.toolItems],
     streamIndex: new Map(store.streamIndex),
@@ -384,20 +387,20 @@ function cloneEventStore(store: EventStore): EventStore {
   };
 }
 
-function mergeEventInto(store: EventStore, value: Event): void {
+export function mergeEventInto(store: EventStore, value: Event): void {
   const event = safeEvent(value);
   const kind = kindOf(event);
   const data = dataOf(event);
-  const agent = String(event.agent_name || event.agent || "system");
+  const agent = agentOf(event).name;
   const family =
     kind === "stream_snapshot"
       ? String(data.stream_type || "text")
       : kind.startsWith("thinking_")
         ? "thinking"
         : "text";
-  const streamKey = String(
-    data.block_id || data.reply_id || data._streamKey || event._streamKey || `${agent}:${family}`,
-  );
+  const explicitStreamKey =
+    data.block_id || data.reply_id || data._streamKey || event._streamKey;
+  const streamKey = String(explicitStreamKey || `${agent}:${family}`);
   const familyKey = `${agent}:${family}`;
 
   if (["plan_updated", "target_info"].includes(kind)) return;
@@ -413,7 +416,10 @@ function mergeEventInto(store: EventStore, value: Event): void {
   }
 
   if (kind === "stream_snapshot") {
-    const index = store.streamIndex.get(streamKey) ?? store.familyIndex.get(familyKey) ?? -1;
+    const index =
+      store.streamIndex.get(streamKey) ??
+      (!explicitStreamKey ? store.familyIndex.get(familyKey) : undefined) ??
+      -1;
     const snapshot: Event = {
       ...event,
       event_type: `${family}_stream`,
@@ -436,6 +442,22 @@ function mergeEventInto(store: EventStore, value: Event): void {
   }
 
   if (["text_start", "thinking_start"].includes(kind)) {
+    // 同一 Agent 的上一块可能因 task.cancel() 没有及时收到 end。新块必须
+    // 使用自己的 block_id，不能复用 family 索引覆盖上一条已有内容。
+    const previousFamilyIndex = store.familyIndex.get(familyKey);
+    if (previousFamilyIndex !== undefined) {
+      const previous = store.items[previousFamilyIndex];
+      if (previous && kindOf(previous).endsWith("_stream")) {
+        store.items[previousFamilyIndex] = {
+          ...previous,
+          event_type: `${family}_end`,
+          interrupted: true,
+        };
+        const previousKey = String(previous._streamKey || "");
+        if (previousKey) store.streamIndex.delete(previousKey);
+      }
+      store.familyIndex.delete(familyKey);
+    }
     const index = store.items.length;
     store.items.push({ ...event, content: "", _streamKey: streamKey, _family: family });
     store.streamIndex.set(streamKey, index);
@@ -444,7 +466,12 @@ function mergeEventInto(store: EventStore, value: Event): void {
   }
 
   if (["text_delta", "thinking_delta", "text_end", "thinking_end"].includes(kind)) {
-    const index = store.streamIndex.get(streamKey) ?? store.familyIndex.get(familyKey) ?? -1;
+    // 事件携带 block/reply id 时只能命中同一块；family 回退仅用于旧版无 id
+    // 事件。否则恢复快照会覆盖同 Agent 已完成的上一条消息。
+    const index =
+      store.streamIndex.get(streamKey) ??
+      (!explicitStreamKey ? store.familyIndex.get(familyKey) : undefined) ??
+      -1;
     const isEnd = kind.endsWith("_end");
     const full = String(data.full_text || "");
     const delta = String(data.delta || "");
@@ -461,8 +488,14 @@ function mergeEventInto(store: EventStore, value: Event): void {
         _streamKey: streamKey,
         _family: family,
       };
-      store.streamIndex.set(streamKey, index);
-      store.familyIndex.set(familyKey, index);
+      if (isEnd) {
+        store.streamIndex.delete(streamKey);
+        if (store.familyIndex.get(familyKey) === index)
+          store.familyIndex.delete(familyKey);
+      } else {
+        store.streamIndex.set(streamKey, index);
+        store.familyIndex.set(familyKey, index);
+      }
       return;
     }
     const content = full || delta || eventText(event);
@@ -475,8 +508,10 @@ function mergeEventInto(store: EventStore, value: Event): void {
       _streamKey: streamKey,
       _family: family,
     });
-    store.streamIndex.set(streamKey, nextIndex);
-    store.familyIndex.set(familyKey, nextIndex);
+    if (!isEnd) {
+      store.streamIndex.set(streamKey, nextIndex);
+      store.familyIndex.set(familyKey, nextIndex);
+    }
     return;
   }
 
@@ -526,8 +561,8 @@ function mergeEventInto(store: EventStore, value: Event): void {
   store.items.push(event);
 }
 
-function normalizeEvents(values: Event[]): EventStore {
-  const store = emptyEventStore();
+function normalizeEvents(values: Event[], sessionId = ""): EventStore {
+  const store = emptyEventStore(sessionId);
   values.forEach((event) => mergeEventInto(store, event));
   return store;
 }
@@ -566,7 +601,11 @@ function mergeEventBatch(store: EventStore, values: Event[]): EventStore {
 }
 
 function mapEventStore(store: EventStore, mapper: (event: Event) => Event): EventStore {
-  return normalizeEvents(store.items.map(mapper));
+  return normalizeEvents(store.items.map(mapper), store.sessionId);
+}
+
+export function eventsForSession(store: EventStore, sessionId: string): Event[] {
+  return store.sessionId === sessionId ? store.items : [];
 }
 
 const MarkdownContent = memo(function MarkdownContent({ children }: { children: string }) {
@@ -1800,7 +1839,10 @@ function ConsoleApp() {
     () => sessions.find((s) => s.id === active),
     [sessions, active],
   );
-  const events = eventStore.items;
+  // active 在 render 阶段已经变化、清空 effect 尚未运行时，也绝不能渲染
+  // 上一个会话的仓库。sessionId 是 EventStore 的硬隔离边界。
+  const events = eventsForSession(eventStore, active);
+  const toolEvents = eventStore.sessionId === active ? eventStore.toolItems : [];
   const phase = String(detail.phase || current?.phase || "");
   const modelLevel = String(
     detail.model_level || detail.model || current?.model_level || current?.model || "Min",
@@ -1867,7 +1909,8 @@ function ConsoleApp() {
     if (!active) return;
     const controller = new AbortController();
     autoScroll.current = autoScrollEnabledRef.current;
-    setEventStore(emptyEventStore());
+    const sessionId = active;
+    setEventStore(emptyEventStore(sessionId));
     setVisibleCount(120);
     visibleCountRef.current = 120;
     setHistoryHasMore(false);
@@ -1876,15 +1919,23 @@ function ConsoleApp() {
     setDetail({});
     setPendingApproval(null);
     api
-      .session(active)
-      .then((r) =>
-        setDetail({ ...r, ...((r.mission_state as Mission) || {}) }),
-      )
+      .session(sessionId)
+      .then((r) => {
+        if (
+          !controller.signal.aborted &&
+          activeSessionRef.current === sessionId
+        ) setDetail({ ...r, ...((r.mission_state as Mission) || {}) });
+      })
       .catch(() => {});
     api
-      .approval(active)
+      .approval(sessionId)
       .then((result) => {
-        if (!controller.signal.aborted && result.pending && result.event)
+        if (
+          !controller.signal.aborted &&
+          activeSessionRef.current === sessionId &&
+          result.pending &&
+          result.event
+        )
           setPendingApproval(result.event);
       })
       .catch(() => {});
@@ -1897,7 +1948,11 @@ function ConsoleApp() {
         if (controller.signal.aborted || !pendingEvents.length) return;
         const batch = pendingEvents;
         pendingEvents = [];
-        setEventStore((currentEvents) => mergeEventBatch(currentEvents, batch));
+        setEventStore((currentEvents) =>
+          currentEvents.sessionId === sessionId
+            ? mergeEventBatch(currentEvents, batch)
+            : currentEvents,
+        );
       };
       const enqueueEvent = (event: Event) => {
         pendingEvents.push(event);
@@ -1911,8 +1966,11 @@ function ConsoleApp() {
         }
       };
       try {
-        const history = await api.messages(active, { limit: 200 });
-        if (controller.signal.aborted) return;
+        const history = await api.messages(sessionId, { limit: 200 });
+        if (
+          controller.signal.aborted ||
+          activeSessionRef.current !== sessionId
+        ) return;
         const historyEvents = history.messages || [];
         afterSeq = historyEvents.reduce(
           (maximum, event) => Math.max(maximum, Number(event.seq || 0)),
@@ -1921,17 +1979,25 @@ function ConsoleApp() {
         oldestSeqRef.current = history.oldestSeq;
         setHistoryHasMore(history.hasMore);
         setEventStore(
-          normalizeEvents([...historyEvents, ...(history.snapshots || [])]),
+          normalizeEvents(
+            [...historyEvents, ...(history.snapshots || [])],
+            sessionId,
+          ),
         );
       } catch (err) {
         if (!controller.signal.aborted) toast.error(String(err));
       }
       try {
         for await (const event of stream(
-          active,
+          sessionId,
           controller.signal,
           afterSeq,
         )) {
+          if (
+            controller.signal.aborted ||
+            activeSessionRef.current !== sessionId ||
+            (event.session_id && String(event.session_id) !== sessionId)
+          ) continue;
           enqueueEvent(event);
           const payload = dataOf(event);
           const eventKind = kindOf(event);
@@ -1951,7 +2017,7 @@ function ConsoleApp() {
           )
             setSessions((currentSessions) =>
               currentSessions.map((session) =>
-                session.id === active
+                session.id === sessionId
                   ? {
                       ...session,
                       is_live: false,
@@ -2036,7 +2102,12 @@ function ConsoleApp() {
         const olderEvents = page.messages || [];
         if (olderEvents.length) {
           setEventStore((currentStore) =>
-            normalizeEvents([...olderEvents, ...currentStore.items]),
+            currentStore.sessionId === sessionId
+              ? normalizeEvents(
+                  [...olderEvents, ...currentStore.items],
+                  sessionId,
+                )
+              : currentStore,
           );
           const nextVisibleCount = visibleCountRef.current + olderEvents.length;
           visibleCountRef.current = nextVisibleCount;
@@ -2090,21 +2161,25 @@ function ConsoleApp() {
           await api.send(item.sessionId, item.content);
           if (activeSessionRef.current === item.sessionId) {
             setEventStore((currentEvents) =>
-              mapEventStore(currentEvents, (event) =>
-                event.client_id === item.clientId
-                  ? { ...event, delivery_state: "sent" }
-                  : event,
-              ),
+              currentEvents.sessionId === item.sessionId
+                ? mapEventStore(currentEvents, (event) =>
+                    event.client_id === item.clientId
+                      ? { ...event, delivery_state: "sent" }
+                      : event,
+                  )
+                : currentEvents,
             );
           }
         } catch (err) {
           if (activeSessionRef.current === item.sessionId) {
             setEventStore((currentEvents) =>
-              mapEventStore(currentEvents, (event) =>
-                event.client_id === item.clientId
-                  ? { ...event, delivery_state: "failed" }
-                  : event,
-              ),
+              currentEvents.sessionId === item.sessionId
+                ? mapEventStore(currentEvents, (event) =>
+                    event.client_id === item.clientId
+                      ? { ...event, delivery_state: "failed" }
+                      : event,
+                  )
+                : currentEvents,
             );
           }
           toast.error(`指令发送失败：${String(err)}`);
@@ -2130,15 +2205,18 @@ function ConsoleApp() {
     // 操作员仍可连续补充多条情报，队列会按顺序提交给后端。
     outgoingQueueRef.current.push({ sessionId, content, clientId });
     setOutgoingQueue([...outgoingQueueRef.current]);
-    setEventStore((currentEvents) =>
-      mergeEventBatch(currentEvents, [{
+    setEventStore((currentEvents) => {
+      const sessionStore = currentEvents.sessionId === sessionId
+        ? currentEvents
+        : emptyEventStore(sessionId);
+      return mergeEventBatch(sessionStore, [{
         event_type: "user_message",
         agent_name: "user",
         content,
         client_id: clientId,
         delivery_state: "queued",
-      }]),
-    );
+      }]);
+    });
     setText("");
     void flushOutgoing();
   };
@@ -2524,7 +2602,7 @@ function ConsoleApp() {
                   })}
               </div>
             </section>
-            <ToolHistoryPanel events={eventStore.toolItems} />
+            <ToolHistoryPanel events={toolEvents} />
             <PlanPanel mission={detail} phase={phase} />
           </div>
         </aside>

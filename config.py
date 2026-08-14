@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
+_WARNED_REPEAT_PENALTIES: set[float] = set()
 
 
 def _load_dotenv(dotenv_path: str | Path = ".env") -> None:
@@ -68,8 +73,8 @@ class RuntimeConfig:
     qwen_base_url: str = "http://10.8.128.100:8200/v1"
     qwen_model: str = "/mnt/nvme0n1p1/llama.cppModels/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
     # llama.cpp repeat_penalty：>1.0 惩罚重复 token，越高抑制越强。
-    # 默认调高以抑制 Qwen 输出残缺/重复的 <tool_call> 标签等抽风行为。
-    qwen_repeat_penalty: float = 1.3
+    # 默认保持温和惩罚；显式配置超过 1.2 仅告警，不静默篡改操作员配置。
+    qwen_repeat_penalty: float = 1.08
 
     # ── RAG embedding (OpenAI compatible) ──
     # 留空时知识库功能以“未配置”状态降级，不影响主任务系统启动。
@@ -81,9 +86,31 @@ class RuntimeConfig:
 
     command_timeout: int = 300
 
+    # ── Workspace v2 模式（v0.3.0）──
+    # local: 新会话默认使用按 (user_id, session_id) 隔离的 LocalWorkspace；
+    # legacy: 旧行为（全局 WorkDir），仅用于打开旧会话，不新建 Workspace v2。
+    workspace_mode: str = "local"
+
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
         _load_dotenv()
+        workspace_mode = os.getenv("LINGSHU_WORKSPACE_MODE", "local").strip().lower()
+        if workspace_mode not in {"local", "legacy"}:
+            workspace_mode = "local"
+        repeat_penalty_raw = os.getenv("QWEN_REPEAT_PENALTY")
+        qwen_repeat_penalty = float(repeat_penalty_raw or "1.08")
+        if qwen_repeat_penalty <= 0:
+            raise ValueError("QWEN_REPEAT_PENALTY 必须大于 0")
+        if (
+            repeat_penalty_raw is not None
+            and qwen_repeat_penalty > 1.2
+            and qwen_repeat_penalty not in _WARNED_REPEAT_PENALTIES
+        ):
+            logger.warning(
+                "QWEN_REPEAT_PENALTY=%s 超过建议上限 1.2；保留显式配置，不自动修改",
+                qwen_repeat_penalty,
+            )
+            _WARNED_REPEAT_PENALTIES.add(qwen_repeat_penalty)
         return cls(
             # DeepSeek
             deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", "").strip(),
@@ -107,10 +134,7 @@ class RuntimeConfig:
                 "QWEN_MODEL",
                 "/mnt/nvme0n1p1/llama.cppModels/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
             ),
-            # repeat_penalty 限制在 [1.0, 2.0]，防止误配置导致输出乱码
-            qwen_repeat_penalty=max(
-                1.0, min(float(os.getenv("QWEN_REPEAT_PENALTY", "1.3")), 2.0),
-            ),
+            qwen_repeat_penalty=qwen_repeat_penalty,
             embedding_api_key=os.getenv("LINGSHU_EMBEDDING_API_KEY", "").strip(),
             embedding_base_url=os.getenv("LINGSHU_EMBEDDING_BASE_URL", "").strip().rstrip("/"),
             embedding_model=os.getenv("LINGSHU_EMBEDDING_MODEL", "").strip(),
@@ -119,6 +143,8 @@ class RuntimeConfig:
             in ("1", "true", "yes", "on"),
             # 通用
             command_timeout=max(10, min(int(os.getenv("LINGSHU_COMMAND_TIMEOUT", "300")), 600)),
+            # Workspace 模式：默认 local；legacy 仅用于打开旧会话
+            workspace_mode=workspace_mode,
         )
 
     def embedding_error(self) -> str | None:

@@ -1,5 +1,5 @@
 # Core Framework + Agent Service + async SQL persistence
-agentscope[service,storage-sql,rag,vdb-milvus]==2.0.5
+agentscope[service,storage-sql,rag,vdb-milvus]==2.0.6
 aiosqlite>=0.20.0
 reportlab>=4.2,<5
 
@@ -13,6 +13,7 @@ passlib[bcrypt]>=1.7.4
 
 # HTTP Client (AutoTest CTF2 client)
 httpx>=0.26.0
+jsonschema>=4.0
 
 # Binary Analysis & Exploit Development (IntelPwn)
 pwntools>=4.12.0

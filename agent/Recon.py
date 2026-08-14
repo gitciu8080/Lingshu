@@ -9,11 +9,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentscope.agent import Agent, ReActConfig
-from agentscope.tool import Toolkit
 from Tools.CVE_Search import create_cve_search_tool
 from Tools.OCR import create_tesseract_ocr_tool
 from Tools.ScopeRegistry import ScopeRegistry
-from Tools.tooling import create_scoped_shell_tool
+from Tools.TonyDec import create_tonydec_tool
+from Tools.tooling import StrictJSONToolkit, create_scoped_shell_tool
 from agent.experts import ARTIFACT_TRIAGE_EXPERT, NETWORK_RECON_EXPERT
 
 # ---------------------------------------------------------------------------
@@ -52,9 +52,14 @@ def create_network_recon_agent(
     timeout: int,
     scope_registry: ScopeRegistry | None = None,
     max_iters: int = 20,
+    *,
+    offloader=None,
+    context_config=None,
+    state=None,
+    artifact_root: str | Path | None = None,
 ) -> Agent:
-    toolkit = Toolkit(
-        tools=[create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry), create_cve_search_tool()],
+    toolkit = StrictJSONToolkit(
+        tools=[create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root), create_cve_search_tool()],
     )
     return Agent(
         name=NETWORK_RECON_EXPERT,
@@ -62,6 +67,9 @@ def create_network_recon_agent(
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
+        offloader=offloader,
+        context_config=context_config,
+        state=state,
     )
 
 
@@ -77,9 +85,11 @@ ARTIFACT_TRIAGE_SYS_PROMPT = """你是 CTF 文件分析专家（ArtifactTriage�
 - 先获取文件列表，识别文件类型（ELF/PE/PCAP/镜像/脚本/加密文件等）。
 - 对 ELF 执行 checksec/readelf；对 PCAP 执行 tcpdump/capinfos；对压缩包执行 file/unzip -l。
 - 对图片、截图或扫描文档可调用 ocr_image，使用 Tesseract 提取文本。
+- 若文件头完整匹配 6688ff4f6886005611611618，调用 tonydec 解码到新的输出路径，
+  再用 file/xxd/strings 确认真实格式；未匹配时不得猜测为 TonyEnc。
 - 绝不直接执行二进制文件（./chall 等）— 这属于 Attack 阶段的职责。
 - 不执行漏洞利用、口令爆破或破坏性操作。
-- 不修改文件、不联网。
+- 除 tonydec 写入独立解码产物外，不修改原文件；不联网。
 
 **关键：分析完成后必须立即输出最终中文分析报告并停止所有操作。
 严禁反复分析或继续调用工具。报告即完成。**
@@ -96,12 +106,18 @@ def create_artifact_triage_agent(
     project_dir: str | Path,
     timeout: int,
     max_iters: int = 20,
+    *,
+    offloader=None,
+    context_config=None,
+    state=None,
+    artifact_root: str | Path | None = None,
 ) -> Agent:
     """创建文件分析 Agent，工作目录约束在 workdir 内。"""
-    toolkit = Toolkit(
+    toolkit = StrictJSONToolkit(
         tools=[
-            create_scoped_shell_tool(str(workdir), project_dir, timeout),
+            create_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root),
             create_tesseract_ocr_tool(workdir, timeout=min(timeout, 90)),
+            create_tonydec_tool(workdir),
         ],
     )
     return Agent(
@@ -110,6 +126,9 @@ def create_artifact_triage_agent(
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
+        offloader=offloader,
+        context_config=context_config,
+        state=state,
     )
 
 

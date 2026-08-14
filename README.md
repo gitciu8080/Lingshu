@@ -480,6 +480,7 @@ Lingshu/
 | `QWEN_API_KEY` | `sk-placeholder` | Qwen API 密钥 |
 | `QWEN_BASE_URL` | `http://10.8.128.108:8200/v1` | Qwen API 地址 |
 | `QWEN_MODEL` | `…Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf` | Qwen 模型名称 |
+| `QWEN_REPEAT_PENALTY` | `1.08` | llama.cpp 重复惩罚；显式超过 1.2 时告警但保留原值 |
 | `LINGSHU_COMMAND_TIMEOUT` | `300` | Shell 命令超时秒数（10-600） |
 
 ---

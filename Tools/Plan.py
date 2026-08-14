@@ -7,7 +7,7 @@
 - 全部操作写入审计链（mission.record）。
 """
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypedDict
 
 from TaskState import MissionState, MissionStore
 from Tools.tooling import AllowedFunctionTool
@@ -15,6 +15,14 @@ from Tools.tooling import AllowedFunctionTool
 # 计划条目允许的阶段归属与状态取值
 PLAN_PHASES = {"recon", "analysis", "exploitation", "post_exploitation", "complete"}
 PLAN_STATUSES = {"pending", "in_progress", "completed", "failed", "skipped"}
+
+
+class PlanDraft(TypedDict):
+    """Brain 一次性提交的最小结构化计划条目。"""
+
+    id: int
+    content: str
+    phase: str
 
 
 def push_plan_update(
@@ -42,9 +50,13 @@ def _commit(
     action: str,
     **detail: Any,
 ) -> None:
-    """统一收尾：审计 → 持久化 → 推送前端。"""
+    """统一收尾：审计 → 检查点持久化 → 推送前端。
+
+    计划变更写安全检查点（权威 JSON + 工作区 checkpoint.json 镜像），
+    崩溃恢复从最近一次计划变更继续。
+    """
     mission.record(actor, action, **detail)
-    store.save(mission)
+    store.checkpoint(mission, f"plan_{action}")
     push_plan_update(mission, event_callback)
 
 
@@ -108,6 +120,111 @@ def create_add_plan_tool(
         return f"[已添加] {item_id} [{phase}] {content}（计划共 {len(items)} 项）"
 
     return AllowedFunctionTool(AddPlan, is_concurrency_safe=False)
+
+
+def create_submit_plan_tool(
+    mission: MissionState,
+    store: MissionStore,
+    event_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    fallback_on_invalid: bool = False,
+) -> AllowedFunctionTool:
+    """创建 Brain 专用的原子批量计划提交工具。
+
+    ``fallback_on_invalid`` 仅供工具调用稳定性较弱的模型启用：首次提交
+    不能通过基础校验时，写入一份保守的确定性计划，避免模型围绕空参数
+    反复调用同一工具直到耗尽迭代次数。
+    """
+
+    def _fallback(reason: str) -> str:
+        if not fallback_on_invalid or mission.plan_items:
+            return reason
+        fallback_items = [
+            ("收集授权目标的基础事实与可复核证据", "recon"),
+            ("基于侦察证据确认题型并评估可行攻击路径", "analysis"),
+            ("在人工批准后执行最小化验证与利用", "exploitation"),
+            ("提取并核验任务目标产物，保留完整证据链", "post_exploitation"),
+            ("整理结果并如实完成任务收尾", "complete"),
+        ]
+        items = [
+            {
+                "id": f"p{index}",
+                "content": content,
+                "phase": phase,
+                "status": "pending",
+                "evidence": "",
+                "origin": "system",
+            }
+            for index, (content, phase) in enumerate(fallback_items, start=1)
+        ]
+        mission.plan_items.extend(items)
+        _commit(
+            mission,
+            store,
+            event_callback,
+            "system",
+            "plan_batch_fallback_submitted",
+            reason=reason,
+            items=items,
+            item_count=len(items),
+        )
+        return (
+            "[已降级提交] 模型提交的计划参数无效，系统已登记 5 项保守计划；"
+            "请直接输出简短计划正文，不要再次调用 SubmitPlan。"
+        )
+
+    def SubmitPlan(items: list[PlanDraft]) -> str:
+        """一次性提交完整的结构化作战计划。
+
+        Args:
+            items: 4~8 个计划条目；每项包含 id（从 1 连续递增）、content
+                （一句话目标）和 phase（recon/analysis/exploitation/
+                post_exploitation/complete）。
+        """
+        if not 4 <= len(items) <= 8:
+            return _fallback(f"[拒绝] 计划必须包含 4~8 项，收到 {len(items)} 项")
+        normalized: list[dict[str, Any]] = []
+        expected_ids = list(range(1, len(items) + 1))
+        actual_ids: list[int] = []
+        for index, raw in enumerate(items, start=1):
+            item_id = raw.get("id")
+            content = str(raw.get("content", "")).strip()
+            phase = str(raw.get("phase", "")).strip()
+            if not isinstance(item_id, int) or isinstance(item_id, bool):
+                return _fallback(f"[拒绝] 第 {index} 项 id 必须是整数")
+            actual_ids.append(item_id)
+            if not content:
+                return _fallback(f"[拒绝] 第 {index} 项 content 不能为空")
+            if phase not in PLAN_PHASES:
+                return _fallback(f"[拒绝] 第 {index} 项 phase={phase or '(空)'} 非法")
+            normalized.append({
+                "id": f"p{item_id}",
+                "content": content,
+                "phase": phase,
+                "status": "pending",
+                "evidence": "",
+                "origin": "brain",
+            })
+        if actual_ids != expected_ids:
+            return _fallback(
+                f"[拒绝] id 必须从 1 连续递增，期望 {expected_ids}，收到 {actual_ids}",
+            )
+        if mission.plan_items:
+            return "[拒绝] 结构化计划已经存在；请由 Orchestrator 使用计划维护工具调整"
+
+        # 所有条目校验通过后再一次性写入，避免半份计划被持久化。
+        mission.plan_items.extend(normalized)
+        _commit(
+            mission,
+            store,
+            event_callback,
+            "brain",
+            "plan_batch_submitted",
+            items=normalized,
+            item_count=len(normalized),
+        )
+        return f"[已提交] 批量登记 {len(normalized)} 项结构化计划"
+
+    return AllowedFunctionTool(SubmitPlan, is_concurrency_safe=False)
 
 
 def create_update_plan_tool(

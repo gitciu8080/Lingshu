@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from agentscope.message import AssistantMsg, UserMsg
+from agentscope.event import TextBlockDeltaEvent, TextBlockStartEvent
 from agentscope.credential import OpenAICredential
 from pydantic import SecretStr
 
@@ -264,6 +266,40 @@ class ExpertRosterTest(unittest.IsolatedAsyncioTestCase):
             if event == "message" and data.get("agent") == "Mike - WEB渗透专家"
         )
         self.assertLess(first_join, first_expert_output)
+
+    async def test_cancelled_stream_closes_partial_attack_message(self) -> None:
+        delta_sent = asyncio.Event()
+        never_finishes = asyncio.Event()
+
+        async def reply_stream(**_kwargs):
+            yield TextBlockStartEvent(reply_id="reply-attack", block_id="block-attack")
+            yield TextBlockDeltaEvent(
+                reply_id="reply-attack",
+                block_id="block-attack",
+                delta="已确认目标存在注入点",
+            )
+            delta_sent.set()
+            await never_finishes.wait()
+
+        agent = SimpleNamespace(
+            name="Mike - WEB渗透专家",
+            reply_stream=reply_stream,
+        )
+        events: list[tuple[str, dict]] = []
+        task = asyncio.create_task(
+            stream_agent_reply(
+                agent,
+                on_event=lambda event, **data: events.append((event, data)),
+            ),
+        )
+        await delta_sent.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        event_names = [event for event, _ in events]
+        self.assertEqual(event_names, ["text_start", "text_delta", "text_end"])
+        self.assertTrue(events[-1][1]["interrupted"])
 
     def test_web_plan_selects_web_attack_expert(self) -> None:
         self.assertEqual(
