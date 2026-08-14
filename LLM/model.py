@@ -212,6 +212,10 @@ class QwenChatModel(OpenAIChatModel):
     calls retain the configured thinking level.
     """
 
+    def __init__(self, *args: Any, tool_call_mode: str = "simple", **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.tool_call_mode = tool_call_mode
+
     async def _call_api(
         self,
         model_name: str,
@@ -224,10 +228,18 @@ class QwenChatModel(OpenAIChatModel):
         template_kwargs = dict(
             extra_body.get("chat_template_kwargs") or {},
         )
+        if not tools:
+            # llama.cpp 的 Qwen 模板读取此变量，而非 OpenAI 参数中的
+            # thinking_enable；显式传递才能使 Low/Min/Max 的文本行为生效。
+            template_kwargs["enable_thinking"] = bool(
+                getattr(self.parameters, "thinking_enable", True),
+            )
         if tools:
             template_kwargs["enable_thinking"] = False
-            # 工具调用固定低温，降低函数名/参数结构漂移概率。
-            generate_kwargs["temperature"] = 0.1
+            # 简单模式固定低温，降低函数名/参数结构漂移概率；标准模式保留
+            # 调用方温度，供工具 JSON 能力更强的模型使用嵌套批量参数。
+            if self.tool_call_mode == "simple":
+                generate_kwargs["temperature"] = 0.1
             # 当前 Qwen GGUF 的模板声明支持并行工具调用，但本项目的计划、
             # 状态流转工具均是有序状态机。显式禁止并行，避免模型在同一轮
             # 交错 DeletePlan / UpdatePlan 等相互依赖的操作。
@@ -251,7 +263,7 @@ class QwenChatModel(OpenAIChatModel):
 def DeepSeek(
         Ver: str = "Min",
         think: bool = True,
-        temperature: float = 0.7,
+        temperature: float | None = None,
         web_search: bool | None = None,
         config: RuntimeConfig | None = None,
 ) -> Union[DeepSeekResponsesModel, DeepSeekChatModel]:
@@ -276,6 +288,13 @@ def DeepSeek(
         DeepSeekResponsesModel（默认 Flash / Pro）或 DeepSeekChatModel 实例。
     """
     runtime = config or RuntimeConfig.from_env()
+    settings = runtime.model_settings("deepseek")
+    temperature = float(settings.get("temperature", 0.7)) if temperature is None else temperature
+    max_tokens = int(settings.get("max_tokens", 0) or 0) or None
+    max_retries = int(settings.get("max_retries", 3))
+    context_size = int(settings.get("context_size", 128000))
+    timeout_seconds = float(settings.get("timeout_seconds", 600))
+    think = think and bool(settings.get("thinking_enabled", True))
     if web_search is None:
         web_search = runtime.deepseek_web_search
 
@@ -300,10 +319,13 @@ def DeepSeek(
                 thinking_enable=think,
                 reasoning_effort=_effort,
                 temperature=temperature,
+                top_p=float(settings.get("top_p", 0.95)),
+                max_tokens=max_tokens,
             ),
             stream=True,
-            max_retries=3,
-            client_kwargs={"timeout": 600.0},
+            max_retries=max_retries,
+            context_size=context_size,
+            client_kwargs={"timeout": timeout_seconds},
         )
 
     if not think:
@@ -322,20 +344,22 @@ def DeepSeek(
         ),
         model=runtime.model_name(Ver, provider="deepseek"),
         parameters=DeepSeekResponsesModel.Parameters(
-            thinking_enable=True,
+            thinking_enable=think,
             reasoning_effort=_effort,
             temperature=temperature,
+            max_tokens=max_tokens,
         ),
         web_search=web_search,
         stream=True,
-        max_retries=3,
-        client_kwargs={"timeout": 600.0},
+        max_retries=max_retries,
+        context_size=context_size,
+        client_kwargs={"timeout": timeout_seconds},
     )
 
 
 def Qwen(
         Ver: str = "Min",
-        temperature: float = 0.7,
+        temperature: float | None = None,
         config: RuntimeConfig | None = None,
 ) -> OpenAIChatModel:
     """创建 Qwen 模型（llama.cpp OpenAI 兼容 API）。
@@ -344,7 +368,7 @@ def Qwen(
       Low  → 所有调用关闭 thinking
       Min  → 纯文本开启 thinking
       Max  → 纯文本开启 thinking + max_tokens=8192
-      任意带 tools 的调用 → 强制关闭 thinking，温度固定 0.1
+        任意带 tools 的调用 → 强制关闭 thinking；simple 模式温度固定 0.1
 
     Args:
         Ver: 思考级别（Low/Min/Max）。
@@ -352,12 +376,14 @@ def Qwen(
         config: 运行时配置。
     """
     runtime = config or RuntimeConfig.from_env()
+    settings = runtime.model_settings("qwen")
+    temperature = float(settings.get("temperature", 0.3)) if temperature is None else temperature
+    max_tokens = int(settings.get("max_tokens", 0) or 0) or None
     model_name = runtime.model_name(Ver, provider="qwen")
 
-    # 思考级别 → 推理参数
-    # level = _think_levels.get(Ver, _think_levels["Min"])
+    thinking_enable = Ver != "Low" and bool(settings.get("thinking_enabled", True))
 
-    return OpenAIChatModel(
+    return QwenChatModel(
         credential=OpenAICredential(
             api_key=SecretStr(runtime.get_api_key("qwen")),
             base_url=runtime.get_base_url("qwen"),
@@ -366,21 +392,76 @@ def Qwen(
         parameters=OpenAIChatModel.Parameters(
             temperature=temperature,
             reasoning_effort="medium",
-            thinking_enable=True,
-            top_p=0.95,
+            thinking_enable=thinking_enable,
+            top_p=float(settings.get("top_p", 0.95)),
+            max_tokens=max_tokens,
+
 
 
         ),
         stream=True,
-        max_retries=3,
-        client_kwargs={"timeout": 600.0},
+        max_retries=int(settings.get("max_retries", 3)),
+        context_size=int(settings.get("context_size", 128000)),
+        client_kwargs={"timeout": float(settings.get("timeout_seconds", 600))},
+        extra_body={"repeat_penalty": runtime.qwen_repeat_penalty},
+        tool_call_mode=runtime.qwen_tool_call_mode,
+    )
+
+
+def OpenAICompatible(
+        provider: str,
+        Ver: str = "Min",
+        temperature: float | None = None,
+        config: RuntimeConfig | None = None,
+) -> Union[OpenAIResponseModel, OpenAIChatModel]:
+    """创建 Superadmin 注册的通用 OpenAI-compatible Chat Model。"""
+    runtime = config or RuntimeConfig.from_env()
+    provider_config = runtime.custom_llm_configs.get(provider)
+    if not provider_config:
+        raise ValueError(f"模型提供商未启用或不存在: {provider}")
+    settings = runtime.model_settings(provider)
+    temperature = float(settings.get("temperature", 0.7)) if temperature is None else temperature
+    thinking_enable = Ver != "Low" and bool(settings.get("thinking_enabled", True))
+    effort = {"Low": "none", "Min": "medium", "Max": "high"}.get(Ver, "medium")
+    max_tokens = int(settings.get("max_tokens", 0) or 0) or None
+    common = {
+        "credential": OpenAICredential(
+            api_key=SecretStr(runtime.get_api_key(provider)),
+            base_url=runtime.get_base_url(provider),
+        ),
+        "model": runtime.model_name(Ver, provider=provider),
+        "stream": True,
+        "max_retries": int(settings.get("max_retries", 3)),
+        "context_size": int(settings.get("context_size", 128000)),
+        "client_kwargs": {"timeout": float(settings.get("timeout_seconds", 600))},
+    }
+    if provider_config.get("api_style") == "responses":
+        return OpenAIResponseModel(
+            **common,
+            parameters=OpenAIResponseModel.Parameters(
+                temperature=temperature,
+                thinking_enable=thinking_enable,
+                reasoning_effort=effort if thinking_enable else None,
+                max_tokens=max_tokens,
+            ),
+        )
+    return OpenAIChatModel(
+        **common,
+        parameters=OpenAIChatModel.Parameters(
+            temperature=temperature,
+            top_p=float(settings.get("top_p", 0.95)),
+            thinking_enable=thinking_enable,
+            reasoning_effort=effort if thinking_enable else None,
+            max_tokens=max_tokens,
+            parallel_tool_calls=False,
+        ),
     )
 
 
 def create_model(
         provider: str = "deepseek",
         Ver: str = "Min",
-        temperature: float = 0.7,
+        temperature: float | None = None,
         web_search: bool | None = None,
         config: RuntimeConfig | None = None,
 ):
@@ -399,6 +480,10 @@ def create_model(
     """
     if provider == "qwen":
         return Qwen(Ver=Ver, temperature=temperature, config=config)
+    if provider != "deepseek":
+        return OpenAICompatible(
+            provider=provider, Ver=Ver, temperature=temperature, config=config,
+        )
     return DeepSeek(
         Ver=Ver, think=True, temperature=temperature,
         web_search=web_search, config=config,

@@ -21,6 +21,7 @@ top
     python workbench_nss.py --rounds 3
     python workbench_nss.py --loop --api-url http://localhost:8080
     python workbench_nss.py --model Max
+    python workbench_nss_qwen.py --provider qwen --qwen-tool-mode simple
 """
 from __future__ import annotations
 
@@ -226,6 +227,7 @@ async def _start_session(
     goal: str,
     provider: str,
     model: str,
+    qwen_tool_call_mode: str = "simple",
     nss_context: dict | None = None,
 ) -> dict:
     """通过 /api/session/start 创建会话，返回 {session_id, ...}。"""
@@ -239,6 +241,7 @@ async def _start_session(
                 "goal": goal,
                 "provider": provider,
                 "model": model,
+                "qwen_tool_call_mode": qwen_tool_call_mode if provider == "qwen" else None,
                 "nss_context": nss_context,
             },
         )
@@ -318,6 +321,7 @@ async def _solve_attempt(
     attempt: dict,
     provider: str,
     model: str,
+    qwen_tool_call_mode: str,
     retries: int,
 ) -> bool:
     attempt_id = attempt.get("id")
@@ -354,7 +358,7 @@ async def _solve_attempt(
         # 创建 Web 会话（携带 nss_context，使 Orchestrator 可在线提交 Flag）
         try:
             start = await _start_session(
-                api_url, web_token, target, goal, provider, model,
+                api_url, web_token, target, goal, provider, model, qwen_tool_call_mode,
                 nss_context=nss_context,
             )
         except Exception as exc:
@@ -515,6 +519,7 @@ async def _play_round(
     nss_token: str,
     provider: str,
     model: str,
+    qwen_tool_call_mode: str,
     retries: int,
 ) -> bool | None:
     """领取/复用一道题并处理。返回 True 解出 / False 未解出 / None 无题。"""
@@ -546,7 +551,7 @@ async def _play_round(
     print(f"[workbench] 当前题目状态: {state} (reused={data.get('reused', False)})")
     return await _solve_attempt(
         api_url, web_token, nss_client, nss_token,
-        attempt, provider, model, retries,
+        attempt, provider, model, qwen_tool_call_mode, retries,
     )
 
 
@@ -592,6 +597,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider", "-p", default="deepseek", choices=["deepseek", "qwen"],
         help="模型提供商（deepseek 或 qwen）",
     )
+    parser.add_argument(
+        "--qwen-tool-mode", default="simple", choices=["simple", "standard"],
+        help="Qwen 工具调用模式：simple=扁平兼容（推荐 AgentWorld），standard=批量嵌套",
+    )
     return parser
 
 
@@ -599,7 +608,10 @@ async def main() -> None:
     args = build_parser().parse_args()
     nss_token = args.token or os.environ.get("NSSCTF_AGENT_TOKEN") or DEFAULT_TOKEN
     print(f"[workbench] NSSCTF Agent Token: {_mask_token(nss_token)}")
-    print(f"[workbench] 灵枢 Web API: {args.api_url} | 模型: {args.provider}/{args.model}")
+    print(
+        f"[workbench] 灵枢 Web API: {args.api_url} | 模型: {args.provider}/{args.model}"
+        + (f" | 工具模式: {args.qwen_tool_mode}" if args.provider == "qwen" else ""),
+    )
 
     # 登录灵枢 Web 后端
     try:
@@ -619,7 +631,7 @@ async def main() -> None:
             print(f"\n===== {label} =====")
             outcome = await _play_round(
                 args.api_url, web_token, nss_client, nss_token,
-                args.provider, args.model, args.retries,
+                args.provider, args.model, args.qwen_tool_mode, args.retries,
             )
             if outcome is None:
                 break

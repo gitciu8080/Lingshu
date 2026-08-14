@@ -1,4 +1,6 @@
 .env
+data/model_api.key
+data/model_api_configs.json
 .TaskMemory/
 .LongMemory/
 .reasonix/

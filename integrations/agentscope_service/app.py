@@ -96,6 +96,7 @@ class MirrorSessionRequest(BaseModel):
     goal: str = Field(default="获取 Flag", max_length=10000)
     provider: str = Field(default="deepseek", pattern="^(deepseek|qwen)$")
     model: str = Field(default="Min", pattern="^(Low|Min|Max)$")
+    qwen_tool_call_mode: str | None = Field(default=None, pattern="^(simple|standard)$")
 
 
 control_router = APIRouter(prefix="/api/agent-service", tags=["agent-service-control"])

@@ -77,8 +77,11 @@ class QwenModelResolutionTest(unittest.IsolatedAsyncioTestCase):
 
 
 class QwenRequestPolicyTest(unittest.IsolatedAsyncioTestCase):
-    async def _capture(self, level: str, tools=None):
-        model = Qwen(level, temperature=0.37, config=_runtime())
+    async def _capture(self, level: str, tools=None, tool_call_mode: str = "simple"):
+        model = Qwen(
+            level, temperature=0.37,
+            config=_runtime(qwen_tool_call_mode=tool_call_mode),
+        )
         sentinel = object()
         with patch(
             "LLM.model.OpenAIChatModel._call_api",
@@ -105,6 +108,14 @@ class QwenRequestPolicyTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(kwargs["parallel_tool_calls"])
         self.assertEqual(kwargs["reasoning_effort"], "none")
 
+    async def test_standard_tools_keep_call_temperature(self) -> None:
+        kwargs = await self._capture(
+            "Max", tools=[{"type": "function"}], tool_call_mode="standard",
+        )
+        self.assertNotIn("temperature", kwargs)
+        self.assertFalse(kwargs["parallel_tool_calls"])
+        self.assertEqual(kwargs["reasoning_effort"], "none")
+
 
 class QwenRepeatPenaltyTest(unittest.TestCase):
     def test_default_is_108(self) -> None:
@@ -117,6 +128,10 @@ class QwenRepeatPenaltyTest(unittest.TestCase):
             with self.assertLogs("config", level="WARNING"):
                 cfg = RuntimeConfig.from_env()
         self.assertEqual(cfg.qwen_repeat_penalty, 1.35)
+
+    def test_tool_call_mode_comes_from_environment(self) -> None:
+        with patch.dict(os.environ, {"QWEN_TOOL_CALL_MODE": "standard"}, clear=True):
+            self.assertEqual(RuntimeConfig.from_env().qwen_tool_call_mode, "standard")
 
 
 class StrictToolJSONTest(unittest.IsolatedAsyncioTestCase):

@@ -45,6 +45,16 @@ def _mission_options(inputs: Msg | list[Msg] | None) -> dict[str, Any]:
     options = dict(msg.metadata.get("lingshu") or {})
     text = msg.get_text_content() or ""
     goal_text = text.strip() or "获取 Flag"
+    # AgentScope Workbench 的通用聊天界面没有灵枢专属下拉框时，可用
+    # 「Qwen 工具模式: simple|standard」控制工具协议难度。
+    mode_match = re.search(
+        r"(?:qwen\s*)?(?:工具(?:调用)?模式|tool\s*(?:call\s*)?mode)\s*[:：]\s*(simple|standard)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if mode_match and not options.get("qwen_tool_call_mode"):
+        options["qwen_tool_call_mode"] = mode_match.group(1).lower()
+        goal_text = re.sub(mode_match.group(0), "", goal_text, flags=re.IGNORECASE).strip() or "获取 Flag"
     # Web 控制台（AgentScope web_ui 等）发送的纯文本消息不会携带 metadata，
     # 此时从消息文本解析授权目标：支持「目标: IP / target: IP」前缀。
     # 灵枢自家前端仍通过 metadata.lingshu 注入，不触发此回退。
@@ -119,6 +129,7 @@ class LingshuMissionAgent(Agent):
                 goal=str(options.get("goal") or "获取 Flag"),
                 provider=str(options.get("provider") or "deepseek"),
                 model=str(options.get("model_ver") or options.get("model") or "Min"),
+                qwen_tool_call_mode=options.get("qwen_tool_call_mode"),
                 agent="system",
             )
             mission_task = asyncio.create_task(
@@ -127,6 +138,10 @@ class LingshuMissionAgent(Agent):
                     goal=str(options.get("goal") or "获取 Flag"),
                     model_ver=str(options.get("model_ver") or options.get("model") or "Min"),
                     provider=str(options.get("provider") or "deepseek"),
+                    qwen_tool_call_mode=(
+                        str(options["qwen_tool_call_mode"]).lower()
+                        if options.get("qwen_tool_call_mode") is not None else None
+                    ),
                     event_callback=callback,
                     session_id=session_id,
                     input_queue=runtime.input_queue,
