@@ -557,6 +557,7 @@ async def run_mission(
     goal: str,
     model_ver: str = "Min",
     provider: str = "deepseek",
+    qwen_tool_call_mode: str | None = None,
     event_callback: Callable[[str, dict[str, Any]], None] | None = None,
     session_id: str = "",
     input_queue: asyncio.Queue | None = None,
@@ -585,7 +586,9 @@ async def run_mission(
         target: 授权目标，支持 IP / IP:端口 / 主机名 / 文件路径等
         goal: 任务目标描述（默认“获取 Flag”）
         model_ver: 模型思考级别，Low(快速) / Min(默认) / Max(深度推理)
-        provider: 模型提供商，deepseek 或 qwen
+        provider: 模型提供商标识；支持 deepseek、qwen 与 Web 注册的自定义 Provider
+        qwen_tool_call_mode: Qwen 工具调用模式，simple（扁平低难度）或
+            standard（批量嵌套）；None 时读取 QWEN_TOOL_CALL_MODE。
         event_callback: 可选事件回调，用于向外部（如 UI）转发 Agent 事件
         session_id: 会话标识符，由 API 层分配；CLI 模式下默认为空字符串
         input_queue: 用户消息输入队列，支持对话式交互；CLI 模式下默认为 None
@@ -640,6 +643,11 @@ async def run_mission(
     # ── 4. 运行时配置与任务状态初始化 ──
     # RuntimeConfig 从环境变量读取（API Key、命令超时等）
     runtime = RuntimeConfig.from_env()
+    if qwen_tool_call_mode is not None:
+        selected_mode = qwen_tool_call_mode.strip().lower()
+        if selected_mode not in {"simple", "standard"}:
+            raise ValueError("Qwen 工具调用模式仅支持 simple 或 standard")
+        runtime = replace(runtime, qwen_tool_call_mode=selected_mode)
     project_dir = Path(__file__).resolve().parent
     # 任务状态持久化：有 session_id 时使用独立会话路径，否则使用默认路径
     if session_id:
@@ -714,7 +722,10 @@ async def run_mission(
             },
         )
         # 记录任务创建事件并立即持久化（防止后续异常丢失状态）
-        mission.record("system", "mission_created", model=f"{provider}/{model_ver}")
+        mission.record(
+            "system", "mission_created", model=f"{provider}/{model_ver}",
+            qwen_tool_call_mode=(runtime.qwen_tool_call_mode if provider == "qwen" else None),
+        )
         if event_callback is not None:
             mission.bind_phase_callback(
                 lambda previous, current, reason: event_callback(
@@ -890,15 +901,16 @@ async def run_mission(
 
         # 创建共享模型；Qwen 的纯文本温度沿用这里的配置，工具调用由模型
         # 适配层固定为 0.1。
-        qwen_temp = 0.3 if provider == "qwen" else 0.7
-        model = create_model(provider=provider, Ver=model_ver, temperature=qwen_temp, config=runtime)
+        model = create_model(provider=provider, Ver=model_ver, temperature=None, config=runtime)
         # Brain 通过 SubmitPlan 一次原子提交完整计划，避免 Qwen 长工具参数
         # 被拆成多次 AddPlan 后留下半份持久化状态。
         rag_service = get_rag_service(project_dir)
         await rag_service.start()
-        # AgentWorld 等本地 Qwen 对扁平参数工具更可靠；旧版已验证其可用。
-        # DeepSeek 保持原子 SubmitPlan，避免多次写入产生半份计划。
-        qwen_flat_plan_tools = provider == "qwen"
+        # AgentWorld 等本地 Qwen 对扁平参数工具更可靠；标准模式用于验证
+        # 嵌套批量工具协议。DeepSeek 始终保持原子 SubmitPlan。
+        qwen_flat_plan_tools = (
+            provider == "qwen" and runtime.qwen_tool_call_mode == "simple"
+        )
         brain_tools = (
             [create_add_plan_tool(mission, store, event_callback, default_origin="brain")]
             if qwen_flat_plan_tools
@@ -1317,8 +1329,9 @@ def build_parser() -> argparse.ArgumentParser:
     支持参数:
       --target / -t   授权目标（必填）: IP / IP:端口 / 主机名 / 文件路径
       --goal / -g     任务目标描述，默认"获取 Flag"
-      --provider / -p 模型提供商: deepseek(默认) 或 qwen
+      --provider / -p 模型提供商标识，支持 Superadmin 注册的 Provider
       --model / -m    思考级别: Low(快速) / Min(默认) / Max(深度推理)
+      --qwen-tool-mode Qwen 工具协议: simple(兼容) 或 standard(批量嵌套)
     """
     parser = argparse.ArgumentParser(
         description="灵枢 — AgentScope 2.x 多智能体授权安全测试系统",
@@ -1331,14 +1344,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider", "-p",
         default="deepseek",
-        choices=["deepseek", "qwen"],
-        help="模型提供商（deepseek 或 qwen）",
+        help="模型提供商标识（deepseek、qwen 或 Superadmin 注册的自定义 Provider）",
     )
     parser.add_argument(
         "--model", "-m",
         default="Min",
         choices=["Low", "Min", "Max"],
         help="思考级别：Low(快速) / Min(默认) / Max(深度推理)",
+    )
+    parser.add_argument(
+        "--qwen-tool-mode",
+        choices=["simple", "standard"],
+        default=None,
+        help="Qwen 工具调用难度：simple=扁平兼容模式，standard=批量嵌套模式；默认读 QWEN_TOOL_CALL_MODE",
     )
     return parser
 
@@ -1352,7 +1370,10 @@ def main() -> None:
     args = build_parser().parse_args()
     try:
         asyncio.run(
-            run_mission(args.target, args.goal, args.model, args.provider),
+            run_mission(
+                args.target, args.goal, args.model, args.provider,
+                qwen_tool_call_mode=args.qwen_tool_mode,
+            ),
         )
     except (ValueError, RuntimeError) as exc:
         raise SystemExit(f"[配置错误] {exc}") from exc

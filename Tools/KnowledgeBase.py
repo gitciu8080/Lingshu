@@ -63,6 +63,8 @@ class RAGService:
                 model=self.runtime.embedding_model,
                 dimensions=self.runtime.embedding_dimensions,
                 pass_dimensions=self.runtime.embedding_pass_dimensions,
+                max_retries=int(self.runtime.embedding_model_settings.get("max_retries", 3)),
+                context_size=int(self.runtime.embedding_model_settings.get("context_size", 8191)),
             )
             # 兼容端点可能忽略 dimensions 参数，不能直接把配置值当成真实维度。
             # 先用单条探测文本取得实际向量长度，再以真实维度创建/校验 collection。
@@ -97,6 +99,16 @@ class RAGService:
     async def restart(self) -> None:
         """关闭并重新初始化失败的 RAG 服务，供重建接口进行运行时恢复。"""
         await self.close()
+        await self.start()
+
+    async def reload_runtime(self) -> None:
+        """重新读取管理员/环境配置，并用新的嵌入端点重建运行时。"""
+        await self.close()
+        self.runtime = RuntimeConfig.from_env()
+        self.configured_dimensions = self.runtime.embedding_dimensions
+        self.effective_dimensions = None
+        self.collection_dimensions = None
+        self.dimension_migration = None
         await self.start()
 
     def status(self) -> dict[str, Any]:

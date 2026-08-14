@@ -68,6 +68,15 @@ from integrations.agentscope_service import (
 from integrations.agentscope_service.account_events import publish_account_event
 from Tools.KnowledgeBase import get_rag_service
 from Tools.target import normalize_target
+from model_registry import (
+    ModelRegistryError,
+    active_llm_providers,
+    create_model_config,
+    delete_model_config,
+    get_model_config,
+    list_model_configs,
+    update_model_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -847,7 +856,8 @@ async def _summarize_and_generate_report(
 
 async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, goal: str,
                            model_ver: str, provider: str, callback, initial_context: str | None = None,
-                           nss_context: dict | None = None, resume: bool = False):
+                           nss_context: dict | None = None, resume: bool = False,
+                           qwen_tool_call_mode: str | None = None):
     """运行任务并处理清理逻辑。"""
     status_val = "completed"
     phase = "completed"
@@ -859,6 +869,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
         mission_state = await run_mission(
             target=target, goal=goal, model_ver=model_ver,
             provider=provider, event_callback=callback,
+            qwen_tool_call_mode=qwen_tool_call_mode,
             session_id=session_id, input_queue=ctx.input_queue,
             initial_context=initial_context,
             agent_tasks=ctx.agent_tasks,
@@ -1073,8 +1084,12 @@ session_store.init_sessions_db()
 class MissionStartRequest(BaseModel):
     target: str = Field(..., description="授权目标 IP / IP:端口 / 主机名 / 文件路径")
     goal: str = Field(default="获取 Flag", description="任务目标描述")
-    provider: str = Field(default="deepseek", description="模型提供商: deepseek | qwen")
+    provider: str = Field(default="deepseek", pattern="^[a-z][a-z0-9_-]{1,31}$", description="模型提供商标识")
     model: str = Field(default="Min", description="思考级别: Low | Min | Max")
+    qwen_tool_call_mode: str | None = Field(
+        default=None, pattern="^(simple|standard)$",
+        description="Qwen 工具调用难度: simple（扁平兼容）| standard（批量嵌套）",
+    )
     source_session_id: str | None = Field(default=None, description="重跑来源会话ID，用于注入前次任务上下文")
     nss_context: dict | None = Field(default=None, description="NSSCTF Arena 上下文（attempt_id/token/api_base），供 Orchestrator 在线提交 Flag")
 
@@ -1101,6 +1116,36 @@ def _normalize_user_authorized_target(value: str) -> str:
 class ChatMessage(BaseModel):
     content: str
     approval_selection: dict[str, Any] | None = None
+
+
+class ModelRuntimeSettingsPayload(BaseModel):
+    temperature: float = Field(default=0.7, ge=0, le=2)
+    top_p: float = Field(default=0.95, gt=0, le=1)
+    max_tokens: int = Field(default=0, ge=0, le=1048576)
+    max_retries: int = Field(default=3, ge=0, le=10)
+    context_size: int = Field(default=128000, ge=1024, le=10485760)
+    timeout_seconds: float = Field(default=600, ge=1, le=3600)
+    thinking_enabled: bool = True
+
+
+class ModelAPIConfigPayload(BaseModel):
+    """超级管理员维护的模型端点；api_key 为空时编辑操作保留原密钥。"""
+
+    name: str = Field(min_length=2, max_length=80)
+    category: str = Field(pattern="^(llm|embedding)$")
+    provider: str = Field(min_length=2, max_length=32)
+    api_style: str = Field(pattern="^(chat_completions|responses|embeddings)$")
+    base_url: str = Field(min_length=8, max_length=500)
+    api_key: str | None = Field(default=None, max_length=4096)
+    clear_api_key: bool = False
+    model_low: str = Field(default="", max_length=300)
+    model_min: str = Field(default="", max_length=300)
+    model_max: str = Field(default="", max_length=300)
+    model_name: str = Field(default="", max_length=300)
+    dimensions: int = Field(default=0, ge=0, le=65536)
+    pass_dimensions: bool = True
+    enabled: bool = False
+    settings: ModelRuntimeSettingsPayload = Field(default_factory=ModelRuntimeSettingsPayload)
 
 
 # ── 前次任务上下文构建（"再打一次"重跑用）──
@@ -1263,6 +1308,98 @@ async def superadmin_delete_user(user_id: int, current_user: dict = Depends(get_
     return {"message": "用户已删除"}
 
 
+def _model_payload(data: ModelAPIConfigPayload) -> dict[str, Any]:
+    payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+    fields_set = getattr(data, "model_fields_set", getattr(data, "__fields_set__", set()))
+    if "settings" not in fields_set:
+        payload.pop("settings", None)
+    return payload
+
+
+async def _reload_embedding_after_change(category: str) -> dict[str, Any] | None:
+    """嵌入配置保存后热重载 RAG；失败状态随响应返回，不回滚已保存配置。"""
+    if category != "embedding":
+        return None
+    rag = get_rag_service(_PROJECT_ROOT)
+    await rag.reload_runtime()
+    return rag.status()
+
+
+@app.get("/api/superadmin/model-configs")
+async def superadmin_model_configs(
+    category: str | None = None,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_superadmin(current_user)
+    if category not in {None, "llm", "embedding"}:
+        raise HTTPException(status_code=422, detail="category 仅支持 llm 或 embedding")
+    configs = await asyncio.to_thread(list_model_configs, category)
+    return {"configs": configs}
+
+
+@app.get("/api/model-providers")
+async def model_providers(current_user: dict = Depends(get_current_user)):
+    """仅返回 Web 模型注册表中已启用的 Provider。"""
+    del current_user
+    providers: dict[str, dict[str, Any]] = {}
+    for item in await asyncio.to_thread(active_llm_providers):
+        providers[item["provider"]] = {
+            "id": item["provider"], "label": item["name"],
+            "api_style": item["api_style"], "builtin": item["provider"] in {"deepseek", "qwen"},
+        }
+    return {"providers": list(providers.values())}
+
+
+@app.post("/api/superadmin/model-configs", status_code=status.HTTP_201_CREATED)
+async def superadmin_create_model_config(
+    data: ModelAPIConfigPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_superadmin(current_user)
+    payload = _model_payload(data)
+    try:
+        config = await asyncio.to_thread(create_model_config, payload, current_user["id"])
+        rag_status = await _reload_embedding_after_change(config["category"])
+        return {"config": config, "rag_status": rag_status}
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/superadmin/model-configs/{config_id}")
+async def superadmin_update_model_config(
+    config_id: int,
+    data: ModelAPIConfigPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_superadmin(current_user)
+    payload = _model_payload(data)
+    try:
+        config = await asyncio.to_thread(
+            update_model_config, config_id, payload, current_user["id"],
+        )
+        rag_status = await _reload_embedding_after_change(config["category"])
+        return {"config": config, "rag_status": rag_status}
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/superadmin/model-configs/{config_id}")
+async def superadmin_delete_model_config(
+    config_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_superadmin(current_user)
+    existing = await asyncio.to_thread(get_model_config, config_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="模型 API 配置不存在")
+    try:
+        await asyncio.to_thread(delete_model_config, config_id, current_user["id"])
+        rag_status = await _reload_embedding_after_change(existing["category"])
+        return {"message": "模型 API 配置已删除", "rag_status": rag_status}
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 # ── 路由 ──
 @app.get("/", response_class=HTMLResponse)
 @app.get("/index.html", response_class=HTMLResponse)
@@ -1391,6 +1528,14 @@ async def knowledge_reindex(current_user: dict = Depends(get_current_user)):
 @app.post("/api/session/start")
 async def session_start(req: MissionStartRequest, current_user: dict = Depends(get_current_user)):
     """创建并启动新会话。"""
+    enabled_providers = {
+        item["provider"] for item in await asyncio.to_thread(active_llm_providers)
+    }
+    if req.provider not in enabled_providers:
+        raise HTTPException(
+            status_code=422,
+            detail=f"模型提供商未在 Web 管理中启用：{req.provider}",
+        )
     # 用户在“新建任务”中输入的 IP / 域名即为本次任务的初始授权目标。
     # 这里不会触发 ScopeAuditor；该审核器只用于后续发现的新增内网目标。
     authorized_target = _normalize_user_authorized_target(req.target)
@@ -1463,12 +1608,13 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
 
     # 推送启动事件
     callback("mission_start", target=authorized_target, goal=req.goal,
-             provider=req.provider, model=req.model)
+             provider=req.provider, model=req.model, qwen_tool_call_mode=req.qwen_tool_call_mode)
 
     # 创建后台任务
     task = asyncio.create_task(
         _run_and_cleanup(session_id, ctx, authorized_target, req.goal, req.model, req.provider, callback,
-                         initial_context=initial_context, nss_context=req.nss_context)
+                         initial_context=initial_context, nss_context=req.nss_context,
+                         qwen_tool_call_mode=req.qwen_tool_call_mode)
     )
     ctx.task = task
 

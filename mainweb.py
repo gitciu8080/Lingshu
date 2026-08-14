@@ -116,6 +116,7 @@ class MirrorSessionRequest(BaseModel):
     goal: str = Field(default="获取 Flag", max_length=10000)
     provider: str = Field(default="deepseek", pattern="^(deepseek|qwen)$")
     model: str = Field(default="Min", pattern="^(Low|Min|Max)$")
+    qwen_tool_call_mode: str | None = Field(default=None, pattern="^(simple|standard)$")
 
 
 def _agent_id(user_id: str) -> str:
@@ -322,6 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
       --host    服务监听地址，默认 0.0.0.0
       --port / -p  服务监听端口，默认 8000
       --reload  开发模式热重载（检测代码变更自动重启）
+      --qwen-tool-mode Qwen 默认工具调用模式：simple 或 standard
     """
     parser = argparse.ArgumentParser(
         description="灵枢 — AgentScope 2.x 多智能体授权安全测试系统（Web 服务入口）",
@@ -335,6 +337,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--reload", action="store_true",
         help="开发模式热重载（自动检测代码变更并重启）",
     )
+    parser.add_argument(
+        "--qwen-tool-mode",
+        choices=["simple", "standard"],
+        default=None,
+        help="Qwen 默认工具调用模式：simple=扁平兼容，standard=批量嵌套；默认读 QWEN_TOOL_CALL_MODE",
+    )
     return parser
 
 
@@ -345,6 +353,10 @@ def main() -> None:
     本入口用 uvicorn 启动 AgentScope Agent Service 对外提供 Web 控制台。
     """
     args = build_parser().parse_args()
+    # run_mission 在每个新会话读取 RuntimeConfig；在此设置进程环境可同时
+    # 覆盖普通启动与 uvicorn --reload 派生的子进程。
+    if args.qwen_tool_mode is not None:
+        os.environ["QWEN_TOOL_CALL_MODE"] = args.qwen_tool_mode
     # reload 模式下 uvicorn 需要按模块路径导入，因此传字符串 "mainweb:app"
     uvicorn.run(
         "mainweb:app",

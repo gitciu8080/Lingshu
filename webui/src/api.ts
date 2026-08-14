@@ -39,6 +39,44 @@ export type SystemUser = {
   created_at?: string;
   last_login?: string | null;
 };
+export type ModelApiConfig = {
+  id: number;
+  name: string;
+  category: "llm" | "embedding";
+  provider: string;
+  api_style: "chat_completions" | "responses" | "embeddings";
+  base_url: string;
+  has_api_key: boolean;
+  api_key_masked: string;
+  model_low: string;
+  model_min: string;
+  model_max: string;
+  model_name: string;
+  dimensions: number;
+  pass_dimensions: boolean;
+  enabled: boolean;
+  settings: {
+    temperature: number;
+    top_p: number;
+    max_tokens: number;
+    max_retries: number;
+    context_size: number;
+    timeout_seconds: number;
+    thinking_enabled: boolean;
+  };
+  created_at?: string;
+  updated_at?: string;
+};
+export type ModelApiConfigInput = Omit<
+  ModelApiConfig,
+  "id" | "has_api_key" | "api_key_masked" | "created_at" | "updated_at"
+> & { api_key?: string; clear_api_key?: boolean };
+export type ModelProviderOption = {
+  id: string;
+  label: string;
+  api_style: string;
+  builtin: boolean;
+};
 const base = import.meta.env.VITE_API_BASE_URL || "";
 let token = localStorage.getItem("lingshu_token") || "";
 export const auth = {
@@ -85,6 +123,27 @@ export const api = {
     request<{ message: string }>(`/api/superadmin/users/${encodeURIComponent(String(userId))}`, {
       method: "DELETE",
     }),
+  modelConfigs: (category?: "llm" | "embedding") =>
+    request<{ configs: ModelApiConfig[] }>(
+      `/api/superadmin/model-configs${category ? `?category=${category}` : ""}`,
+    ),
+  modelProviders: () =>
+    request<{ providers: ModelProviderOption[] }>("/api/model-providers"),
+  createModelConfig: (data: ModelApiConfigInput) =>
+    request<{ config: ModelApiConfig; rag_status?: Record<string, unknown> }>(
+      "/api/superadmin/model-configs",
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  updateModelConfig: (id: number, data: ModelApiConfigInput) =>
+    request<{ config: ModelApiConfig; rag_status?: Record<string, unknown> }>(
+      `/api/superadmin/model-configs/${encodeURIComponent(String(id))}`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+  deleteModelConfig: (id: number) =>
+    request<{ message: string; rag_status?: Record<string, unknown> }>(
+      `/api/superadmin/model-configs/${encodeURIComponent(String(id))}`,
+      { method: "DELETE" },
+    ),
   sessions: async (offset = 0, limit = 30) => {
     const data = await request<{ sessions?: unknown; has_more?: unknown; next_offset?: unknown }>(
       `/api/sessions?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,

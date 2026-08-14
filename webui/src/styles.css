@@ -475,6 +475,43 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 .tool-arg-value>.tool-args-structured{margin:-3px;border-color:var(--line2)}
 @media(max-width:700px){.tool-arg-row{grid-template-columns:1fr}.tool-arg-name{border-right:0;border-bottom:1px solid var(--line2);padding:6px 8px}.tool-arg-name code{display:none}.tool-arg-value{padding:8px}}
 
+/* Superadmin model endpoint registry (kept independent from Liquid Glass mode). */
+.model-config-overlay{z-index:1200}
+.model-config-modal{position:fixed!important;z-index:1201;inset:50% auto auto 50%!important;margin:0!important;transform:translate(-50%,-50%)!important;width:min(760px,calc(100vw - 28px));max-height:min(760px,calc(100dvh - 24px));overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;background:#151515;border-color:#3a3a3a;color:#eee}
+.model-config-modal>p,.model-config-modal [data-radix-dialog-description]{margin:5px 0 17px;color:#888;font-size:11px}
+.model-config-modal [data-radix-dialog-description] a{color:#d96b6b;text-decoration:none}.model-config-modal [data-radix-dialog-description] a:hover{color:#ff8b8b;text-decoration:underline}
+.model-config-form label{color:#999}
+.model-config-form input,.model-config-form select{background:#0d0d0d;border-color:#3c3c3c;color:#eee}
+.model-config-form input:focus,.model-config-form select:focus{border-color:var(--accent)}
+.model-config-modal .modal-actions .quiet-button{border:1px solid #4a4a4a;background:#202020;color:#d6d6d6;box-shadow:none}
+.model-config-modal .modal-actions .quiet-button:hover{border-color:#777;background:#2a2a2a;color:#fff;filter:none}
+.model-config-modal .modal-actions .quiet-button:focus-visible{outline:2px solid #888;outline-offset:2px}
+.model-runtime-card{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:7px 14px;margin:0 0 14px;padding:11px 13px;border:1px solid #3d3d3d;border-left:3px solid var(--accent);background:#101010}
+.model-runtime-card>span{grid-row:1/3;color:var(--accent);font:800 9px ui-monospace,SFMono-Regular,monospace;letter-spacing:1px;writing-mode:vertical-rl;transform:rotate(180deg)}
+.model-runtime-card b{color:#f2f2f2;font:700 13px ui-monospace,SFMono-Regular,monospace}.model-runtime-card small{grid-column:2/4;color:#777;font:10px ui-monospace,SFMono-Regular,monospace}
+.model-form-section{min-width:0;margin:0 0 12px;padding:7px 14px 12px;border:1px solid #343434;background:#121212}
+.model-form-section legend{padding:0 8px;color:#ddd;font:700 11px ui-monospace,SFMono-Regular,monospace;letter-spacing:.5px}.model-form-section legend i{margin-right:6px;color:var(--accent);font-style:normal}
+.model-config-form label>small{display:block;margin:2px 0 0;color:#696969;font-size:9px;line-height:1.35}
+.field-help{margin:3px 0 8px;color:#777;font-size:10px;line-height:1.5}
+.inline-toggle,.inline-danger{display:flex!important;align-items:flex-start;gap:8px;margin:10px 0 2px!important;padding:9px 10px;border:1px solid #333;background:#0d0d0d}
+.inline-toggle input,.inline-danger input{width:14px!important;height:14px;margin:2px 0 0!important;flex:none;accent-color:var(--accent)}.inline-toggle span{min-width:0}.inline-toggle b,.inline-toggle small{display:block}.inline-toggle b{color:#ddd;font-size:11px}.inline-toggle small{margin-top:2px;color:#777;font-size:9px}.inline-danger{color:#ff777b!important;border-color:#542b2d;background:#1d1112}
+.model-advanced{margin-top:10px;border-top:1px solid #303030}.model-advanced summary{padding:9px 2px 2px;color:#999;font:10px ui-monospace,SFMono-Regular,monospace;cursor:pointer}.model-advanced[open] summary{color:#ddd}
+.model-policy{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:0 0 10px;padding:10px 12px;border:1px dashed #444;background:#0d0d0d}.model-policy>b{margin-right:auto;color:#aaa;font-size:10px}.model-policy>span{padding:3px 6px;border:1px solid #3a3a3a;color:#999;font:8px ui-monospace,SFMono-Regular,monospace}.model-policy>small{flex-basis:100%;color:#666;font-size:9px;line-height:1.45}
+.model-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}
+.model-form-grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.model-switches{display:flex;flex-wrap:wrap;gap:10px 22px;padding:12px 0;margin-top:7px;border-top:1px solid #333}
+.model-switches label{display:flex;align-items:center;gap:7px;margin:0;color:#bbb}
+.model-switches input{width:auto;margin:0;accent-color:var(--accent)}
+.model-switches .clear-key{color:#ff777b}
+.superadmin-toolbar .add-model{display:flex;align-items:center;gap:6px;border-color:var(--accent);background:var(--accent);color:#fff;white-space:nowrap}
+.model-config-table{min-width:1040px}
+.endpoint-state{display:inline-flex;align-items:center;gap:7px;color:#777;font:10px ui-monospace,SFMono-Regular,monospace;white-space:nowrap}
+.endpoint-state i{height:7px;width:7px;border-radius:50%;background:#555}
+.endpoint-state.enabled{color:#75d798}.endpoint-state.enabled i{background:#43d17a;box-shadow:0 0 7px #43d17a}
+.endpoint-url{display:block;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-stack{display:block;max-width:260px;color:#999;font:9px/1.65 ui-monospace,SFMono-Regular,monospace;word-break:break-all}
+@media(max-width:700px){.model-form-grid,.model-form-grid.three{grid-template-columns:1fr}.model-config-modal{width:calc(100vw - 16px);padding:15px}.model-runtime-card{grid-template-columns:auto 1fr}.model-runtime-card small{grid-column:2}.model-form-section{padding:7px 10px 10px}.model-policy>span{font-size:7px}.superadmin-sidebar button{padding:0 9px}.superadmin-logo{padding:0 9px}.superadmin-logo>span{height:28px;width:28px}.superadmin-toolbar .add-model{font-size:10px;padding:7px}.model-switches{flex-direction:column;gap:9px}}
+
 /* 右侧任务情报面板：桌面端 2×2 战术矩阵，移动端顺序单列。 */
 @media(min-width:1021px){
   .app-frame{grid-template-columns:244px minmax(0,1fr) clamp(430px,36vw,560px)}

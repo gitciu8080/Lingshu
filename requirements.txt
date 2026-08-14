@@ -9,6 +9,7 @@ uvicorn[standard]>=0.27.0
 
 # Authentication & Security
 python-jose[cryptography]>=3.3.0
+cryptography>=42.0
 passlib[bcrypt]>=1.7.4
 
 # HTTP Client (AutoTest CTF2 client)
