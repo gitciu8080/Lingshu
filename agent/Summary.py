@@ -20,7 +20,7 @@ def create_summary_agent(model, *, offloader=None, context_config=None, state=No
         system_prompt=SUMMARY_SYS_PROMPT,
         model=model,
         toolkit=StrictJSONToolkit(),
-        react_config=ReActConfig(max_iters=1, interruption_raise_cancelled_error=True),
+        react_config=ReActConfig(max_iters=3, interruption_raise_cancelled_error=True),
         offloader=offloader,
         context_config=context_config,
         state=state,

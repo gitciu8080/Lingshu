@@ -120,13 +120,14 @@ async def _connect_antsword_mcp(
     url = os.getenv("LINGSHU_ANTSWORD_MCP_URL", _ANTSWORD_MCP_URL).strip()
     client = MCPClient(
         name="AntSword_Tool",
-        is_stateful=True,
+        # AntSword SSE 是 HTTP 服务；Attack 使用无状态 MCP，避免长连接在
+        # 任务取消/收尾时跨 asyncio task 关闭 anyio cancel scope。
+        is_stateful=False,
         mcp_config=HttpMCPConfig(url=url, timeout=15.0),
         enable_tools=list(_ANTSWORD_TOOLS),
         execution_timeout=max(float(timeout), 120.0),
     )
     try:
-        await asyncio.wait_for(client.connect(), timeout=20.0)
         tools = await client.list_tools()
         available = {tool.name.rsplit("__", 1)[-1] for tool in tools}
         missing = set(_ANTSWORD_TOOLS) - available
@@ -135,8 +136,7 @@ async def _connect_antsword_mcp(
                 f"AntSword MCP 缺少工具: {', '.join(sorted(missing))}",
             )
     except BaseException:
-        if client.is_connected:
-            await client.close()
+        # stateless MCP 没有需要由外层关闭的连接上下文。
         raise
 
     # 读取/探测类操作可用于分析；任何可执行命令或修改目标的工具
@@ -320,7 +320,7 @@ async def close_attack_agent(agent: Agent | None) -> None:
     if agent is None:
         return
     client = getattr(agent, "_antsword_mcp_client", None)
-    if client is not None and client.is_connected:
+    if client is not None and client.is_stateful and client.is_connected:
         try:
             await client.close()
         except RuntimeError:

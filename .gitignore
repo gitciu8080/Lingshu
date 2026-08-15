@@ -18,3 +18,11 @@ venv/
 .Reports/
 webui/node_modules/
 webui/dist/
+.RAG/
+.qwen
+.opencode
+.codex
+.agents
+.vscode
+reasonix.toml
+workbench_nss*

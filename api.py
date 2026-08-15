@@ -69,6 +69,7 @@ from integrations.agentscope_service.account_events import publish_account_event
 from integrations.antsword_service import get_antsword_service
 from Tools.KnowledgeBase import get_rag_service
 from Tools.target import normalize_target
+from agent.context import build_agent_context_config
 from model_registry import (
     ModelRegistryError,
     active_llm_providers,
@@ -796,7 +797,18 @@ async def _summarize_and_generate_report(
             web_search=False,
             config=runtime,
         )
-        summary_agent = create_summary_agent(model)
+        try:
+            summary_workspace = await get_workspace_service().get(
+                ctx.user_id,
+                session_id,
+            )
+        except Exception:
+            summary_workspace = None
+        summary_agent = create_summary_agent(
+            model,
+            offloader=summary_workspace,
+            context_config=build_agent_context_config(),
+        )
         token = bind_agent_tasks(ctx.agent_tasks)
         try:
             result = await stream_agent_reply(
@@ -814,6 +826,7 @@ async def _summarize_and_generate_report(
         raise
     except Exception as summary_exc:
         # 模型服务暂时不可用时仍必须为每次正常结束的任务留下可下载报告。
+        logger.exception("Summary Agent 调用失败: %s", summary_exc)
         summary = mission_state.summary.strip() if mission_state.summary else (
             "# 执行摘要\n\n"
             f"授权目标：{mission_state.target}\n\n"
@@ -866,6 +879,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
     flag = None
     success = None
     mission_state = None
+    mission_end_sent = False
     try:
         mission_state = await run_mission(
             target=target, goal=goal, model_ver=model_ver,
@@ -879,9 +893,14 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             resume=resume,
             user_id=ctx.user_id,
         )
-        # AgentScope 的 reply_stream 可能吞掉 CancelledError 而正常返回，
-        # 此时必须按用户停止意图收敛终态为 cancelled（而非 failed）。
-        if ctx.cancel_requested:
+        # 如果 Orchestrator 已经确定完成并取得 Flag，迟到的前端取消请求不得覆盖成功终态。
+        mission_completed = bool(
+            getattr(mission_state, "success", False)
+            and str(getattr(getattr(mission_state, "phase", ""), "value", getattr(mission_state, "phase", "")))
+            == "completed"
+        )
+        # AgentScope 的 reply_stream 可能吞掉 CancelledError，仅对未完成任务应用取消收敛。
+        if ctx.cancel_requested and not mission_completed:
             status_val = "cancelled"
             phase = "cancelled"
             callback("mission_cancelled", message="任务已被用户取消", agent="system")
@@ -894,6 +913,23 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                 status_val = "completed"
             else:
                 status_val = "failed"
+            # 任务执行终态与 Summary 报告生成分离：先落库并通知前端，防止总结 Agent 影响任务结束。
+            await asyncio.to_thread(
+                session_store.update_session,
+                session_id,
+                status=status_val,
+                phase=phase,
+                success=success,
+                flag=flag,
+                summary=summary,
+            )
+            callback(
+                "mission_end",
+                message="任务执行已结束，正在生成总结报告",
+                status=status_val,
+                agent="system",
+            )
+            mission_end_sent = True
             try:
                 summary = await _summarize_and_generate_report(
                     session_id, ctx, mission_state, provider, model_ver, callback,
@@ -908,9 +944,27 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                     agent="system",
                 )
     except asyncio.CancelledError:
-        status_val = "cancelled"
-        phase = "cancelled"
-        callback("mission_cancelled", message="任务已被用户取消", agent="system")
+        # Summary 属于任务完成后的报告阶段。即使用户在报告生成期间触发
+        # 取消，也不能覆盖已经由 Orchestrator 固化的成功终态。
+        mission_completed = bool(
+            mission_state is not None
+            and getattr(mission_state, "success", False)
+            and str(getattr(getattr(mission_state, "phase", ""), "value", getattr(mission_state, "phase", "")))
+            == "completed"
+        )
+        if mission_completed:
+            status_val = "completed"
+            phase = "completed"
+            summary = mission_state.summary or summary
+            callback(
+                "report_error",
+                message="Summary Agent 在任务完成后被中断，已保留成功终态和结构化摘要",
+                agent="system",
+            )
+        else:
+            status_val = "cancelled"
+            phase = "cancelled"
+            callback("mission_cancelled", message="任务已被用户取消", agent="system")
     except Exception as exc:
         status_val = "failed"
         phase = "failed"
@@ -938,7 +992,8 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                 tool_call_id=tool_call_id,
                 tool_name=tool.get("tool_name", ""),
             )
-        callback("mission_end", message="任务已结束", status=status_val)
+        if not mission_end_sent:
+            callback("mission_end", message="任务已结束", status=status_val)
         await _flush_persistence()
         await asyncio.to_thread(
             lambda: session_store.update_session(
@@ -2101,6 +2156,13 @@ async def resume_session(
 async def cancel_session(session_id: str, current_user: dict = Depends(get_current_user)):
     """取消会话并等待 Agent、工具任务与 shell 进程组完成清理。"""
     await _verify_session_owner(session_id, current_user["id"])
+    stored_session = await asyncio.to_thread(session_store.get_session, session_id)
+    if stored_session and stored_session.get("phase") in {"completed", "failed", "cancelled"}:
+        return {
+            "session_id": session_id,
+            "status": stored_session.get("phase"),
+            "message": "任务已经结束，不能再取消；总结报告可继续生成。",
+        }
     ctx = _active_sessions.get(session_id)
     if ctx is None or ctx.task is None or ctx.task.done():
         raise HTTPException(status_code=404, detail="会话不存在或已结束")
