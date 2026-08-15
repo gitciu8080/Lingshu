@@ -162,7 +162,8 @@ async def create_reverse_agent(
         execution_timeout=max(float(timeout), 120.0),
     )
     try:
-        await asyncio.wait_for(ida_mcp.connect(), timeout=30.0)
+        async with asyncio.timeout(30.0):
+            await ida_mcp.connect()
         ida_tools = await ida_mcp.list_tools()
     except Exception as exc:
         await ida_mcp.close()
@@ -210,7 +211,8 @@ async def create_reverse_agent(
         execution_timeout=max(float(timeout), 120.0),
     )
     try:
-        await asyncio.wait_for(gdb_mcp.connect(), timeout=45.0)
+        async with asyncio.timeout(45.0):
+            await gdb_mcp.connect()
         gdb_tools = await gdb_mcp.list_tools()
     except Exception as exc:
         try:
