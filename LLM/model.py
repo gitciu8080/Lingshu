@@ -204,61 +204,6 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
         return fmt_tools, fmt_tool_choice
 
 
-class QwenChatModel(OpenAIChatModel):
-    """Qwen chat model that disables thinking on tool-calling turns.
-
-    Qwen's llama.cpp tool parser can mix reasoning text into function
-    arguments when thinking is enabled, producing malformed JSON. Pure text
-    calls retain the configured thinking level.
-    """
-
-    def __init__(self, *args: Any, tool_call_mode: str = "simple", **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.tool_call_mode = tool_call_mode
-
-    async def _call_api(
-        self,
-        model_name: str,
-        messages: list,
-        tools: list[dict] | None = None,
-        tool_choice=None,
-        **generate_kwargs: Any,
-    ):
-        extra_body = dict(self.extra_body or {})
-        template_kwargs = dict(
-            extra_body.get("chat_template_kwargs") or {},
-        )
-        if not tools:
-            # llama.cpp 的 Qwen 模板读取此变量，而非 OpenAI 参数中的
-            # thinking_enable；显式传递才能使 Low/Min/Max 的文本行为生效。
-            template_kwargs["enable_thinking"] = bool(
-                getattr(self.parameters, "thinking_enable", True),
-            )
-        if tools:
-            template_kwargs["enable_thinking"] = False
-            # 简单模式固定低温，降低函数名/参数结构漂移概率；标准模式保留
-            # 调用方温度，供工具 JSON 能力更强的模型使用嵌套批量参数。
-            if self.tool_call_mode == "simple":
-                generate_kwargs["temperature"] = 0.1
-            # 当前 Qwen GGUF 的模板声明支持并行工具调用，但本项目的计划、
-            # 状态流转工具均是有序状态机。显式禁止并行，避免模型在同一轮
-            # 交错 DeletePlan / UpdatePlan 等相互依赖的操作。
-            generate_kwargs["parallel_tool_calls"] = False
-            # 同时从 API 层关闭推理，而不只依赖 Jinja 的模板变量；部分
-            # llama.cpp/Qwen 模板仍会预填 <think> 标签，二者配合可避免
-            # 推理文本污染函数参数。
-            generate_kwargs["reasoning_effort"] = "none"
-        extra_body["chat_template_kwargs"] = template_kwargs
-        generate_kwargs["extra_body"] = extra_body
-
-        return await super()._call_api(
-            model_name,
-            messages,
-            tools,
-            tool_choice,
-            **generate_kwargs,
-        )
-
 
 def DeepSeek(
         Ver: str = "Min",
@@ -383,28 +328,24 @@ def Qwen(
 
     thinking_enable = Ver != "Low" and bool(settings.get("thinking_enabled", True))
 
-    return QwenChatModel(
+    return OpenAIChatModel(
         credential=OpenAICredential(
             api_key=SecretStr(runtime.get_api_key("qwen")),
             base_url=runtime.get_base_url("qwen"),
         ),
         model=model_name,
         parameters=OpenAIChatModel.Parameters(
-            temperature=temperature,
+            temperature=0.6,
             reasoning_effort="medium",
             thinking_enable=thinking_enable,
-            top_p=float(settings.get("top_p", 0.95)),
+            top_p=0.95,
             max_tokens=max_tokens,
 
 
 
         ),
         stream=True,
-        max_retries=int(settings.get("max_retries", 3)),
-        context_size=int(settings.get("context_size", 128000)),
-        client_kwargs={"timeout": float(settings.get("timeout_seconds", 600))},
-        extra_body={"repeat_penalty": runtime.qwen_repeat_penalty},
-        tool_call_mode=runtime.qwen_tool_call_mode,
+        max_retries=int(settings.get("max_retries", 3))
     )
 
 

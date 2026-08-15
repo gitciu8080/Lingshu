@@ -37,7 +37,7 @@ from LLM.model import (  # 创建 LLM 模型实例（deepseek / qwen）
 from TaskState import MissionState, MissionStore, Phase  # 任务状态、持久化存储、阶段枚举
 from agent.Analysis import create_analysis_agent  # 漏洞研判专家（纯推理）
 from Tools.archive import safe_extract, SafeExtractError  # 安全解压（防路径穿越等）
-from agent.Attack import create_attack_agent  # 攻击手 Agent（分析 + 利用）
+from agent.Attack import close_attack_agent, create_attack_agent  # 攻击手 Agent（分析 + 利用）
 from agent.Brain import create_brain_agent  # 战略规划 Agent
 from agent.categorize import classify  # 题型自动分类（CTF 题型识别）
 from agent.Orchestrator import create_orchestrator_agent  # 战术调度核心 Agent
@@ -844,6 +844,7 @@ async def run_mission(
     agent_tasks_token = bind_agent_tasks(active_agent_tasks)
     expert_roster_token = None
     tool_json_token = None
+    attack = None
     reserve = None
     try:
         def _record_tool_json_failure(evidence: dict[str, Any]) -> None:
@@ -1096,6 +1097,7 @@ async def run_mission(
             context_config=context_config,
             state=build_role_agent_state(mission_id, "attack") if use_v2_workspace else None,
             artifact_root=ws_root,
+            exploitation_approved=lambda: mission.exploitation_approved,
         )
 
         reserve = await create_reverse_agent(
@@ -1299,6 +1301,7 @@ async def run_mission(
     finally:
         # AgentScope 官方方式：取消直接承载 reply_stream 的 task。
         await cancel_agent_tasks(active_agent_tasks)
+        await close_attack_agent(attack)
         await close_reverse_agent(reserve)
         reset_agent_tasks(agent_tasks_token)
         if expert_roster_token is not None:
