@@ -30,6 +30,7 @@ import asyncio
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,7 @@ import httpx
 NSS_API_BASE = "https://www.nssctf.cn/api"
 
 # 默认 Agent Token：优先读环境变量 NSSCTF_AGENT_TOKEN，否则使用此默认值
-DEFAULT_TOKEN = "nss_agent_iS3-7xkoaVlLcOk3HkkJXB7H9M9gb8SEZrNkrRhtV9I"
+DEFAULT_TOKEN = "nss_agent_guIUShUF2BI-PXeLpLI0O80J51MI7JWny0Nah8g-3S0"
 
 # ── 灵枢 Web 后端 ──
 DEFAULT_API_URL = os.environ.get("LINGSHU_API_URL", "http://localhost:8080")
@@ -79,7 +80,26 @@ async def _nss_request(
     resp.raise_for_status()
     body = resp.json()
     if body.get("code") not in (200, None):
-        raise RuntimeError(f"NSS API 错误 {body.get('code')}: {body.get('message', body)}")
+        data = body.get("data") or {}
+        msg = data.get("message") or body.get("message") or str(body)
+        retry_after = data.get("retry_after_seconds")
+        if retry_after:
+            when = ""
+            retry_at = data.get("retry_at")
+            if retry_at:
+                try:
+                    when = datetime.fromtimestamp(
+                        int(retry_at) / 1000, timezone(timedelta(hours=8))
+                    ).strftime("%Y-%m-%d %H:%M:%S")
+                except (TypeError, ValueError, OSError):
+                    when = ""
+            msg = (
+                f"{msg}（reason={data.get('reason')}，冷却剩余约 "
+                f"{int(retry_after) / 3600:.1f} 小时"
+                + (f"，约 {when} 后可重新领取" if when else "")
+                + "）"
+            )
+        raise RuntimeError(f"NSS API 错误 {body.get('code')}: {msg}")
     return body.get("data", {})
 
 

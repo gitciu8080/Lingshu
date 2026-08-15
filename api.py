@@ -66,6 +66,7 @@ from integrations.agentscope_service import (
     control_router as agentscope_control_router,
 )
 from integrations.agentscope_service.account_events import publish_account_event
+from integrations.antsword_service import get_antsword_service
 from Tools.KnowledgeBase import get_rag_service
 from Tools.target import normalize_target
 from model_registry import (
@@ -965,21 +966,31 @@ async def _app_lifespan(_: FastAPI):
         _persistence_worker(),
         name="lingshu-sqlite-persistence",
     )
-    async with agentscope_lifespan():
-        rag = get_rag_service(_PROJECT_ROOT)
-        await rag.start()
+    antsword = get_antsword_service()
+    try:
         try:
-            yield
-        finally:
-            await rag.close()
-            if _persistence_queue is not None:
-                await _persistence_queue.join()
-            if _persistence_task is not None:
-                _persistence_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await _persistence_task
-            _persistence_task = None
-            _persistence_queue = None
+            await antsword.start()
+        except Exception as exc:  # AntSword 故障不应阻止 WebUI 和其他 Agent 启动
+            antsword.last_error = str(exc)
+            logger.exception("AntSword MCP 自动启动失败")
+
+        async with agentscope_lifespan():
+            rag = get_rag_service(_PROJECT_ROOT)
+            await rag.start()
+            try:
+                yield
+            finally:
+                await rag.close()
+                if _persistence_queue is not None:
+                    await _persistence_queue.join()
+                if _persistence_task is not None:
+                    _persistence_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await _persistence_task
+                _persistence_task = None
+                _persistence_queue = None
+    finally:
+        await antsword.stop()
 
 
 app = FastAPI(
@@ -996,6 +1007,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/api/integrations/antsword/status")
+async def antsword_status(current_user: dict = Depends(get_current_user)):
+    """返回 API 托管的 AntSword MCP 进程与端口状态。"""
+    del current_user
+    return await get_antsword_service().status()
 
 # ── JWT 认证中间件 ──
 _AUTH_SKIP_PATHS = (

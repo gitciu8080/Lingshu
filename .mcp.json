@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "gdb-multi-mcp": {
+      "command": "uvx",
+      "args": [
+        "--offline",
+        "--from",
+        "git+https://github.com/Mistyovo/gdb-multi-mcp@6e8048b8e933bbbae79b6da16fe69249f56fe30d",
+        "gdb-multi-mcp"
+      ],
+      "env": {
+        "FASTMCP_CHECK_FOR_UPDATES": "off",
+        "FASTMCP_SHOW_SERVER_BANNER": "false"
+      }
+    },
+    "antsword": {
+      "url": "http://127.0.0.1:30080/sse"
+    }
+  }
+}

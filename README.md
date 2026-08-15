@@ -216,6 +216,30 @@ sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim
 
 未安装时主系统仍可启动，但 `ocr_image` 工具会返回明确的依赖缺失提示。
 
+Reverse/Pwn 的 GDB 动态调试使用 `gdb-multi-mcp`。先安装 `uv` 和 GDB，
+再缓存灵枢锁定并验证过的 MCP 版本：
+
+```bash
+sudo apt-get install gdb
+uv tool install --from git+https://github.com/Mistyovo/gdb-multi-mcp@6e8048b8e933bbbae79b6da16fe69249f56fe30d gdb-multi-mcp
+uvx --from git+https://github.com/Mistyovo/gdb-multi-mcp@6e8048b8e933bbbae79b6da16fe69249f56fe30d gdb-multi-mcp --version
+```
+
+运行任务时使用已缓存的固定提交，不会临时升级 MCP。默认不启用上游
+`--unsafe`，灵枢也不会向 Agent 暴露 attach、任意远程目标或未校验的会话入口。
+
+Web API 启动时会自动启动 AntSword 及其 SSE MCP 服务
+`http://127.0.0.1:30080/sse`。若本机已有服务则直接复用且关闭 API 时不会误杀；
+否则 API 取得该进程的所有权，并在关闭时清理整个 AntSword/Xvfb 进程组。
+Attack 创建时会连接该 SSE 服务，将 37 个 AntSword 工具注册到攻击
+智能体；任务结束时只关闭本任务的 MCP 会话。逆向智能体则独立连接
+GDB MCP，任务结束时关闭其 GDB 会话和 MCP 进程。
+无桌面环境会自动使用 `xvfb-run`。如需禁用自动启动，可设置：
+
+```bash
+export LINGSHU_ANTSWORD_AUTOSTART=false
+```
+
 ### 基本用法
 
 ```bash

@@ -4,11 +4,17 @@ Skill 加载从 MissionState.category_decision 动态生成，不再硬编码 ct
 """
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
+from collections.abc import Callable
 from pathlib import Path
+from types import MethodType
 
 from agentscope.agent import Agent, ReActConfig
-from agentscope.mcp import MCPClient, StdioMCPConfig
+from agentscope.mcp import HttpMCPConfig, MCPClient
 from agentscope.message import UserMsg
+from agentscope.permission import PermissionBehavior, PermissionDecision
 
 from Tools.CVE_Search import cve_search
 from Tools.OCR import create_tesseract_ocr_tool
@@ -16,6 +22,31 @@ from Tools.ScopeRegistry import ScopeRegistry
 from Tools.TonyDec import create_tonydec_tool
 from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool, run_interruptible_agent_reply
 from agent.experts import attack_expert_name
+
+logger = logging.getLogger(__name__)
+
+
+_ANTSWORD_MCP_URL = "http://127.0.0.1:30080/sse"
+_ANTSWORD_TOOLS = (
+    "shell_list", "shell_get", "shell_add", "shell_edit", "shell_del",
+    "shell_capabilities",
+    "base_info", "base_probedb",
+    "cmd_exec", "cmd_list", "cmd_quote",
+    "file_dir", "file_read", "file_write", "file_delete", "file_copy",
+    "file_rename", "file_retime", "file_chmod", "file_mkdir", "file_wget",
+    "file_hash", "file_upload", "file_download",
+    "db_list_confs", "db_get_conf", "db_add_conf", "db_del_conf",
+    "db_show_databases", "db_show_tables", "db_show_columns", "db_query",
+    "raw_request",
+    "mcp_status", "mcp_logs", "mcp_config_get", "mcp_config_set",
+)
+_ANTSWORD_READ_ONLY_TOOLS = frozenset({
+    "shell_list", "shell_get", "shell_capabilities",
+    "base_info", "base_probedb", "cmd_list",
+    "file_dir", "file_read", "file_hash", "file_download",
+    "db_list_confs", "db_get_conf", "db_show_databases", "db_show_tables",
+    "db_show_columns", "mcp_status", "mcp_logs", "mcp_config_get",
+})
 
 
 ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
@@ -28,14 +59,19 @@ ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
 4. dispatch_reverse：派遣 Reserve 对二进制文件执行 IDA 逆向分析（反编译、字符串提取等）
 5. ocr_image：使用 Tesseract 对授权工作区内的图片执行文字识别。
 6. tonydec：当文件头完整匹配 6688ff4f6886005611611618 时解码 TonyEnc 文件或目录。
-
-
+7. AntSword_Tool：对已在 AntSword 登记的授权 WebShell 执行信息、命令、
+   文件和数据库操作。工具名以 mcp__AntSword_Tool__ 开头。
 
 工作原则：
 - 先调用 analysis 获取独立研判；候选 CVE 应再用 cve_search 核验。
 - 只有证据和利用条件匹配时才使用 scoped_shell 验证或利用。
 - 对于需要反编译的，可以使用 ida 的 mcp 工具。
 - 遇到 TonyEnc 固定头时调用 tonydec 写入新输出路径，随后用 file/哈希/strings 复核产物。
+- 使用 AntSword 时必须严格按 shell_list → shell_capabilities → base_info →
+  cmd_exec / file_dir / db_query 的顺序；只能选择 URL 与当前授权目标一致的 shell_id。
+- 不得读取其他目标的 Shell 密码，不得删除 Shell 记录或修改 MCP 服务配置。
+  shell_add/shell_edit/shell_del/mcp_config_set 仅在 Orchestrator 明确要求时才可使用。
+- raw_request 只能在 shell_capabilities 确认能力且无专用工具时使用。
 - 所有网络命令必须显式包含授权目标，不得访问其他地址或网段。
 - 禁止拒绝服务、破坏数据、植入持久化、清除日志或扩大目标范围。
 - 不得把 HTTP 200、命令无报错或模型推测当作利用成功；成功必须有可复核证据。
@@ -74,6 +110,64 @@ _CYBERPENDA_SKILL_MAP: dict[str, list[str]] = {
     "ai-ml": ["llm-security"],
 }
 _CYBERPENDA_ROOT = "Skills/cyberpenda-bundles"
+
+
+async def _connect_antsword_mcp(
+    timeout: int,
+    exploitation_approved: Callable[[], bool] | None = None,
+) -> tuple[MCPClient, list]:
+    """连接 API 托管的 AntSword SSE MCP，并校验 37 个工具契约。"""
+    url = os.getenv("LINGSHU_ANTSWORD_MCP_URL", _ANTSWORD_MCP_URL).strip()
+    client = MCPClient(
+        name="AntSword_Tool",
+        is_stateful=True,
+        mcp_config=HttpMCPConfig(url=url, timeout=15.0),
+        enable_tools=list(_ANTSWORD_TOOLS),
+        execution_timeout=max(float(timeout), 120.0),
+    )
+    try:
+        await asyncio.wait_for(client.connect(), timeout=20.0)
+        tools = await client.list_tools()
+        available = {tool.name.rsplit("__", 1)[-1] for tool in tools}
+        missing = set(_ANTSWORD_TOOLS) - available
+        if missing:
+            raise RuntimeError(
+                f"AntSword MCP 缺少工具: {', '.join(sorted(missing))}",
+            )
+    except BaseException:
+        if client.is_connected:
+            await client.close()
+        raise
+
+    # 读取/探测类操作可用于分析；任何可执行命令或修改目标的工具
+    # 都与 MissionState.exploitation_approved 实时联动，不依赖模型遵守提示词。
+    for tool in tools:
+        short_name = tool.name.rsplit("__", 1)[-1]
+        tool.is_read_only = short_name in _ANTSWORD_READ_ONLY_TOOLS
+
+        async def _check_permissions(
+            _self,
+            *_args,
+            _short_name: str = short_name,
+            **_kwargs,
+        ) -> PermissionDecision:
+            if _short_name in _ANTSWORD_READ_ONLY_TOOLS:
+                return PermissionDecision(
+                    behavior=PermissionBehavior.ALLOW,
+                    message="AntSword 只读信息收集已放行",
+                )
+            if exploitation_approved is not None and exploitation_approved():
+                return PermissionDecision(
+                    behavior=PermissionBehavior.ALLOW,
+                    message="AntSword 操作已通过灵枢攻击阶段人工审批",
+                )
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                message="AntSword 写入/执行操作需先通过攻击阶段人工审批",
+            )
+
+        tool.check_permissions = MethodType(_check_permissions, tool)
+    return client, tools
 
 
 def _build_skill_list(
@@ -149,6 +243,7 @@ async def create_attack_agent(
     context_config=None,
     state=None,
     artifact_root: str | Path | None = None,
+    exploitation_approved: Callable[[], bool] | None = None,
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -180,15 +275,15 @@ async def create_attack_agent(
 
     skill_list = _build_skill_list(category_decision, project_dir)
 
-    # ida_mcp = MCPClient(
-    #     name="IDA_Tool",
-    #     is_stateful=True,
-    #     mcp_config=StdioMCPConfig(
-    #         command="idalib-mcp",
-    #         args=["--stdio"],
-    #     ),
-    # )
-    # await ida_mcp.connect()
+    antsword_mcp: MCPClient | None = None
+    antsword_tools: list = []
+    try:
+        antsword_mcp, antsword_tools = await _connect_antsword_mcp(
+            timeout,
+            exploitation_approved,
+        )
+    except Exception as exc:  # AntSword 不可用不应让非 WebShell 任务整体失败
+        logger.warning("Attack 未能接入 AntSword MCP: %s", exc)
 
     toolkit = StrictJSONToolkit(
         tools=[
@@ -197,11 +292,11 @@ async def create_attack_agent(
             create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="attack", artifact_root=artifact_root),
             create_tesseract_ocr_tool(project_dir, timeout=min(timeout, 90)),
             create_tonydec_tool(project_dir),
+            *antsword_tools,
         ],
         skills_or_loaders=skill_list,
-        # mcps=[ida_mcp],
     )
-    return Agent(
+    agent = Agent(
         name=attack_expert_name(
             str((category_decision or {}).get("primary") or "unknown"),
             str((category_decision or {}).get("target_kind") or ""),
@@ -216,3 +311,17 @@ async def create_attack_agent(
         context_config=context_config,
         state=state,
     )
+    agent._antsword_mcp_client = antsword_mcp
+    return agent
+
+
+async def close_attack_agent(agent: Agent | None) -> None:
+    """关闭 Attack 任务持有的 AntSword SSE 会话，不关闭 GUI 服务。"""
+    if agent is None:
+        return
+    client = getattr(agent, "_antsword_mcp_client", None)
+    if client is not None and client.is_connected:
+        try:
+            await client.close()
+        except RuntimeError:
+            pass

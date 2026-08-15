@@ -304,7 +304,8 @@ def create_orchestrator_agent(
                         f"二进制文件：{binary_path}\n"
                         f"本轮目标：{objective}\n\n"
                         "先调用 ida_open_binary 打开文件并保存 database 会话 ID，"
-                        "禁止手动启动 idat 或直接调用 idb_open。\n"
+                        "禁止手动启动 idat 或直接调用 idb_open；需要动态验证时使用 "
+                        "gdb_create_session，结束后关闭 GDB 会话。\n"
                         "分析完成后立即输出最终报告，禁止继续调用工具。"
                     ),
                 ),
