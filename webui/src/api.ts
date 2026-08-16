@@ -273,6 +273,18 @@ export const api = {
     }
     return response.blob();
   },
+  jsonl: async (id: string, prefix = "") => {
+    const query = prefix ? `?prefix=${encodeURIComponent(prefix)}` : "";
+    const response = await fetch(
+      base + `/api/session/${encodeURIComponent(id)}/jsonl${query}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new Error(data?.detail || `JSONL 导出失败 (${response.status})`);
+    }
+    return response.blob();
+  },
   knowledgeStatus: () =>
     request<Record<string, unknown>>("/api/knowledge/status"),
   knowledgeSearch: (query: string) =>

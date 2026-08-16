@@ -2370,6 +2370,24 @@ function ConsoleApp() {
       toast.error(`报告下载失败：${String(err)}`);
     }
   };
+  const downloadJsonl = async () => {
+    if (!active) return;
+    const prefixInput = window.prompt("请输入竞赛题号（可填写多个，例如 01 或 01-03），用于生成文件名前缀：", "");
+    if (prefixInput === null) return;
+    const prefix = prefixInput;
+    try {
+      const blob = await api.jsonl(active, prefix);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${prefix.trim() ? `${prefix.trim()}-` : ""}${active}.jsonl`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      toast.success("完整会话 JSONL 已导出");
+    } catch (err) {
+      toast.error(`JSONL 导出失败：${String(err)}`);
+    }
+  };
   return (
     <div className="console-shell">
       <LiquidGlassLayer />
@@ -2527,6 +2545,12 @@ function ConsoleApp() {
                 <button className="report-download" onClick={() => void downloadReport()}>
                   <FileDown size={14} />
                   下载报告
+                </button>
+              )}
+              {active && (
+                <button className="report-download" onClick={() => void downloadJsonl()} title="导出完整原始会话 JSONL">
+                  <FileDown size={14} />
+                  导出 JSONL
                 </button>
               )}
               {active && isLive && (

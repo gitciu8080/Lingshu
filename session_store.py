@@ -418,6 +418,21 @@ def get_messages(
         conn.close()
 
 
+def get_all_messages(session_id: str) -> list[dict]:
+    """导出会话的全部已落库消息，不分页、不截断，保持原始顺序。"""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM session_messages
+               WHERE session_id = ?
+               ORDER BY seq ASC""",
+            (session_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 def upsert_stream_snapshot(
     session_id: str,
     reply_id: str,

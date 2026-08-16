@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -1806,6 +1807,127 @@ async def get_session_messages(
         "oldest_seq": int(messages[0]["seq"]) if messages else None,
         "newest_seq": int(messages[-1]["seq"]) if messages else None,
     }
+
+
+def _jsonl_export_record(message: dict) -> dict[str, Any]:
+    """将数据库行转换为竞赛可提交的单行 JSON，同时保留 raw 原始行。"""
+    event_type = message.get("event_type") or (
+        "user_message" if message.get("role") == "user" else "message"
+    )
+    record: dict[str, Any] = {
+        "timestamp": message.get("created_at", ""),
+        "type": event_type,
+        "role": message.get("role", ""),
+        "agent": message.get("agent_name", ""),
+        "seq": message.get("seq", 0),
+    }
+    content = message.get("content", "")
+    # 结构化事件的 content 是 JSON；展开后便于评审直接阅读，raw 保证原样可追溯。
+    if event_type in {
+        "tool_call_start", "tool_call_end", "approval_required",
+        "approval_resolved", "plan_updated", "nss_submit", "report_ready",
+    }:
+        try:
+            payload = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            if event_type == "tool_call_end":
+                record.update({
+                    "tool": payload.get("tool_name", ""),
+                    "tool_call_id": payload.get("tool_call_id", ""),
+                    "arguments": payload.get("full_args", ""),
+                    "output": payload.get("output", ""),
+                })
+            elif event_type == "tool_call_start":
+                record.update({
+                    "tool": payload.get("tool_name", ""),
+                    "tool_call_id": payload.get("tool_call_id", ""),
+                })
+            else:
+                record["payload"] = payload
+        else:
+            record["content"] = content
+    elif event_type in {"text_end", "thinking_end"}:
+        try:
+            payload = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            record["content"] = payload.get("full_text", "")
+            record["block_id"] = payload.get("block_id", "")
+        else:
+            record["content"] = content
+    else:
+        record["content"] = content
+    record["raw"] = {
+        "session_id": message.get("session_id", ""),
+        "seq": message.get("seq", 0),
+        "role": message.get("role", ""),
+        "content": content,
+        "event_type": message.get("event_type", ""),
+        "agent_name": message.get("agent_name", ""),
+        "source_id": message.get("source_id", ""),
+        "created_at": message.get("created_at", ""),
+    }
+    return record
+
+
+@app.get("/api/session/{session_id}/jsonl")
+async def download_session_jsonl(
+    session_id: str,
+    prefix: str = "",
+    current_user: dict = Depends(get_current_user),
+):
+    """导出完整原始会话 JSONL，包含用户、Agent、推理、工具参数及工具输出。"""
+    session = await _verify_session_owner(session_id, current_user["id"])
+    messages = await asyncio.to_thread(session_store.get_all_messages, session_id)
+    snapshots = await asyncio.to_thread(session_store.get_stream_snapshots, session_id)
+
+    import importlib.metadata
+    try:
+        agentscope_version = importlib.metadata.version("agentscope")
+    except importlib.metadata.PackageNotFoundError:
+        agentscope_version = "unknown"
+
+    header = {
+        "timestamp": session.get("created_at", ""),
+        "type": "session_header",
+        "session_id": session_id,
+        "title": session.get("title", ""),
+        "target": session.get("target", ""),
+        "goal": session.get("goal", ""),
+        "question_numbers": [
+            item for item in re.split(r"[,，\s]+", prefix.strip()) if item
+        ],
+        "tool": "Lingshu / AgentScope",
+        "agentscope_version": agentscope_version,
+        "note": "完整会话导出；question_numbers 需按竞赛题号补充；raw 字段保留数据库原始事件。",
+    }
+
+    def lines():
+        yield json.dumps(header, ensure_ascii=False) + "\n"
+        for message in messages:
+            yield json.dumps(_jsonl_export_record(message), ensure_ascii=False) + "\n"
+        # 未结束的流仅在任务仍运行时存在；也导出，避免导出时丢失已生成的部分内容。
+        for snapshot in snapshots:
+            yield json.dumps({
+                "timestamp": snapshot.get("updated_at", ""),
+                "type": "stream_snapshot",
+                "role": "agent",
+                "agent": snapshot.get("agent_name", ""),
+                "stream_type": snapshot.get("stream_type", ""),
+                "block_id": snapshot.get("block_id", ""),
+                "content": snapshot.get("content", ""),
+            }, ensure_ascii=False) + "\n"
+
+    safe_prefix = "".join(ch for ch in prefix.strip() if ch.isalnum() or ch in "-_")[:40]
+    filename = f"{safe_prefix + '-' if safe_prefix else ''}{session_id}.jsonl"
+    return StreamingResponse(
+        lines(),
+        media_type="application/x-ndjson; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/session/{session_id}/pending_approval")
