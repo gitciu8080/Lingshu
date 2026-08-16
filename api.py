@@ -21,7 +21,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from agentscope.message import UserMsg
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from auth import (
@@ -42,9 +41,6 @@ from auth import (
 
 from main import run_mission
 from config import RuntimeConfig
-from LLM.model import create_model
-from TaskState import MissionStore
-from Tools.Report import generate_mission_pdf
 from workspace_service import get_workspace_service
 from api_workspace import (
     list_artifacts as _list_workspace_artifacts,
@@ -52,13 +48,8 @@ from api_workspace import (
     workspace_summary as _workspace_summary,
 )
 from Tools.tooling import (
-    cancel_agent_tasks,
     interrupt_agent_tasks,
-    bind_agent_tasks,
-    reset_agent_tasks,
-    stream_agent_reply,
 )
-from agent.Summary import SUMMARY_EXPERT, create_summary_agent
 import session_store
 from integrations.agentscope_service import (
     agentscope_app,
@@ -69,7 +60,6 @@ from integrations.agentscope_service.account_events import publish_account_event
 from integrations.antsword_service import get_antsword_service
 from Tools.KnowledgeBase import get_rag_service
 from Tools.target import normalize_target
-from agent.context import build_agent_context_config
 from model_registry import (
     ModelRegistryError,
     active_llm_providers,
@@ -726,144 +716,6 @@ def _save_long_term_memory(session_id, target, goal, phase, success, flag, summa
         pass
 
 
-def _build_summary_transcript(messages: list[dict], maximum_chars: int = 120_000) -> str:
-    """从持久化事件构建去重、按时间排序且有长度上限的总结输入。"""
-    useful_types = {
-        "", "message", "text_end", "user_message", "phase_change", "error",
-        "approval_required", "approval_resolved", "tool_call_end", "flag_found",
-        "mission_start", "mission_end", "nss_submit", "plan_updated",
-    }
-    lines: list[str] = []
-    last_signature: tuple[str, str] | None = None
-    for item in messages:
-        event_type = str(item.get("event_type") or ("user_message" if item.get("role") == "user" else "message"))
-        if event_type not in useful_types:
-            continue
-        content = str(item.get("content") or "").strip()
-        if not content:
-            continue
-        agent = str(item.get("agent_name") or item.get("role") or "system")
-        signature = (agent, content)
-        if signature == last_signature:
-            continue
-        last_signature = signature
-        lines.append(f"#{item.get('seq', '?')} [{event_type}] [{agent}] {content[:5000]}")
-
-    selected: list[str] = []
-    used = 0
-    for line in reversed(lines):
-        if selected and used + len(line) > maximum_chars:
-            break
-        selected.append(line)
-        used += len(line)
-    selected.reverse()
-    omitted = len(lines) - len(selected)
-    prefix = f"[说明] 因长度限制省略最早的 {omitted} 条低优先级记录。\n" if omitted else ""
-    return prefix + "\n".join(selected)
-
-
-async def _summarize_and_generate_report(
-    session_id: str,
-    ctx: SessionContext,
-    mission_state,
-    provider: str,
-    model_ver: str,
-    callback,
-) -> str:
-    """调用 Summary Agent，总结完整会话并原子生成 PDF。"""
-    # Summary 必须读取到本轮所有已完成回复，不能与异步写入队列竞速。
-    await _flush_persistence()
-    messages = await asyncio.to_thread(session_store.get_messages, session_id, 0, 5000)
-    mission_data = mission_state.to_dict()
-    mission_data.pop("events", None)
-    transcript = _build_summary_transcript(messages)
-    prompt = (
-        "请总结以下一次完整授权安全测试。\n\n"
-        f"【结构化任务状态】\n{json.dumps(mission_data, ensure_ascii=False, indent=2)[:50000]}\n\n"
-        f"【完整会话记录】\n{transcript}"
-    )
-    callback(
-        "expert_joined",
-        expert_name=SUMMARY_EXPERT,
-        specialty="对话总结与 PDF 报告",
-        agent=SUMMARY_EXPERT,
-    )
-    try:
-        runtime = RuntimeConfig.from_env()
-        model = create_model(
-            provider=provider,
-            Ver=model_ver,
-            temperature=0.2,
-            web_search=False,
-            config=runtime,
-        )
-        try:
-            summary_workspace = await get_workspace_service().get(
-                ctx.user_id,
-                session_id,
-            )
-        except Exception:
-            summary_workspace = None
-        summary_agent = create_summary_agent(
-            model,
-            offloader=summary_workspace,
-            context_config=build_agent_context_config(),
-        )
-        token = bind_agent_tasks(ctx.agent_tasks)
-        try:
-            result = await stream_agent_reply(
-                summary_agent,
-                UserMsg(name="Orchestrator", content=prompt),
-                prefix="[Summary] ",
-                on_event=callback,
-            )
-        finally:
-            reset_agent_tasks(token)
-        summary = (result.get_text_content() or "").strip()
-        if not summary:
-            raise RuntimeError("Summary Agent 未返回报告正文")
-    except asyncio.CancelledError:
-        raise
-    except Exception as summary_exc:
-        # 模型服务暂时不可用时仍必须为每次正常结束的任务留下可下载报告。
-        logger.exception("Summary Agent 调用失败: %s", summary_exc)
-        summary = mission_state.summary.strip() if mission_state.summary else (
-            "# 执行摘要\n\n"
-            f"授权目标：{mission_state.target}\n\n"
-            f"任务目标：{mission_state.goal}\n\n"
-            f"最终阶段：{mission_state.phase.value}\n\n"
-            f"安全发现：{len(mission_state.findings)} 条；攻击链步骤：{len(mission_state.attack_chain)} 条。\n\n"
-            "# 总结状态\n\nSummary Agent 调用失败，本文由结构化任务状态自动生成；"
-            "完整对话仍保存在会话审计记录中。"
-        )
-        callback(
-            "message",
-            agent=SUMMARY_EXPERT,
-            content=f"{summary}\n\n> 自动降级原因：{summary_exc}",
-        )
-
-    mission_state.summary = summary
-    mission_state.record("Summary", "conversation_summarized", message_count=len(messages))
-    store = MissionStore.for_session(session_id, base_dir=_sessions_dir)
-    store.save(mission_state)
-    mission_data = mission_state.to_dict()
-    session = await asyncio.to_thread(session_store.get_session, session_id) or {}
-    mission_data["title"] = session.get("title") or mission_data.get("title")
-    report_path = await asyncio.to_thread(
-        generate_mission_pdf,
-        session_id,
-        summary,
-        mission_data,
-        _reports_dir,
-    )
-    callback(
-        "report_ready",
-        agent="system",
-        filename=report_path.name,
-        url=f"/api/session/{session_id}/report",
-        message="对话总结与 PDF 报告已生成",
-    )
-    return summary
 
 
 # ── 运行并清理 ──
@@ -913,7 +765,8 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                 status_val = "completed"
             else:
                 status_val = "failed"
-            # 任务执行终态与 Summary 报告生成分离：先落库并通知前端，防止总结 Agent 影响任务结束。
+            # Summary 报告已由 run_mission 收尾阶段生成（含 PDF 落盘与 report_ready
+            # 事件），此处仅落库并通知前端任务结束。
             await asyncio.to_thread(
                 session_store.update_session,
                 session_id,
@@ -925,24 +778,11 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             )
             callback(
                 "mission_end",
-                message="任务执行已结束，正在生成总结报告",
+                message="任务执行已结束",
                 status=status_val,
                 agent="system",
             )
             mission_end_sent = True
-            try:
-                summary = await _summarize_and_generate_report(
-                    session_id, ctx, mission_state, provider, model_ver, callback,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as report_exc:
-                # 报告子流程失败不改变主任务结论，保留 Orchestrator 的原总结。
-                callback(
-                    "report_error",
-                    message=f"总结或 PDF 生成失败：{report_exc}",
-                    agent="system",
-                )
     except asyncio.CancelledError:
         # Summary 属于任务完成后的报告阶段。即使用户在报告生成期间触发
         # 取消，也不能覆盖已经由 Orchestrator 固化的成功终态。

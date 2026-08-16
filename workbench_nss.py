@@ -11,7 +11,8 @@ FastAPI + SSE）创建会话并消费事件流，从而在前端控制台实时�
   3. 调用灵枢 Web API：登录 → /api/session/start 创建会话
   4. 订阅 /api/session/{id}/stream 的 SSE，实时打印阶段/Agent/工具事件；
      收到 approval_required 时自动向 /api/session/{id}/message 发送"批准"
-  5. 等 mission_end 后从会话详情取 flag，提交到 NSSCTF；解不出则放弃
+  5. 等 mission_end 后从会话详情取 flag，严格校验格式后提交到 NSSCTF；
+     按 --retries 配置完成分析并复核平台状态后，才允许放弃
 
 依赖 Web 后端已启动：
     python api.py          # 默认 0.0.0.0:8080
@@ -28,6 +29,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -53,12 +55,22 @@ ARENA_WORKDIR.mkdir(parents=True, exist_ok=True)
 # 解题相对 TTL 的提前量（秒），避免超时结算前还在跑
 TTL_MARGIN = 120
 
+NSS_FLAG_PATTERN = re.compile(r"NSSCTF\{[^{}\r\n]+\}")
+
 
 def _mask_token(token: str) -> str:
     """脱敏展示 Token，避免日志泄露完整令牌。"""
     if len(token) <= 12:
         return token[:3] + "****" + token[-3:]
     return token[:6] + "****" + token[-4:]
+
+
+def _extract_nss_flag(value: Any) -> str | None:
+    """从 Agent 输出中提取平台接受的严格 NSSCTF{...} 格式。"""
+    if not isinstance(value, str):
+        return None
+    match = NSS_FLAG_PATTERN.search(value.strip())
+    return match.group(0) if match else None
 
 
 # ── NSSCTF API 客户端 ──
@@ -336,12 +348,23 @@ async def _solve_attempt(
     if annex_path:
         print(f"[workbench] 附件: {annex_path}")
 
-    # 目标描述：容器（nc/pwn 连接地址）+ 附件（本地二进制分析）
-    goal = f"获取 Flag\n\n【题目】{problem.get('content', '')}"
+    # 目标描述：容器（nc/pwn 连接地址）+ 附件（本地二进制分析）。格式要求
+    # 必须进入 goal，确保 Brain/Orchestrator/Attack 都能看到，而不只由工作台
+    # 在最终提交时补救。
+    base_goal = (
+        "获取 Flag\n\n"
+        "【FLAG 提交硬性要求】平台只接受严格的 NSSCTF{...} 格式（大小写必须完全一致）。"
+        "发现原始结果后必须整理并校验为 NSSCTF{...}；禁止提交 flag{...}、裸文本、"
+        "带解释文字的整句或其他前缀。调用 submit_nss_flag 时参数也必须仅包含完整的 "
+        "NSSCTF{...}。若候选不符合该格式，应继续分析，不得把它当作最终 FLAG。\n\n"
+        f"【题目】{problem.get('content', '')}"
+    )
     if note == "container":
-        goal += f"\n\n【远程目标】{target}（可用 nc 连接/HTTP 访问）"
+        base_goal += f"\n\n【远程目标】{target}（可用 nc 连接/HTTP 访问）"
     if annex_path:
-        goal += f"\n\n【本地附件】{annex_path}（pwn/逆向类可结合本地文件分析）"
+        base_goal += f"\n\n【本地附件】{annex_path}（pwn/逆向类可结合本地文件分析）"
+
+    goal = base_goal
 
     nss_context = {
         "attempt_id": attempt_id,
@@ -349,7 +372,13 @@ async def _solve_attempt(
         "api_base": NSS_API_BASE,
     }
 
-    for run_idx in range(max(1, retries)):
+    max_attempts = max(1, retries)
+    completed_sessions = 0
+    rejected_flags: set[str] = set()
+    transient_failures = 0
+    print(f"[workbench] 本题按配置最多分析 {max_attempts} 轮")
+
+    for run_idx in range(max_attempts):
         print(f"\n[workbench] 解题第 {run_idx + 1} 轮...")
         # 创建 Web 会话（携带 nss_context，使 Orchestrator 可在线提交 Flag）
         try:
@@ -361,11 +390,13 @@ async def _solve_attempt(
             print(f"[workbench] 创建 Web 会话失败: {exc}")
             if "401" in str(exc):
                 print("[workbench] 请检查 --username/--password 或后端 JWT 配置")
-            break
+            transient_failures += 1
+            continue
         session_id = start.get("session_id")
         if not session_id:
             print(f"[workbench] 未返回 session_id: {start}")
-            break
+            transient_failures += 1
+            continue
 
         # 订阅 SSE，实时展示攻击流程 + 自动批准
         mission_flag: str | None = None
@@ -457,6 +488,16 @@ async def _solve_attempt(
         if not mission_phase or mission_phase == "unknown":
             mission_phase = detail.get("phase") or "unknown"
 
+        terminal_phases = {"COMPLETED", "FAILED", "CANCELLED", "completed", "failed", "cancelled"}
+        # SSE 偶尔会在 mission_end 前断开，但 nss_submit/flag_found 已足以证明
+        # 本轮确实完成了解题与候选产出，不能因此把题目永久保留为 active。
+        has_analysis_evidence = bool(nss_submit) or bool(mission_flag)
+        if ended or mission_phase in terminal_phases or has_analysis_evidence:
+            completed_sessions += 1
+        else:
+            transient_failures += 1
+            print("[workbench] 本轮会话未确认终态，不计入有效分析")
+
         print(f"\n[workbench] Web 会话结束: 阶段={mission_phase} success={mission_success}")
 
         # Orchestrator 已在线提交并判定正确 → 直接成功，不再重复提交
@@ -464,7 +505,18 @@ async def _solve_attempt(
             print(f"[workbench] ✅ Orchestrator 已提交正确 Flag: {nss_submit.get('flag')}")
             return True
 
-        flag = (mission_flag or "").strip()
+        raw_flag = mission_flag or ((nss_submit or {}).get("flag") if nss_submit else "") or ""
+        flag = _extract_nss_flag(raw_flag)
+        if raw_flag and not flag:
+            preview = str(raw_flag).strip()[:80]
+            print(f"[workbench] ⚠️ 候选 FLAG 格式无效，不提交以免消耗错误次数: {preview}")
+            goal = (
+                f"{base_goal}\n\n"
+                f"【第 {run_idx + 1} 轮反馈】上轮候选『{preview}』不符合平台格式，未提交。"
+                "必须继续求解，并且最终只给出严格的 NSSCTF{...}。"
+            )
+            continue
+
         if flag:
             # Orchestrator 已提交过同一错误 flag → 避免重复消耗错误次数
             if nss_submit and nss_submit.get("flag") == flag and not nss_submit.get("correct"):
@@ -479,17 +531,24 @@ async def _solve_attempt(
                     )
                 except Exception as exc:
                     print(f"[workbench] 提交失败: {exc}")
-                    break
+                    transient_failures += 1
+                    goal = (
+                        f"{base_goal}\n\n【第 {run_idx + 1} 轮反馈】候选『{flag}』提交接口异常，"
+                        "请复核候选并继续分析，不要放弃题目。"
+                    )
+                    continue
                 if data.get("correct"):
                     print(f"[workbench] ✅ Flag 正确！"
                           f"剩余错误次数: {data.get('remaining_wrong_attempts', '?')}")
                     return True
                 print(f"[workbench] ❌ Flag 错误。"
                       f"剩余错误次数: {data.get('remaining_wrong_attempts', '?')}")
+            rejected_flags.add(flag)
             # 重试时通过 goal 追加提示，避免重复提交同一 flag
             goal = (
-                f"获取 Flag\n\n【题目】{problem.get('content', '')}\n\n"
-                f"【提示】上一次提交 flag『{flag}』被判为错误，请换思路重新分析。"
+                f"{base_goal}\n\n"
+                f"【第 {run_idx + 1} 轮反馈】候选『{flag}』已被平台判为错误，禁止重复提交。"
+                f"目前已排除: {', '.join(sorted(rejected_flags))}。请换思路重新分析。"
             )
             continue
 
@@ -498,8 +557,45 @@ async def _solve_attempt(
         else:
             print("[workbench] 任务标记成功但未捕获 flag")
 
-    # 多次尝试仍未解出：主动放弃
-    print("[workbench] 未能解出，主动放弃本题")
+    # 放弃前重新查询平台状态。只要按配置完成了至少一轮有效会话、题目仍为
+    # active 且尚有错误次数即可主动放弃；登录/会话/API 等瞬态故障不应让
+    # 一道尚未被实际分析的题目被误判为无法解出。
+    if completed_sessions == 0:
+        print(
+            f"[workbench] 未完成有效分析（瞬态故障 {transient_failures} 次），"
+            "保留本题供下次继续，不主动放弃"
+        )
+        return False
+
+    try:
+        latest_data = await _nss_request(
+            nss_client, "GET", f"/skill/agent/arena/attempt/{attempt_id}/", nss_token,
+        )
+        latest = latest_data.get("attempt") or latest_data
+    except Exception as exc:
+        print(f"[workbench] 放弃前无法确认题目状态: {exc}；安全起见保留本题")
+        return False
+
+    latest_state = latest.get("state_label", "active")
+    remaining_seconds = latest.get("remaining_seconds", 0)
+    remaining_wrong = max(
+        0,
+        int(latest.get("max_wrong_count") or 0) - int(latest.get("wrong_count") or 0),
+    )
+    if latest_state != "active":
+        print(f"[workbench] 题目状态已变为 {latest_state}，无需主动放弃")
+        return False
+    if remaining_seconds <= 0 or remaining_wrong <= 0:
+        print(
+            f"[workbench] 题目已无可用时间/错误次数（剩余 {remaining_seconds}s，"
+            f"剩余错误次数 {remaining_wrong}），不再发送放弃请求"
+        )
+        return False
+
+    print(
+        f"[workbench] 已完成 {completed_sessions} 轮仍未解出，题目仍 active "
+        f"（剩余 {remaining_seconds}s / {remaining_wrong} 次错误机会），主动放弃本题"
+    )
     try:
         await _nss_request(nss_client, "POST", f"/skill/agent/arena/attempt/{attempt_id}/abandon/", nss_token)
         print("[workbench] 已提交放弃")
@@ -582,7 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--retries", type=int, default=1,
-        help="单题最多解题轮数（提交错误 flag 后带提示重跑，默认 1）",
+        help="单题最多解题轮数（最少 1 轮，默认 1；提交错误后可按配置重跑）",
     )
     parser.add_argument(
         "--model", "-m", default="Min", choices=["Low", "Min", "Max"],

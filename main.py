@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse  # 命令行参数解析
 import asyncio  # 异步事件循环，驱动整个多智能体任务
 import json  # 审批方案选择协议与结构化消息解析
+import logging  # 日志记录（Summary 报告等收尾阶段的异常追溯）
 import os  # 环境变量与路径操作
 import re  # 从最终证据中提取 CVE 等标题特征
 import sys  # 修改模块搜索路径，确保能 import 本目录下的包
@@ -45,6 +46,7 @@ from agent.Recon import (
     create_artifact_triage_agent,  # 文件/归档目标的侦察（triage）Agent
     create_network_recon_agent,  # 网络目标侦察 Agent
 )
+from agent.Summary import SUMMARY_EXPERT, create_summary_agent  # 对话总结与报告 Agent
 from agent.Reserve import close_reverse_agent, create_reverse_agent  # 逆向分析 Agent（IDA MCP）
 from agent.ScopeAuditor import create_scope_auditor_agent  # IP 授权审核 Agent
 from agent.experts import build_expert_assignments
@@ -53,6 +55,7 @@ from Tools.Plan import (  # Brain 计划登记工具
     create_submit_plan_tool,
     push_plan_update,
 )
+from Tools.Report import generate_mission_pdf  # 任务总结 PDF 报告生成
 from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
 from Tools.KnowledgeBase import get_rag_service
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
@@ -74,6 +77,7 @@ from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     reset_process_tracker,
     reset_tool_json_failure_handler,
     run_interruptible_agent_reply,
+    stream_agent_reply,
 )
 
 
@@ -81,6 +85,12 @@ from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
 # 所有网络任务的工作目录统一放在本文件同级目录下的 WorkDir/ 中，
 # 文件/归档任务则在其下按「文件名_sha256前12位」建立独立子目录。
 _WORKDIR_ROOT = Path(__file__).resolve().parent / "WorkDir"
+
+# Summary 报告 PDF 输出目录（与 api.py 的 .Reports 保持一致）
+_SUMMARY_REPORTS_DIR = Path(__file__).resolve().parent / ".Reports"
+_SUMMARY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+logger = logging.getLogger(__name__)
 
 
 # 肯定的审批答复（其余一律视为拒绝，安全默认）
@@ -273,6 +283,221 @@ def _iter_budget(
     plan_bonus = min(plan_items, 8) * 2
     think = _THINK_BONUS.get(model_ver, 0)
     return max(_ITER_BUDGET_MIN, min(_ITER_BUDGET_MAX, base + plan_bonus + think))
+
+
+# ── Summary 报告（任务收尾阶段）──
+# 报告阶段刻意放在任务终态固化之后：总结 Agent 失败/中断不得改变主任务结论。
+# 会话事件在 run_mission 内统一收集（CLI/API 同源），不依赖 api.py 的 SQLite
+# 持久化层，因此也天然规避了异步写入队列的竞速问题。
+_SUMMARY_TRANSCRIPT_TYPES = {
+    "", "message", "text_end", "user_message", "phase_change", "error",
+    "approval_required", "approval_resolved", "tool_call_end", "flag_found",
+    "mission_start", "mission_end", "nss_submit", "plan_updated",
+}
+
+
+def _make_summary_collector(
+    base_callback: Callable[[str, dict[str, Any]], None] | None,
+    messages: list[dict],
+) -> Callable[[str, dict[str, Any]], None]:
+    """包装事件回调，同步收集用于 Summary 报告的会话事件。
+
+    Agent 回复正文以 text_delta/thinking_delta 增量到达（正文累积发生在
+    下游 api.py 回调的流缓冲区中），因此收集器必须自行累积增量，
+    在 text_end/thinking_end 时以完整正文记录一条。系统事件（phase_change、
+    plan_updated、expert_joined 等）的 content 参考 api.py 持久化规则做
+    轻量映射，保证与历史 transcript 格式一致。
+    """
+    buffers: dict[str, str] = {}
+
+    def collector(event_type: str, **payload: Any) -> None:
+        if event_type in ("text_delta", "thinking_delta"):
+            key = f"{event_type.removesuffix('_delta')}:{payload.get('agent', '')}"
+            buffers[key] = buffers.get(key, "") + (
+                payload.get("delta") or payload.get("content") or ""
+            )
+        elif event_type in ("text_end", "thinking_end"):
+            key = f"{event_type.removesuffix('_end')}:{payload.get('agent', '')}"
+            full = buffers.pop(key, "") or payload.get("full_text") or payload.get("content") or ""
+            if full.strip():
+                messages.append({
+                    "event_type": "text_end",
+                    "agent_name": str(payload.get("agent") or "system"),
+                    "content": full,
+                })
+        elif event_type in _SUMMARY_TRANSCRIPT_TYPES:
+            agent_name = str(payload.get("agent") or "system")
+            if event_type == "mission_start":
+                content = f"目标: {payload.get('target', '')} | 任务: {payload.get('goal', '')}"
+            elif event_type == "mission_end":
+                content = f"状态: {payload.get('status', '未知')}"
+            elif event_type == "phase_change":
+                content = str(payload.get("phase", ""))
+                agent_name = "system"
+            elif event_type == "plan_updated":
+                content = json.dumps({
+                    "items": payload.get("items", []),
+                    "phase": payload.get("phase", ""),
+                }, ensure_ascii=False)
+            elif event_type == "error":
+                content = str(payload.get("message", ""))
+            else:
+                content = str(payload.get("content") or "")
+            if content.strip():
+                messages.append({
+                    "event_type": event_type,
+                    "agent_name": agent_name,
+                    "content": content,
+                })
+        if base_callback is not None:
+            base_callback(event_type, **payload)
+
+    return collector
+
+
+def _build_summary_transcript(messages: list[dict], maximum_chars: int = 120_000) -> str:
+    """从收集的会话事件构建去重、按时间排序且有长度上限的总结输入。"""
+    lines: list[str] = []
+    last_signature: tuple[str, str] | None = None
+    for item in messages:
+        event_type = str(item.get("event_type") or "message")
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        agent = str(item.get("agent_name") or "system")
+        signature = (agent, content)
+        if signature == last_signature:
+            continue
+        last_signature = signature
+        lines.append(f"#{len(lines) + 1} [{event_type}] [{agent}] {content[:5000]}")
+
+    selected: list[str] = []
+    used = 0
+    for line in reversed(lines):
+        if selected and used + len(line) > maximum_chars:
+            break
+        selected.append(line)
+        used += len(line)
+    selected.reverse()
+    omitted = len(lines) - len(selected)
+    prefix = f"[说明] 因长度限制省略最早的 {omitted} 条低优先级记录。\n" if omitted else ""
+    return prefix + "\n".join(selected)
+
+
+async def run_summary_report(
+    mission: MissionState,
+    *,
+    provider: str,
+    model_ver: str,
+    messages: list[dict],
+    event_callback: Callable[[str, dict[str, Any]], None] | None,
+    reports_dir: Path,
+    report_key: str,
+    offloader: Any = None,
+    agent_tasks: set[asyncio.Task[Any]] | None = None,
+    store: MissionStore | None = None,
+) -> str:
+    """调用 Summary Agent，总结完整会话并原子生成 PDF 报告（run_mission 收尾阶段）。
+
+    Args:
+        mission: 已进入终态的任务状态（报告写入 mission.summary 并持久化）
+        provider/model_ver: 模型提供商标识与思考级别
+        messages: 会话事件列表（由 _make_summary_collector 收集）
+        event_callback: 事件回调（expert_joined / Summary 流式正文 / report_ready）
+        reports_dir: PDF 输出目录
+        report_key: PDF 文件名标识（session_id；CLI 模式无 session_id 时用 mission_id）
+        offloader: Summary Agent 的上下文卸载器（复用会话 Workspace）
+        agent_tasks: 当前会话活跃的 Agent reply task 注册表
+        store: 任务状态持久化（可选；提供时保存更新后的 mission）
+
+    Returns:
+        生成的报告正文 Markdown
+    """
+    transcript = _build_summary_transcript(messages)
+    mission_data = mission.to_dict()
+    mission_data.pop("events", None)
+    prompt = (
+        "请总结以下一次完整授权安全测试。\n\n"
+        f"【结构化任务状态】\n{json.dumps(mission_data, ensure_ascii=False, indent=2)[:50000]}\n\n"
+        f"【完整会话记录】\n{transcript}"
+    )
+    if event_callback is not None:
+        event_callback(
+            "expert_joined",
+            expert_name=SUMMARY_EXPERT,
+            specialty="对话总结与 PDF 报告",
+            agent=SUMMARY_EXPERT,
+        )
+    try:
+        runtime = RuntimeConfig.from_env()
+        model = create_model(
+            provider=provider,
+            Ver=model_ver,
+            temperature=0.2,
+            web_search=False,
+            config=runtime,
+        )
+        summary_agent = create_summary_agent(
+            model,
+            offloader=offloader,
+            context_config=build_agent_context_config(),
+        )
+        token = bind_agent_tasks(agent_tasks if agent_tasks is not None else set())
+        try:
+            result = await stream_agent_reply(
+                summary_agent,
+                UserMsg(name="Orchestrator", content=prompt),
+                prefix="[Summary] ",
+                on_event=event_callback,
+            )
+        finally:
+            reset_agent_tasks(token)
+        summary = (result.get_text_content() or "").strip()
+        if not summary:
+            raise RuntimeError("Summary Agent 未返回报告正文")
+    except asyncio.CancelledError:
+        raise
+    except Exception as summary_exc:
+        # 模型服务暂时不可用时仍必须为每次正常结束的任务留下可下载报告。
+        logger.exception("Summary Agent 调用失败: %s", summary_exc)
+        summary = mission.summary.strip() if mission.summary else (
+            "# 执行摘要\n\n"
+            f"授权目标：{mission.target}\n\n"
+            f"任务目标：{mission.goal}\n\n"
+            f"最终阶段：{mission.phase.value}\n\n"
+            f"安全发现：{len(mission.findings)} 条；攻击链步骤：{len(mission.attack_chain)} 条。\n\n"
+            "# 总结状态\n\nSummary Agent 调用失败，本文由结构化任务状态自动生成；"
+            "完整对话仍保存在会话审计记录中。"
+        )
+        if event_callback is not None:
+            event_callback(
+                "message",
+                agent=SUMMARY_EXPERT,
+                content=f"{summary}\n\n> 自动降级原因：{summary_exc}",
+            )
+
+    mission.summary = summary
+    mission.record("Summary", "conversation_summarized", message_count=len(messages))
+    if store is not None:
+        store.save(mission)
+    mission_data = mission.to_dict()
+    report_path = await asyncio.to_thread(
+        generate_mission_pdf,
+        report_key,
+        summary,
+        mission_data,
+        reports_dir,
+    )
+    if event_callback is not None:
+        event_callback(
+            "report_ready",
+            agent="system",
+            filename=report_path.name,
+            url=f"/api/session/{report_key}/report",
+            message="对话总结与 PDF 报告已生成",
+        )
+    print(f"[系统] 任务报告已生成: {report_path}")
+    return summary
 
 
 class _ApprovalBroker:
@@ -654,6 +879,12 @@ async def run_mission(
         store = MissionStore.for_session(session_id, base_dir=project_dir / ".TaskMemory" / "sessions")
     else:
         store = MissionStore(project_dir / ".TaskMemory" / "current_mission.json")
+
+    # ── 4a. 会话事件收集器（Summary 报告数据源，CLI/API 同源）──
+    # 包装事件回调同步收集 message/text_end/审批/计划等会话事件，任务收尾时
+    # 交给 run_summary_report 生成报告；不依赖 api.py 的 SQLite 持久化层。
+    _runtime_messages: list[dict] = []
+    event_callback = _make_summary_collector(event_callback, _runtime_messages)
 
     # ── 4b. 崩溃恢复分支（resume=True）──
     # 从权威 Mission JSON 恢复：终态不重放；不确定动作禁止自动重放；
@@ -1277,6 +1508,43 @@ async def run_mission(
             if mission.flag and event_callback:
                 event_callback("flag_found", flag=mission.flag)
         _push_target_info()
+        # ── 11. Summary Agent 总结与 PDF 报告（终态固化后、返回前）──
+        # 报告阶段刻意放在任务终态固化之后：总结 Agent 失败/中断不得改变
+        # 主任务结论（成功/失败已由 Orchestrator 确定并持久化）。
+        if _runtime_messages:
+            try:
+                await run_summary_report(
+                    mission,
+                    provider=provider,
+                    model_ver=model_ver,
+                    messages=_runtime_messages,
+                    event_callback=event_callback,
+                    reports_dir=_SUMMARY_REPORTS_DIR,
+                    report_key=mission.session_id or mission_id,
+                    offloader=workspace,
+                    agent_tasks=active_agent_tasks,
+                    store=store,
+                )
+            except asyncio.CancelledError:
+                # 任务已固化终态时，报告阶段的取消不得覆盖任务结论。
+                if mission.phase in (Phase.COMPLETED, Phase.FAILED):
+                    print("[系统] Summary 报告阶段被中断，已保留任务终态。")
+                    if event_callback is not None:
+                        event_callback(
+                            "report_error",
+                            message="Summary Agent 在任务完成后被中断，已保留任务终态和结构化摘要",
+                            agent="system",
+                        )
+                else:
+                    raise
+            except Exception as summary_exc:
+                logger.exception("Summary Agent 调用失败: %s", summary_exc)
+                if event_callback is not None:
+                    event_callback(
+                        "report_error",
+                        message="总结或 PDF 报告生成失败，详情见服务端日志",
+                        agent="system",
+                    )
         return mission
 
     except (ToolJSONValidationError, QwenModelUnavailableError) as exc:

@@ -478,6 +478,8 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 /* Superadmin model endpoint registry (kept independent from Liquid Glass mode). */
 .model-config-overlay{z-index:1200}
 .model-config-modal{position:fixed!important;z-index:1201;inset:50% auto auto 50%!important;margin:0!important;transform:translate(-50%,-50%)!important;width:min(760px,calc(100vw - 28px));max-height:min(760px,calc(100dvh - 24px));overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;background:#151515;border-color:#3a3a3a;color:#eee}
+.superadmin-reset-overlay{z-index:1300}
+.superadmin-reset-modal{position:fixed!important;z-index:1301;inset:50% auto auto 50%!important;margin:0!important;transform:translate(-50%,-50%)!important;width:min(480px,calc(100vw - 28px));max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain}
 .model-config-modal>p,.model-config-modal [data-radix-dialog-description]{margin:5px 0 17px;color:#888;font-size:11px}
 .model-config-modal [data-radix-dialog-description] a{color:#d96b6b;text-decoration:none}.model-config-modal [data-radix-dialog-description] a:hover{color:#ff8b8b;text-decoration:underline}
 .model-config-form label{color:#999}
