@@ -26,3 +26,4 @@ webui/dist/
 .vscode
 reasonix.toml
 workbench_nss*
+reasonix.toml

@@ -480,14 +480,14 @@ async def run_summary_report(
     mission.record("Summary", "conversation_summarized", message_count=len(messages))
     if store is not None:
         store.save(mission)
-    mission_data = mission.to_dict()
-    report_path = await asyncio.to_thread(
-        generate_mission_pdf,
-        report_key,
-        summary,
-        mission_data,
-        reports_dir,
-    )
+        mission_data = mission.to_dict()
+        report_path = await asyncio.to_thread(
+            generate_mission_pdf,
+            report_key,
+            summary,
+            mission_data,
+            reports_dir,
+        )
     if event_callback is not None:
         event_callback(
             "report_ready",
