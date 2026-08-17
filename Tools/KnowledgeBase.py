@@ -17,10 +17,17 @@ from config import RuntimeConfig
 class RAGService:
     """Own the KnowledgeBase runtime and incremental Markdown indexing."""
 
-    def __init__(self, project_root: Path, runtime: RuntimeConfig | None = None) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        runtime: RuntimeConfig | None = None,
+        state_dir: Path | None = None,
+    ) -> None:
         self.project_root = project_root
         self.source_dir = project_root / ".RAG"
-        self.state_dir = project_root / ".TaskMemory" / "rag"
+        # 默认与主系统共享派生索引；CLI 等离线调用方可通过 state_dir 指定独立目录，
+        # 避免与运行中的服务争用 Milvus Lite 的单进程文件锁。
+        self.state_dir = state_dir or (project_root / ".TaskMemory" / "rag")
         self.manifest_path = self.state_dir / "manifest.json"
         self.runtime = runtime or RuntimeConfig.from_env()
         self.knowledge: Any | None = None
@@ -35,8 +42,11 @@ class RAGService:
         self.dimension_migration: dict[str, Any] | None = None
         self._lock = asyncio.Lock()
 
-    async def start(self) -> None:
-        """Initialize the optional RAG runtime, then synchronize the corpus."""
+    async def start(self, progress_callback=None) -> None:
+        """Initialize the optional RAG runtime, then synchronize the corpus.
+
+        ``progress_callback`` is forwarded to :meth:`sync` when provided.
+        """
         if self.started:
             return
         self.started = True
@@ -81,7 +91,7 @@ class RAGService:
                 collection="lingshu_rag",
             )
             self.available = True
-            await self.sync()
+            await self.sync(progress_callback=progress_callback)
         except Exception as exc:  # optional subsystem must never block mission startup
             self.error = f"知识库初始化失败: {exc}"
             self.available = False
@@ -255,8 +265,13 @@ class RAGService:
                 )
         return result
 
-    async def sync(self) -> dict[str, Any]:
-        """Incrementally synchronize Markdown sources and remove stale documents."""
+    async def sync(self, progress_callback=None) -> dict[str, Any]:
+        """Incrementally synchronize Markdown sources and remove stale documents.
+
+        ``progress_callback(done, total, rel, stats)`` is invoked after each
+        source file is processed (inserted, updated, or skipped); ``stats`` is
+        a dict with the running ``added``/``updated``/``removed`` counters.
+        """
         if not self.available or self.knowledge is None:
             return self.status()
         async with self._lock:
@@ -271,21 +286,28 @@ class RAGService:
                     await self.knowledge.delete_document(entry["document_id"])
                     removed += int(rel not in sources)
             new_manifest: dict[str, dict[str, str]] = {}
+            total = len(sources)
+            done = 0
             for rel, (path, digest) in sources.items():
                 old_entry = old.get(rel)
                 if old_entry and old_entry.get("sha256") == digest:
                     new_manifest[rel] = old_entry
-                    continue
-                sections = await parser.parse(file=path.read_bytes(), filename=rel)
-                chunks = await chunker.chunk(sections)
-                document_id = await self.knowledge.insert_document(
-                    chunks, document_metadata={"source": rel, "sha256": digest},
-                )
-                new_manifest[rel] = {"sha256": digest, "document_id": document_id}
-                if old_entry:
-                    updated += 1
                 else:
-                    added += 1
+                    sections = await parser.parse(file=path.read_bytes(), filename=rel)
+                    chunks = await chunker.chunk(sections)
+                    document_id = await self.knowledge.insert_document(
+                        chunks, document_metadata={"source": rel, "sha256": digest},
+                    )
+                    new_manifest[rel] = {"sha256": digest, "document_id": document_id}
+                    if old_entry:
+                        updated += 1
+                    else:
+                        added += 1
+                done += 1
+                if progress_callback is not None:
+                    progress_callback(done, total, rel, {
+                        "added": added, "updated": updated, "removed": removed,
+                    })
             self._write_manifest(new_manifest)
             self.last_sync = {
                 "added": added,

@@ -13,6 +13,7 @@ import {
   Database,
   FlaskConical,
   FileDown,
+  GitBranch,
   LogOut,
   LoaderCircle,
   Moon,
@@ -40,21 +41,31 @@ import darkLogo from "./logored.png";
 
 type ThemeMode = "light" | "dark" | "liquid";
 
+// Safari/WebKit 检测：注入 data-safari，供 CSS 做平衡降级（规避 SVG 折射、filter 动画等昂贵路径）
+if (typeof document !== "undefined") {
+  const ua = navigator.userAgent;
+  const isSafari =
+    /Safari/.test(ua) &&
+    /AppleWebKit/.test(ua) &&
+    !/Chrome|CriOS|Chromium|Edg|OPR|FxiOS/i.test(ua);
+  if (isSafari) document.documentElement.dataset.safari = "1";
+}
+
 const liquidDisplacementMap = `data:image/svg+xml,${encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200">
   <defs>
     <radialGradient id="lens" cx="50%" cy="45%" r="72%">
       <stop offset="0" stop-color="#8a8a8a"/>
       <stop offset=".5" stop-color="#808080"/>
-      <stop offset=".72" stop-color="#4d8dff"/>
-      <stop offset=".88" stop-color="#57c7ff"/>
-      <stop offset="1" stop-color="#eaf6ff"/>
+      <stop offset=".72" stop-color="#f0a26b"/>
+      <stop offset=".88" stop-color="#f6c08c"/>
+      <stop offset="1" stop-color="#fff2e2"/>
     </radialGradient>
     <linearGradient id="sweep" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#5ab0ff"/>
+      <stop offset="0" stop-color="#f2b076"/>
       <stop offset=".4" stop-color="#808080"/>
-      <stop offset=".7" stop-color="#4d8dff"/>
-      <stop offset="1" stop-color="#ffffff"/>
+      <stop offset=".7" stop-color="#e8965f"/>
+      <stop offset="1" stop-color="#fff8f0"/>
     </linearGradient>
   </defs>
   <rect width="320" height="200" fill="#808080"/>
@@ -912,11 +923,16 @@ function phaseLabel(phase?: string) {
 function Login({ onReady }: { onReady: () => void }) {
   const [user, setUser] = useState(""),
     [password, setPassword] = useState(""),
+    [inviteCode, setInviteCode] = useState(""),
+    [version, setVersion] = useState({ branch: "unknown", commit: "unknown" }),
     [register, setRegister] = useState(false);
+  useEffect(() => {
+    void api.version().then(setVersion).catch(() => undefined);
+  }, []);
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     try {
-      if (register) await api.register(user, password);
+      if (register) await api.register(user, password, "", inviteCode);
       const r = await api.login(user, password);
       auth.set(r.access_token);
       onReady();
@@ -971,10 +987,17 @@ function Login({ onReady }: { onReady: () => void }) {
             placeholder="请输入密码"
           />
         </label>
+        {register && (
+          <label>
+            注册邀请码
+            <input value={inviteCode} onChange={(e) => setInviteCode(e.target.value)} required placeholder="由管理员提供" />
+          </label>
+        )}
         <button className="danger-button">
           {register ? "创建账户" : "进入控制台"} <span>→</span>
         </button>
-        <footer>广交院·信智学院 | Lingshu Agent 项目 | c62d95e <br/>
+        <footer><GitBranch size={11} /> 分支 {version.branch} · 提交 {version.commit}<br/>
+          广交院·信智学院 | Lingshu Agent 项目 <br/>
           <a href="https://beian.miit.gov.cn/">粤ICP备2024275751号</a>
           <br/>
           <a href="https://beian.miit.gov.cn/">粤ICP备2025430595号</a>

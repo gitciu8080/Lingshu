@@ -245,96 +245,96 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 
 /* ── 华丽液态玻璃主题：高折射、棱镜色散与动态镜面高光（冰川蓝/靛蓝） ── */
 :root[data-theme=liquid]{
-  --bg:#050814;
-  --side:rgba(10,18,44,.40);
-  --panel:rgba(15,24,56,.42);
-  --panel2:rgba(255,255,255,.08);
-  --line:rgba(255,255,255,.26);
-  --line2:rgba(255,255,255,.13);
-  --text:#f2f7ff;
-  --dim:rgba(214,229,255,.68);
-  --accent:#4d8dff;
-  --red:#ff5c7a;
-  --soft-red:rgba(77,141,255,.15);
-  --glow:rgba(77,141,255,.50);
-  --brain:#a89bff;
-  --recon:#57c7ff;
-  --attack:#ff6b81;
-  --analysis:#ffb36b;
-  --orchestrator:#5ff0da;
-  --system:#b9c8e9;
-  --glass-bg:linear-gradient(135deg,rgba(255,255,255,.16),rgba(190,220,255,.06) 44%,rgba(77,141,255,.10));
-  --glass-bg-strong:linear-gradient(135deg,rgba(28,40,90,.84),rgba(10,16,46,.91));
-  --glass-border:rgba(255,255,255,.36);
-  --glass-shadow:0 30px 90px rgba(0,0,0,.50),0 0 60px rgba(77,141,255,.22),0 0 46px rgba(90,200,255,.16);
-  --glass-inner:inset 1px 1px 0 rgba(255,255,255,.62),inset -1px -1px 0 rgba(90,140,255,.24);
-  --glass-filter:url("#liquid-refraction") blur(16px) saturate(210%) contrast(112%);
+  --bg:#f6f0e8;
+  --side:rgba(255,250,244,.62);
+  --panel:rgba(255,253,249,.72);
+  --panel2:rgba(255,255,255,.58);
+  --line:rgba(148,112,84,.30);
+  --line2:rgba(148,112,84,.18);
+  --text:#3b2d21;
+  --dim:rgba(108,90,72,.80);
+  --accent:#d9824a;
+  --red:#d96a56;
+  --soft-red:rgba(240,178,132,.20);
+  --glow:rgba(244,176,120,.42);
+  --brain:#8f74c4;
+  --recon:#4d8fb5;
+  --attack:#d0604f;
+  --analysis:#d9974c;
+  --orchestrator:#4aa17f;
+  --system:#8d8074;
+  --glass-bg:linear-gradient(135deg,rgba(255,252,246,.42),rgba(255,240,224,.30) 44%,rgba(246,196,150,.18));
+  --glass-bg-strong:linear-gradient(135deg,#fdf7ef,#f6e7d6);
+  --glass-border:rgba(255,255,255,.70);
+  --glass-shadow:0 30px 90px rgba(120,88,56,.20),0 0 60px rgba(244,176,120,.22),0 0 46px rgba(236,152,112,.16);
+  --glass-inner:inset 1px 1px 0 rgba(255,255,255,.92),inset -1px -1px 0 rgba(224,162,122,.30);
+  --glass-filter:url("#liquid-refraction") blur(16px) saturate(140%) contrast(104%);
   --radius-control:10px;  /* 按钮/输入框/小控件 —— Apple 控件圆角 */
   --radius-card:12px;     /* 次级卡片/条目 */
   --radius-panel:24px;    /* 大容器/弹窗 */
-  color-scheme:dark;
+  color-scheme:light;
 }
-:root[data-theme=liquid] .theme-logo-light{display:none!important}
-:root[data-theme=liquid] .theme-logo-dark{display:block!important}
-.liquid-scene{display:none;pointer-events:none;position:fixed;z-index:0;inset:0;overflow:hidden;background:#050814}
+:root[data-theme=liquid] .theme-logo-light{display:block!important}
+:root[data-theme=liquid] .theme-logo-dark{display:none!important}
+.liquid-scene{display:none;pointer-events:none;position:fixed;z-index:0;inset:0;overflow:hidden;background:radial-gradient(circle at 18% 22%,rgba(244,176,120,.55),transparent 42%),radial-gradient(circle at 82% 18%,rgba(240,160,120,.46),transparent 40%),radial-gradient(circle at 75% 82%,rgba(236,152,112,.40),transparent 45%),radial-gradient(circle at 24% 80%,rgba(246,196,150,.48),transparent 42%),#f6f0e8}
 :root[data-theme=liquid] .liquid-scene{display:block}
 .liquid-filter{position:absolute;width:0;height:0;overflow:hidden}
 
 /* ── 纯色背景 + 鼠标发光：指针处柔和光晕，其余保持干净深空蓝 ── */
 .pointer-glow{position:absolute;left:0;top:0;width:420px;height:420px;border-radius:50%;transform:translate(var(--px,50vw),var(--py,40vh)) translate(-50%,-50%);mix-blend-mode:screen;filter:blur(8px);pointer-events:none;will-change:transform}
-.pointer-glow::before{content:"";position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle,rgba(170,210,255,.42),rgba(96,158,255,.16) 40%,transparent 68%)}
-.pointer-glow::after{content:"";position:absolute;inset:34%;border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.5),transparent 58%)}
+.pointer-glow::before{content:"";position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle,rgba(255,214,170,.50),rgba(244,176,120,.20) 40%,transparent 68%)}
+.pointer-glow::after{content:"";position:absolute;inset:34%;border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.55),transparent 58%)}
 
-:root[data-theme=liquid] body,:root[data-theme=liquid] #root{background:#050814}
+:root[data-theme=liquid] body,:root[data-theme=liquid] #root{background:#f6f0e8}
 :root[data-theme=liquid] .console-shell{background:transparent;isolation:isolate;padding:44px 14px 14px}
 :root[data-theme=liquid] .console-shell>.scanlines,:root[data-theme=liquid] .console-shell>.top-rail,:root[data-theme=liquid] .console-shell>.app-frame{z-index:1}
-:root[data-theme=liquid] .scanlines{opacity:.12;background:repeating-linear-gradient(0deg,rgba(255,255,255,.2) 0,rgba(255,255,255,.2) 1px,transparent 1px,transparent 5px),linear-gradient(90deg,transparent 49.9%,rgba(68,218,255,.12) 50%,transparent 50.1%);mix-blend-mode:overlay}
-:root[data-theme=liquid] .top-rail{inset:8px 14px auto;height:28px;padding:0 14px;border:1px solid rgba(255,255,255,.24);border-radius:999px;background:linear-gradient(115deg,rgba(255,255,255,.16),rgba(255,255,255,.05) 45%,rgba(77,141,255,.10));box-shadow:inset 0 1px rgba(255,255,255,.24),0 8px 24px rgba(0,0,0,.2),0 0 20px rgba(77,141,255,.15);backdrop-filter:blur(8px) saturate(160%);-webkit-backdrop-filter:blur(8px) saturate(160%);color:rgba(238,246,255,.78);text-shadow:0 0 12px rgba(255,255,255,.46)}
-:root[data-theme=liquid] .online{color:#80ffdf;text-shadow:0 0 15px #50ffd0}
-:root[data-theme=liquid] .app-frame{border:1px solid var(--glass-border);border-radius:24px;background:var(--glass-bg);box-shadow:var(--glass-shadow),var(--glass-inner);clip-path:inset(0 round 24px);backdrop-filter:var(--glass-filter);-webkit-backdrop-filter:blur(16px) saturate(210%) contrast(112%);isolation:isolate}
-:root[data-theme=liquid] .app-frame::before{content:"";position:absolute;z-index:8;pointer-events:none;inset:0;border-radius:inherit;background:linear-gradient(118deg,rgba(255,255,255,.4),transparent 12% 43%,rgba(90,200,255,.14) 51%,transparent 60% 79%,rgba(120,150,255,.28));mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude;padding:1px;filter:url("#liquid-chromatic") drop-shadow(0 0 10px rgba(255,255,255,.28))}
-:root[data-theme=liquid] .session-sidebar,:root[data-theme=liquid] .intel-panel{background:linear-gradient(165deg,rgba(255,255,255,.16),rgba(9,16,40,.22) 42%,rgba(77,141,255,.08));backdrop-filter:blur(10px) saturate(160%);-webkit-backdrop-filter:blur(10px) saturate(160%);border-color:rgba(255,255,255,.22)}
-:root[data-theme=liquid] .mission-main{background:rgba(4,6,18,.12)}
-:root[data-theme=liquid] .mission-header,:root[data-theme=liquid] .mission-strip,:root[data-theme=liquid] .command-bar{background:linear-gradient(115deg,rgba(255,255,255,.19),rgba(255,255,255,.06) 45%,rgba(77,141,255,.11));border-color:rgba(255,255,255,.22);backdrop-filter:blur(10px) saturate(160%);-webkit-backdrop-filter:blur(10px) saturate(160%);box-shadow:inset 0 1px rgba(255,255,255,.24),0 8px 30px rgba(0,0,0,.16)}
-:root[data-theme=liquid] .agent-feed{background:radial-gradient(circle at 12% 10%,rgba(77,141,255,.15),transparent 31%),radial-gradient(circle at 90% 76%,rgba(86,196,255,.13),transparent 34%),rgba(6,10,26,.10)}
-:root[data-theme=liquid] .brand b{background:linear-gradient(105deg,#fff 0%,#cfe6ff 25%,#4d8dff 47%,#9fd4ff 72%,#fff 100%);background-size:220% auto;background-clip:text;color:transparent;text-shadow:0 0 22px rgba(77,141,255,.4);animation:liquid-title 5s linear infinite}
+:root[data-theme=liquid] .scanlines{opacity:.10;background:repeating-linear-gradient(0deg,rgba(120,90,60,.16) 0,rgba(120,90,60,.16) 1px,transparent 1px,transparent 5px),linear-gradient(90deg,transparent 49.9%,rgba(210,150,100,.10) 50%,transparent 50.1%);mix-blend-mode:overlay}
+:root[data-theme=liquid] .top-rail{inset:8px 14px auto;height:28px;padding:0 14px;border:1px solid rgba(255,255,255,.68);border-radius:999px;background:linear-gradient(115deg,rgba(255,252,246,.50),rgba(255,244,230,.38) 45%,rgba(244,192,144,.22));box-shadow:inset 0 1px rgba(255,255,255,.9),0 8px 24px rgba(120,88,56,.16),0 0 20px rgba(244,176,120,.18);backdrop-filter:blur(8px) saturate(150%);-webkit-backdrop-filter:blur(8px) saturate(150%);color:rgba(90,70,50,.88);text-shadow:0 1px 0 rgba(255,255,255,.6)}
+:root[data-theme=liquid] .online{color:#3f9d7d;text-shadow:0 0 12px rgba(90,180,140,.45)}
+:root[data-theme=liquid] .app-frame{border:1px solid var(--glass-border);border-radius:24px;background:var(--glass-bg);box-shadow:var(--glass-shadow),var(--glass-inner);clip-path:inset(0 round 24px);backdrop-filter:var(--glass-filter);-webkit-backdrop-filter:blur(16px) saturate(140%) contrast(104%);isolation:isolate}
+:root[data-theme=liquid] .app-frame::before{content:"";position:absolute;z-index:8;pointer-events:none;inset:0;border-radius:inherit;background:linear-gradient(118deg,rgba(255,255,255,.85),transparent 12% 43%,rgba(244,190,140,.30) 51%,transparent 60% 79%,rgba(244,168,120,.40));mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude;-webkit-mask-composite:xor;padding:1px;filter:url("#liquid-chromatic") drop-shadow(0 0 10px rgba(255,236,210,.5))}
+:root[data-theme=liquid] .session-sidebar,:root[data-theme=liquid] .intel-panel{background:linear-gradient(165deg,rgba(255,252,246,.48),rgba(250,238,222,.36) 42%,rgba(244,196,150,.20));backdrop-filter:blur(10px) saturate(150%);-webkit-backdrop-filter:blur(10px) saturate(150%);border-color:rgba(148,112,84,.20)}
+:root[data-theme=liquid] .mission-main{background:rgba(246,240,232,.20)}
+:root[data-theme=liquid] .mission-header,:root[data-theme=liquid] .mission-strip,:root[data-theme=liquid] .command-bar{background:linear-gradient(115deg,rgba(255,252,246,.52),rgba(255,244,230,.40) 45%,rgba(244,192,144,.24));border-color:rgba(148,112,84,.20);backdrop-filter:blur(10px) saturate(150%);-webkit-backdrop-filter:blur(10px) saturate(150%);box-shadow:inset 0 1px rgba(255,255,255,.9),0 8px 30px rgba(120,88,56,.14)}
+:root[data-theme=liquid] .agent-feed{background:radial-gradient(circle at 12% 10%,rgba(244,196,150,.20),transparent 31%),radial-gradient(circle at 90% 76%,rgba(240,160,120,.16),transparent 34%),rgba(246,240,232,.16)}
+:root[data-theme=liquid] .brand b{background:linear-gradient(105deg,#8a5a30 0%,#c98a52 25%,#e8a86a 47%,#d98a4e 72%,#8a5a30 100%);background-size:220% auto;background-clip:text;color:transparent;text-shadow:none;animation:liquid-title 5s linear infinite}
 @keyframes liquid-title{to{background-position:220% center}}
-:root[data-theme=liquid] .brand-logo{border-radius:10px;box-shadow:0 0 0 1px rgba(255,255,255,.38),0 0 19px rgba(77,141,255,.65);transform:rotate(-2deg)}
-:root[data-theme=liquid] .theme-switch.liquid{color:#fff;border-color:rgba(255,255,255,.48);background:conic-gradient(from 210deg,rgba(77,141,255,.78),rgba(90,200,255,.66),rgba(160,178,255,.66),rgba(77,141,255,.78));box-shadow:inset 0 1px rgba(255,255,255,.66),0 0 20px rgba(77,141,255,.6);animation:liquid-control-pulse 2.8s ease-in-out infinite}
-@keyframes liquid-control-pulse{50%{transform:scale(1.09) rotate(5deg);filter:hue-rotate(18deg);box-shadow:inset 0 1px #fff,0 0 28px rgba(71,218,255,.7)}}
+:root[data-theme=liquid] .brand-logo{border-radius:10px;box-shadow:0 0 0 1px rgba(255,255,255,.7),0 0 19px rgba(244,176,120,.5);transform:rotate(-2deg)}
+:root[data-theme=liquid] .theme-switch.liquid{color:#fff;border-color:rgba(255,255,255,.78);background:conic-gradient(from 210deg,rgba(244,168,116,.85),rgba(244,196,140,.72),rgba(226,150,116,.72),rgba(244,168,116,.85));box-shadow:inset 0 1px rgba(255,255,255,.82),0 0 20px rgba(244,176,120,.5);animation:liquid-control-pulse 2.8s ease-in-out infinite}
+@keyframes liquid-control-pulse{50%{transform:scale(1.09) rotate(5deg);filter:hue-rotate(10deg);box-shadow:inset 0 1px #fff,0 0 28px rgba(244,180,130,.6)}}
 
-:root[data-theme=liquid] .new-mission,:root[data-theme=liquid] .phase-chip,:root[data-theme=liquid] .header-actions button,:root[data-theme=liquid] .command-bar button,:root[data-theme=liquid] .quiet-button,:root[data-theme=liquid] .danger-button{position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.38);background:linear-gradient(135deg,rgba(255,255,255,.25),rgba(255,255,255,.07) 48%,rgba(77,141,255,.18));box-shadow:inset 1px 1px rgba(255,255,255,.48),inset -1px -1px rgba(90,140,255,.2),0 9px 24px rgba(0,0,0,.25),0 0 16px rgba(77,141,255,.22);transition:transform .25s cubic-bezier(.2,.85,.2,1.35),box-shadow .25s,filter .25s}
-:root[data-theme=liquid] .new-mission::after,:root[data-theme=liquid] .header-actions button::after,:root[data-theme=liquid] .command-bar button::after,:root[data-theme=liquid] .danger-button::after{content:"";position:absolute;inset:-60% -25%;background:linear-gradient(110deg,transparent 35%,rgba(255,255,255,.8) 48%,rgba(140,215,255,.45) 52%,transparent 64%);transform:translateX(-75%) rotate(8deg);transition:transform .65s ease;pointer-events:none}
+:root[data-theme=liquid] .new-mission,:root[data-theme=liquid] .phase-chip,:root[data-theme=liquid] .header-actions button,:root[data-theme=liquid] .command-bar button,:root[data-theme=liquid] .quiet-button,:root[data-theme=liquid] .danger-button{position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.75);background:linear-gradient(135deg,rgba(255,252,246,.85),rgba(255,244,230,.62) 48%,rgba(244,192,144,.44));box-shadow:inset 1px 1px rgba(255,255,255,.9),inset -1px -1px rgba(224,162,122,.30),0 9px 24px rgba(120,88,56,.18),0 0 16px rgba(244,176,120,.20);transition:transform .25s cubic-bezier(.2,.85,.2,1.35),box-shadow .25s,filter .25s}
+:root[data-theme=liquid] .new-mission::after,:root[data-theme=liquid] .header-actions button::after,:root[data-theme=liquid] .command-bar button::after,:root[data-theme=liquid] .danger-button::after{content:"";position:absolute;inset:-60% -25%;background:linear-gradient(110deg,transparent 35%,rgba(255,255,255,.9) 48%,rgba(244,196,150,.5) 52%,transparent 64%);transform:translateX(-75%) rotate(8deg);transition:transform .65s ease;pointer-events:none}
 :root[data-theme=liquid] .new-mission:hover::after,:root[data-theme=liquid] .header-actions button:hover::after,:root[data-theme=liquid] .command-bar button:hover::after,:root[data-theme=liquid] .danger-button:hover::after{transform:translateX(75%) rotate(8deg)}
-:root[data-theme=liquid] .new-mission:hover,:root[data-theme=liquid] .header-actions button:hover,:root[data-theme=liquid] .command-bar button:hover,:root[data-theme=liquid] .danger-button:hover{transform:translateY(-2px) scale(1.045);filter:saturate(135%) brightness(1.13);box-shadow:inset 1px 1px rgba(255,255,255,.72),0 14px 32px rgba(0,0,0,.3),0 0 25px rgba(77,141,255,.5),0 0 16px rgba(90,200,255,.36)}
-:root[data-theme=liquid] .new-mission,:root[data-theme=liquid] .stop,:root[data-theme=liquid] .rerun{color:#fff;text-shadow:0 0 11px currentColor;border-style:solid}
-:root[data-theme=liquid] .command-bar button,:root[data-theme=liquid] .danger-button,:root[data-theme=liquid] .approval-approve{background:linear-gradient(135deg,#6fb0ff 0%,#3d7bff 46%,#4c5fd9 100%);color:#fff;border-color:rgba(255,255,255,.55);box-shadow:inset 0 1px rgba(255,255,255,.65),0 10px 30px rgba(61,123,255,.42),0 0 24px rgba(110,170,255,.38)}
-:root[data-theme=liquid] .phase-chip{border-radius:999px;color:#fff;background:linear-gradient(120deg,rgba(255,255,255,.24),rgba(77,141,255,.2),rgba(90,200,255,.14));text-shadow:0 0 9px currentColor}
-:root[data-theme=liquid] .session-search input,:root[data-theme=liquid] .modal input,:root[data-theme=liquid] .modal select,:root[data-theme=liquid] .modal textarea,:root[data-theme=liquid] .knowledge-search input{border:1px solid rgba(255,255,255,.24);background:rgba(8,12,32,.30);box-shadow:inset 1px 1px 0 rgba(255,255,255,.14),0 8px 22px rgba(0,0,0,.12);backdrop-filter:blur(12px);color:#fff}
-:root[data-theme=liquid] .session-search input:focus,:root[data-theme=liquid] .modal input:focus,:root[data-theme=liquid] .modal textarea:focus{border-color:rgba(122,178,255,.85);box-shadow:0 0 0 2px rgba(77,141,255,.25),0 0 24px rgba(77,141,255,.35)}
+:root[data-theme=liquid] .new-mission:hover,:root[data-theme=liquid] .header-actions button:hover,:root[data-theme=liquid] .command-bar button:hover,:root[data-theme=liquid] .danger-button:hover{transform:translateY(-2px) scale(1.045);filter:saturate(130%) brightness(1.05);box-shadow:inset 1px 1px rgba(255,255,255,.95),0 14px 32px rgba(120,88,56,.22),0 0 25px rgba(244,176,120,.45),0 0 16px rgba(240,160,120,.32)}
+:root[data-theme=liquid] .new-mission,:root[data-theme=liquid] .stop,:root[data-theme=liquid] .rerun{color:#6b3f1d;text-shadow:0 1px 0 rgba(255,255,255,.5);border-style:solid}
+:root[data-theme=liquid] .command-bar button,:root[data-theme=liquid] .danger-button,:root[data-theme=liquid] .approval-approve{background:linear-gradient(135deg,#f0b076 0%,#d9824a 46%,#c96a3a 100%);color:#fff;border-color:rgba(255,255,255,.6);box-shadow:inset 0 1px rgba(255,255,255,.7),0 10px 30px rgba(200,120,60,.38),0 0 24px rgba(244,176,120,.34)}
+:root[data-theme=liquid] .phase-chip{border-radius:999px;color:#7a4a24;background:linear-gradient(120deg,rgba(255,252,246,.9),rgba(244,192,144,.5),rgba(240,160,120,.36));text-shadow:none}
+:root[data-theme=liquid] .session-search input,:root[data-theme=liquid] .modal input,:root[data-theme=liquid] .modal select,:root[data-theme=liquid] .modal textarea,:root[data-theme=liquid] .knowledge-search input{border:1px solid rgba(148,112,84,.28);background:rgba(255,253,249,.82);box-shadow:inset 1px 1px 0 rgba(255,255,255,.8),0 8px 22px rgba(120,88,56,.10);backdrop-filter:blur(12px);color:#3b2d21}
+:root[data-theme=liquid] .session-search input:focus,:root[data-theme=liquid] .modal input:focus,:root[data-theme=liquid] .modal textarea:focus{border-color:rgba(217,130,74,.9);box-shadow:0 0 0 2px rgba(217,130,74,.22),0 0 24px rgba(244,176,120,.30)}
 :root[data-theme=liquid] .session-row{border:1px solid transparent;transition:background .22s,border-color .22s,transform .22s,box-shadow .22s}
-:root[data-theme=liquid] .session-row:hover{transform:translateX(3px);background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.16)}
-:root[data-theme=liquid] .session-row.selected{background:linear-gradient(110deg,rgba(77,141,255,.24),rgba(140,160,255,.16),rgba(90,200,255,.10));border-color:rgba(255,255,255,.3);box-shadow:inset 3px 0 #4d8dff,inset 0 1px rgba(255,255,255,.18),0 8px 25px rgba(0,0,0,.18),0 0 18px rgba(77,141,255,.2)}
+:root[data-theme=liquid] .session-row:hover{transform:translateX(3px);background:rgba(244,196,150,.28);border-color:rgba(148,112,84,.22)}
+:root[data-theme=liquid] .session-row.selected{background:linear-gradient(110deg,rgba(244,176,120,.38),rgba(240,196,150,.28),rgba(236,152,112,.20));border-color:rgba(148,112,84,.32);box-shadow:inset 3px 0 #d9824a,inset 0 1px rgba(255,255,255,.7),0 8px 25px rgba(120,88,56,.14),0 0 18px rgba(244,176,120,.24)}
 
-:root[data-theme=liquid] .agent-card{background:linear-gradient(145deg,rgba(30,44,96,.62),rgba(12,20,52,.52));border-color:rgba(255,255,255,.24);border-left-color:var(--system);border-radius:16px;box-shadow:inset 1px 1px 0 rgba(255,255,255,.24),inset -1px 0 0 rgba(120,190,255,.18),0 13px 34px rgba(0,0,0,.26),0 0 24px color-mix(in srgb,currentColor 8%,transparent)}
-:root[data-theme=liquid] .agent-card header,:root[data-theme=liquid] .agent-card.thinking summary{background:linear-gradient(110deg,rgba(255,255,255,.12),rgba(255,255,255,.035));border-color:rgba(255,255,255,.13)}
-:root[data-theme=liquid] .agent-card.operator{background:linear-gradient(145deg,rgba(77,141,255,.26),rgba(22,32,84,.62));box-shadow:inset 0 1px rgba(255,255,255,.2),0 12px 34px rgba(0,0,0,.28),0 0 25px rgba(77,141,255,.22)}
-:root[data-theme=liquid] .agent-body{color:rgba(255,252,255,.94);text-shadow:0 1px 1px rgba(0,0,0,.35)}
-:root[data-theme=liquid] .agent-avatar{border-radius:9px;box-shadow:inset 0 1px rgba(255,255,255,.45),0 0 17px currentColor}
+:root[data-theme=liquid] .agent-card{background:linear-gradient(145deg,rgba(255,253,249,.74),rgba(250,240,226,.64));border-color:rgba(148,112,84,.24);border-left-color:var(--system);border-radius:16px;box-shadow:inset 1px 1px 0 rgba(255,255,255,.9),inset -1px 0 0 rgba(224,162,122,.22),0 13px 34px rgba(120,88,56,.16),0 0 24px color-mix(in srgb,currentColor 6%,transparent)}
+:root[data-theme=liquid] .agent-card header,:root[data-theme=liquid] .agent-card.thinking summary{background:linear-gradient(110deg,rgba(255,252,246,.72),rgba(250,240,226,.56));border-color:rgba(148,112,84,.14)}
+:root[data-theme=liquid] .agent-card.operator{background:linear-gradient(145deg,rgba(244,176,120,.32),rgba(246,232,214,.74));box-shadow:inset 0 1px rgba(255,255,255,.85),0 12px 34px rgba(120,88,56,.18),0 0 25px rgba(244,176,120,.26)}
+:root[data-theme=liquid] .agent-body{color:#3b2d21;text-shadow:none}
+:root[data-theme=liquid] .agent-avatar{border-radius:9px;box-shadow:inset 0 1px rgba(255,255,255,.6),0 0 12px color-mix(in srgb,currentColor 45%,transparent)}
 :root[data-theme=liquid] .system-notice span,:root[data-theme=liquid] .phase-divider span,:root[data-theme=liquid] .expert-join-card,:root[data-theme=liquid] .tool-card{backdrop-filter:blur(8px) saturate(150%);-webkit-backdrop-filter:blur(8px) saturate(150%)}
-:root[data-theme=liquid] .radar{border-color:rgba(255,255,255,.36);background:radial-gradient(circle,rgba(255,255,255,.12),rgba(20,32,88,.24) 55%,rgba(6,10,26,.18)),repeating-radial-gradient(circle,transparent 0,transparent 20px,rgba(90,200,255,.28) 21px,transparent 22px);box-shadow:inset 0 0 30px rgba(90,200,255,.18),0 0 28px rgba(77,141,255,.3);animation:radar-glass 4s ease-in-out infinite}
-@keyframes radar-glass{50%{filter:hue-rotate(28deg) brightness(1.2);transform:scale(1.035)}}
-:root[data-theme=liquid] .radar b{background:rgba(7,9,24,.5);border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:5px 8px;box-shadow:0 0 16px rgba(77,141,255,.3)}
+:root[data-theme=liquid] .radar{border-color:rgba(148,112,84,.30);background:radial-gradient(circle,rgba(255,252,246,.55),rgba(246,230,210,.40) 55%,rgba(244,200,158,.30)),repeating-radial-gradient(circle,transparent 0,transparent 20px,rgba(210,150,100,.22) 21px,transparent 22px);box-shadow:inset 0 0 30px rgba(244,196,150,.22),0 0 28px rgba(244,176,120,.30);animation:radar-glass 4s ease-in-out infinite}
+@keyframes radar-glass{50%{filter:hue-rotate(10deg) brightness(1.05);transform:scale(1.035)}}
+:root[data-theme=liquid] .radar b{background:rgba(255,253,249,.85);border:1px solid rgba(148,112,84,.24);border-radius:999px;padding:5px 8px;box-shadow:0 0 16px rgba(244,176,120,.28)}
 
-:root[data-theme=liquid] .overlay{background:radial-gradient(circle at 50% 45%,rgba(40,58,140,.24),rgba(0,0,0,.72));backdrop-filter:blur(11px) saturate(145%);-webkit-backdrop-filter:blur(11px) saturate(145%)}
-:root[data-theme=liquid] .modal,:root[data-theme=liquid] .knowledge-drawer,:root[data-theme=liquid] .approval-modal,:root[data-theme=liquid] .login-card{border:1px solid rgba(255,255,255,.38);border-radius:24px;background:linear-gradient(145deg,rgba(255,255,255,.22),rgba(24,36,92,.62) 38%,rgba(10,16,48,.70));box-shadow:inset 1px 1px rgba(255,255,255,.6),inset -1px 0 0 rgba(120,190,255,.3),inset -2px 0 0 rgba(255,110,150,.14),0 35px 100px rgba(0,0,0,.58),0 0 55px rgba(77,141,255,.3),0 0 42px rgba(90,200,255,.22);backdrop-filter:var(--glass-filter);-webkit-backdrop-filter:blur(18px) saturate(200%);clip-path:inset(0 round 24px)}
-:root[data-theme=liquid] .approval-modal>header,:root[data-theme=liquid] .approval-modal>footer{background:linear-gradient(115deg,rgba(255,255,255,.22),rgba(77,141,255,.13),rgba(90,200,255,.08));border-color:rgba(255,255,255,.18)}
-:root[data-theme=liquid] .approval-options>article{border-color:rgba(255,255,255,.2);background:linear-gradient(135deg,rgba(255,255,255,.105),rgba(8,12,32,.35));border-radius:14px;box-shadow:inset 0 1px rgba(255,255,255,.12)}
-:root[data-theme=liquid] .approval-options>article.selected{border-color:rgba(122,178,255,.95);background:linear-gradient(125deg,rgba(77,141,255,.26),rgba(130,150,255,.2),rgba(90,200,255,.12));box-shadow:inset 3px 0 #4d8dff,inset 0 1px rgba(255,255,255,.3),0 0 28px rgba(77,141,255,.32)}
+:root[data-theme=liquid] .overlay{background:radial-gradient(circle at 50% 45%,rgba(120,90,60,.20),rgba(60,42,28,.55));backdrop-filter:blur(11px) saturate(145%);-webkit-backdrop-filter:blur(11px) saturate(145%)}
+:root[data-theme=liquid] .modal,:root[data-theme=liquid] .knowledge-drawer,:root[data-theme=liquid] .approval-modal,:root[data-theme=liquid] .login-card{border:1px solid rgba(255,255,255,.85);border-radius:24px;background:linear-gradient(145deg,rgba(255,253,249,.80),rgba(250,240,226,.70) 38%,rgba(246,230,210,.76));box-shadow:inset 1px 1px rgba(255,255,255,.95),inset -1px 0 0 rgba(224,162,122,.30),inset -2px 0 0 rgba(240,130,120,.16),0 35px 100px rgba(120,88,56,.30),0 0 55px rgba(244,176,120,.24),0 0 42px rgba(240,160,120,.20);backdrop-filter:var(--glass-filter);-webkit-backdrop-filter:blur(18px) saturate(150%);clip-path:inset(0 round 24px)}
+:root[data-theme=liquid] .approval-modal>header,:root[data-theme=liquid] .approval-modal>footer{background:linear-gradient(115deg,rgba(255,252,246,.76),rgba(244,192,144,.32),rgba(240,160,120,.22));border-color:rgba(148,112,84,.16)}
+:root[data-theme=liquid] .approval-options>article{border-color:rgba(148,112,84,.20);background:linear-gradient(135deg,rgba(255,252,246,.70),rgba(250,240,226,.56));border-radius:14px;box-shadow:inset 0 1px rgba(255,255,255,.8)}
+:root[data-theme=liquid] .approval-options>article.selected{border-color:rgba(217,130,74,.95);background:linear-gradient(125deg,rgba(244,176,120,.42),rgba(240,196,150,.34),rgba(236,152,112,.22));box-shadow:inset 3px 0 #d9824a,inset 0 1px rgba(255,255,255,.8),0 0 28px rgba(244,176,120,.36)}
 :root[data-theme=liquid] .login-page{position:relative;z-index:1;background:transparent}
 :root[data-theme=liquid] .login-card{padding:38px}
-:root[data-theme=liquid] .login-mark{filter:drop-shadow(0 0 22px rgba(77,141,255,.75)) drop-shadow(0 0 14px rgba(90,200,255,.35))}
-:root[data-theme=liquid] .login-mark i{opacity:.75;border-color:rgba(255,255,255,.6);box-shadow:0 0 30px rgba(77,141,255,.55);animation:lingshu-spin 10s linear infinite}
+:root[data-theme=liquid] .login-mark{filter:drop-shadow(0 0 22px rgba(244,176,120,.55)) drop-shadow(0 0 14px rgba(240,160,120,.30))}
+:root[data-theme=liquid] .login-mark i{opacity:.75;border-color:rgba(148,112,84,.45);box-shadow:0 0 30px rgba(244,176,120,.45);animation:lingshu-spin 10s linear infinite}
 
 @supports not (backdrop-filter:blur(1px)){
   :root[data-theme=liquid] .app-frame,:root[data-theme=liquid] .session-sidebar,:root[data-theme=liquid] .intel-panel,:root[data-theme=liquid] .mission-header,:root[data-theme=liquid] .mission-strip,:root[data-theme=liquid] .command-bar,:root[data-theme=liquid] .modal,:root[data-theme=liquid] .knowledge-drawer,:root[data-theme=liquid] .approval-modal,:root[data-theme=liquid] .login-card{background:var(--glass-bg-strong)}
@@ -346,9 +346,36 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 }
 @media(prefers-reduced-motion:reduce){:root[data-theme=liquid] .brand b,:root[data-theme=liquid] .theme-switch.liquid,:root[data-theme=liquid] .radar{animation:none!important}}
 @media(prefers-reduced-transparency:reduce){
-  :root[data-theme=liquid]{--panel:#101a3d;--panel2:#16224c;--side:#0a1130}
+  :root[data-theme=liquid]{--panel:#fdf7ef;--panel2:#f6e9da;--side:#f8efe4}
   :root[data-theme=liquid] .app-frame,:root[data-theme=liquid] .session-sidebar,:root[data-theme=liquid] .intel-panel,:root[data-theme=liquid] .mission-header,:root[data-theme=liquid] .mission-strip,:root[data-theme=liquid] .command-bar,:root[data-theme=liquid] .agent-card,:root[data-theme=liquid] .modal,:root[data-theme=liquid] .knowledge-drawer,:root[data-theme=liquid] .approval-modal{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;background:var(--glass-bg-strong)}
 }
+
+/* ── Safari/WebKit 平衡降级：规避 SVG 折射与 filter 动画等高开销路径，保留轻量 blur ── */
+:root[data-safari][data-theme=liquid]{--glass-filter:blur(16px) saturate(140%) contrast(104%)}
+:root[data-safari][data-theme=liquid] .app-frame,
+:root[data-safari][data-theme=liquid] .modal,
+:root[data-safari][data-theme=liquid] .knowledge-drawer,
+:root[data-safari][data-theme=liquid] .approval-modal,
+:root[data-safari][data-theme=liquid] .login-card{backdrop-filter:blur(16px) saturate(140%) contrast(104%);-webkit-backdrop-filter:blur(16px) saturate(140%) contrast(104%)}
+:root[data-safari][data-theme=liquid] .session-sidebar,
+:root[data-safari][data-theme=liquid] .intel-panel,
+:root[data-safari][data-theme=liquid] .mission-header,
+:root[data-safari][data-theme=liquid] .mission-strip,
+:root[data-safari][data-theme=liquid] .command-bar,
+:root[data-safari][data-theme=liquid] .top-rail,
+:root[data-safari][data-theme=liquid] .overlay{backdrop-filter:none;-webkit-backdrop-filter:none}
+:root[data-safari][data-theme=liquid] .brand b,
+:root[data-safari][data-theme=liquid] .theme-switch.liquid,
+:root[data-safari][data-theme=liquid] .radar{animation:none!important}
+:root[data-safari][data-theme=liquid] .theme-switch.liquid{filter:none}
+:root[data-safari][data-theme=liquid] .pointer-glow{mix-blend-mode:normal;filter:blur(2px)}
+
+/* ── 液态玻璃亮色滚动条：暖金粉 thumb + 暖白 track ── */
+:root[data-theme=liquid] *{scrollbar-color:color-mix(in srgb,var(--accent) 70%,#f0c9a0) rgba(255,250,244,.55)}
+:root[data-theme=liquid] *::-webkit-scrollbar-track{background:rgba(255,250,244,.55);border-left:1px solid var(--line2)}
+:root[data-theme=liquid] *::-webkit-scrollbar-thumb{background:linear-gradient(180deg,#f2b980,#d9824a);border:2px solid rgba(255,250,244,.55);border-radius:999px}
+:root[data-theme=liquid] *::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+:root[data-theme=liquid] *::-webkit-scrollbar-corner{background:rgba(255,250,244,.55)}
 
 /* ── 液态玻璃圆角设计语言：Apple 连续曲率阶梯（小控件→卡片→大容器） ── */
 /* 大容器/弹窗 24px（app-frame/modal/login-card 已设），中卡片 16px（agent-card 已设）；
@@ -381,7 +408,7 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 :root[data-theme=liquid] .approval-modal>header>span{border-radius:var(--radius-card)}
 /* 四宫格玻璃卡片：仅液态玻璃主题圆角 + 玻璃渐变（light/dark 保持直角） */
 @media(min-width:1021px){
-  :root[data-theme=liquid] .intel-grid>.side-section{border-radius:var(--radius-card);border-color:rgba(255,255,255,.22);background:linear-gradient(165deg,rgba(255,255,255,.12),rgba(9,16,40,.20) 45%,rgba(77,141,255,.07));box-shadow:inset 0 1px rgba(255,255,255,.18),0 8px 24px rgba(0,0,0,.16)}
+  :root[data-theme=liquid] .intel-grid>.side-section{border-radius:var(--radius-card);border-color:rgba(148,112,84,.20);background:linear-gradient(165deg,rgba(255,252,246,.85),rgba(250,240,226,.70) 45%,rgba(244,196,150,.34));box-shadow:inset 0 1px rgba(255,255,255,.85),0 8px 24px rgba(120,88,56,.12)}
 }
 
 /* 工具历史独立滚动：避免大量展开详情挤压成细条。 */
@@ -513,6 +540,7 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 .endpoint-url{display:block;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-stack{display:block;max-width:260px;color:#999;font:9px/1.65 ui-monospace,SFMono-Regular,monospace;word-break:break-all}
 @media(max-width:700px){.model-form-grid,.model-form-grid.three{grid-template-columns:1fr}.model-config-modal{width:calc(100vw - 16px);padding:15px}.model-runtime-card{grid-template-columns:auto 1fr}.model-runtime-card small{grid-column:2}.model-form-section{padding:7px 10px 10px}.model-policy>span{font-size:7px}.superadmin-sidebar button{padding:0 9px}.superadmin-logo{padding:0 9px}.superadmin-logo>span{height:28px;width:28px}.superadmin-toolbar .add-model{font-size:10px;padding:7px}.model-switches{flex-direction:column;gap:9px}}
+.login-card footer svg{display:inline-block;vertical-align:-2px;margin-right:4px;color:var(--accent)}
 
 /* 右侧任务情报面板：桌面端 2×2 战术矩阵，移动端顺序单列。 */
 @media(min-width:1021px){
