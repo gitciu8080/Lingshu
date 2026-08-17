@@ -107,11 +107,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
-  register: (username: string, password: string, email = "") =>
+  register: (username: string, password: string, email = "", invite_code = "") =>
     request("/auth/register", {
       method: "POST",
-      body: JSON.stringify({ username, password, email }),
+      body: JSON.stringify({ username, password, email, invite_code }),
     }),
+  version: () => request<{ branch: string; commit: string }>("/api/version"),
   me: () => request<{ id: number; username: string; role: string }>("/auth/me"),
   superadminUsers: () => request<{ users: SystemUser[] }>("/api/superadmin/users"),
   resetUserPassword: (userId: number, password: string) =>

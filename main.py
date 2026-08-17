@@ -339,6 +339,14 @@ def _make_summary_collector(
                     "items": payload.get("items", []),
                     "phase": payload.get("phase", ""),
                 }, ensure_ascii=False)
+            elif event_type == "tool_call_end":
+                tool_name = str(payload.get("tool_name") or "").strip() or "unknown"
+                output = str(payload.get("output") or "").strip()
+                content = (
+                    f"[工具调用: {tool_name}] {output}"
+                    if output
+                    else f"[工具调用: {tool_name}]（无输出）"
+                )
             elif event_type == "error":
                 content = str(payload.get("message", ""))
             else:
@@ -498,6 +506,65 @@ async def run_summary_report(
         )
     print(f"[系统] 任务报告已生成: {report_path}")
     return summary
+
+
+async def _finalize_summary_report(
+    mission: MissionState,
+    *,
+    provider: str,
+    model_ver: str,
+    messages: list[dict],
+    event_callback: Callable[[str, dict[str, Any]], None] | None,
+    reports_dir: Path,
+    report_key: str,
+    offloader: Any = None,
+    agent_tasks: set[asyncio.Task[Any]] | None = None,
+    store: MissionStore | None = None,
+) -> None:
+    """兜底 Summary 收尾：无论任务成败都尽力生成报告，且不改变任务终态。
+
+    正常完成、模型护栏安全收尾、未预期异常三条路径统一走这里——
+    “无论如何最后都先出 summary 报告，之后才能报失败”。
+    报告阶段失败/中断只记录日志或事件，绝不覆盖主任务结论。
+
+    Args:
+        同 run_summary_report；messages 为空时直接跳过。
+    """
+    if not messages:
+        return
+    try:
+        await run_summary_report(
+            mission,
+            provider=provider,
+            model_ver=model_ver,
+            messages=messages,
+            event_callback=event_callback,
+            reports_dir=reports_dir,
+            report_key=report_key,
+            offloader=offloader,
+            agent_tasks=agent_tasks,
+            store=store,
+        )
+    except asyncio.CancelledError:
+        # 任务已固化终态时，报告阶段的取消不得覆盖任务结论。
+        if mission.phase in (Phase.COMPLETED, Phase.FAILED):
+            print("[系统] Summary 报告阶段被中断，已保留任务终态。")
+            if event_callback is not None:
+                event_callback(
+                    "report_error",
+                    message="Summary Agent 在任务完成后被中断，已保留任务终态和结构化摘要",
+                    agent="system",
+                )
+        else:
+            raise
+    except Exception as summary_exc:
+        logger.exception("Summary Agent 调用失败: %s", summary_exc)
+        if event_callback is not None:
+            event_callback(
+                "report_error",
+                message="总结或 PDF 报告生成失败，详情见服务端日志",
+                agent="system",
+            )
 
 
 class _ApprovalBroker:
@@ -1077,6 +1144,7 @@ async def run_mission(
     tool_json_token = None
     attack = None
     reserve = None
+    workspace = None  # 异常路径兜底 summary 需要；try 内正常赋值
     try:
         def _record_tool_json_failure(evidence: dict[str, Any]) -> None:
             mission.record("system", "tool_json_validation_failed", **evidence)
@@ -1510,41 +1578,20 @@ async def run_mission(
         _push_target_info()
         # ── 11. Summary Agent 总结与 PDF 报告（终态固化后、返回前）──
         # 报告阶段刻意放在任务终态固化之后：总结 Agent 失败/中断不得改变
-        # 主任务结论（成功/失败已由 Orchestrator 确定并持久化）。
-        if _runtime_messages:
-            try:
-                await run_summary_report(
-                    mission,
-                    provider=provider,
-                    model_ver=model_ver,
-                    messages=_runtime_messages,
-                    event_callback=event_callback,
-                    reports_dir=_SUMMARY_REPORTS_DIR,
-                    report_key=mission.session_id or mission_id,
-                    offloader=workspace,
-                    agent_tasks=active_agent_tasks,
-                    store=store,
-                )
-            except asyncio.CancelledError:
-                # 任务已固化终态时，报告阶段的取消不得覆盖任务结论。
-                if mission.phase in (Phase.COMPLETED, Phase.FAILED):
-                    print("[系统] Summary 报告阶段被中断，已保留任务终态。")
-                    if event_callback is not None:
-                        event_callback(
-                            "report_error",
-                            message="Summary Agent 在任务完成后被中断，已保留任务终态和结构化摘要",
-                            agent="system",
-                        )
-                else:
-                    raise
-            except Exception as summary_exc:
-                logger.exception("Summary Agent 调用失败: %s", summary_exc)
-                if event_callback is not None:
-                    event_callback(
-                        "report_error",
-                        message="总结或 PDF 报告生成失败，详情见服务端日志",
-                        agent="system",
-                    )
+        # 主任务结论（成功/失败已由 Orchestrator 确定并持久化）。失败路径
+        # （模型护栏异常/未预期异常）同样先出报告再报失败，见 _finalize_summary_report。
+        await _finalize_summary_report(
+            mission,
+            provider=provider,
+            model_ver=model_ver,
+            messages=_runtime_messages,
+            event_callback=event_callback,
+            reports_dir=_SUMMARY_REPORTS_DIR,
+            report_key=mission.session_id or mission_id,
+            offloader=workspace,
+            agent_tasks=active_agent_tasks,
+            store=store,
+        )
         return mission
 
     except (ToolJSONValidationError, QwenModelUnavailableError) as exc:
@@ -1562,9 +1609,46 @@ async def run_mission(
                 item["status"] = "skipped"
         store.save(mission)
         push_plan_update(mission, event_callback)
+        # 失败也必须先出 summary 报告，之后才向外部报失败（task_error / 返回）。
+        # 注意：mission.summary 先置为 str(exc)；若报告成功生成会被报告正文覆盖，
+        # 失败原因仍确定性保留在审计链 events（model_guard_safe_shutdown）与
+        # task_error 事件中；若报告降级/中断，mission.summary 则保留 str(exc)。
+        await _finalize_summary_report(
+            mission,
+            provider=provider,
+            model_ver=model_ver,
+            messages=_runtime_messages,
+            event_callback=event_callback,
+            reports_dir=_SUMMARY_REPORTS_DIR,
+            report_key=mission.session_id or mission_id,
+            offloader=workspace,
+            agent_tasks=active_agent_tasks,
+            store=store,
+        )
         if event_callback is not None:
             event_callback("task_error", error=str(exc), agent="system")
         return mission
+
+    except Exception:  # noqa: BLE001 - 未预期异常统一先出报告再向上抛出
+        # 其他未预期异常：同样先尽力生成 summary 报告，之后才向上抛出失败。
+        # helper 内部已兜底（CancelledError 终态保护 + Exception 降级记录），
+        # 这里再加一层保险，保证原异常不被 summary 故障掩盖。
+        try:
+            await _finalize_summary_report(
+                mission,
+                provider=provider,
+                model_ver=model_ver,
+                messages=_runtime_messages,
+                event_callback=event_callback,
+                reports_dir=_SUMMARY_REPORTS_DIR,
+                report_key=mission.session_id or mission_id,
+                offloader=workspace,
+                agent_tasks=active_agent_tasks,
+                store=store,
+            )
+        except Exception as summary_exc:  # noqa: BLE001 - 兜底报告绝不允许掩盖原异常
+            logger.exception("失败路径 summary 兜底调用异常: %s", summary_exc)
+        raise
 
     finally:
         # AgentScope 官方方式：取消直接承载 reply_stream 的 task。

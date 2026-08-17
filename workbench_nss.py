@@ -46,7 +46,7 @@ DEFAULT_TOKEN = "nss_agent_qLvExRxvLtSUIDiRkQToFedw2RZf9OHcZ0b5S8t5lqI"
 DEFAULT_API_URL = os.environ.get("LINGSHU_API_URL", "http://localhost:8080")
 # 默认 Web 登录账号（auth.py 中创建的用户）
 DEFAULT_USERNAME = os.environ.get("LINGSHU_USER", "admin")
-DEFAULT_PASSWORD = os.environ.get("LINGSHU_PASS", "admin123")
+DEFAULT_PASSWORD = os.environ.get("LINGSHU_PASS", "gdcp@2026")
 
 # 附件 / 题面工作目录
 ARENA_WORKDIR = Path(__file__).resolve().parent / "WorkDir" / "arena"

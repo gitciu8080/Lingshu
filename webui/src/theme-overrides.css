@@ -16,13 +16,18 @@
 :root[data-theme="dark"] .brand b,
 :root[data-theme="dark"] .login-card h1,
 :root[data-theme="dark"] .login-card h1 small,
-:root[data-theme="dark"] .superadmin-logo b,
+:root[data-theme="dark"] .superadmin-logo b {
+  color: #ffffff;
+  text-shadow: 0 0 14px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* 液态玻璃亮色：字标回归品牌 accent 色（暖橙金），不做白字 */
 :root[data-theme="liquid"] .brand b,
 :root[data-theme="liquid"] .login-card h1,
 :root[data-theme="liquid"] .login-card h1 small,
 :root[data-theme="liquid"] .superadmin-logo b {
-  color: #ffffff;
-  text-shadow: 0 0 14px color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
 /* Superadmin navigation must remain readable without relying on hover. */
