@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
+import subprocess
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
@@ -929,6 +931,7 @@ _AUTH_SKIP_PATHS = (
     "/favicon.ico",
     "/auth/login",
     "/auth/register",
+    "/api/version",
     "/superadmin",
 )
 
@@ -1129,9 +1132,35 @@ def _build_initial_context(source_session_id: str, user_id: str) -> str | None:
     return text
 
 
+# ── 版本信息（登录页无需认证） ──
+@app.get("/api/version")
+async def get_runtime_version():
+    branch = os.getenv("LINGSHU_GIT_BRANCH", "unknown")
+    commit = os.getenv("LINGSHU_GIT_COMMIT", "unknown")
+    try:
+        branch_result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "-C", str(_PROJECT_ROOT), "branch", "--show-current"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        commit_result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "-C", str(_PROJECT_ROOT), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        branch = branch_result.stdout.strip() or branch
+        commit = commit_result.stdout.strip() or commit
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {"branch": branch, "commit": commit}
+
+
 # ── 认证路由 ──
 @app.post("/auth/register", response_model=TokenResponse)
 async def register(data: UserCreate):
+    invite_code = os.getenv("LINGSHU_REGISTRATION_INVITE_CODE", "").strip()
+    if not invite_code or data.invite_code.strip() != invite_code:
+        raise HTTPException(status_code=403, detail="当前未开放公开注册，请使用有效邀请码")
     try:
         # bcrypt 哈希属于 CPU 密集操作，不能阻塞 FastAPI 事件循环。
         user = await asyncio.to_thread(

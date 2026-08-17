@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,6 +49,7 @@ class UserCreate(BaseModel):
     username: str
     password: str
     email: str = ""
+    invite_code: str = ""
 
 
 class UserLogin(BaseModel):
@@ -64,6 +66,19 @@ class TokenResponse(BaseModel):
 
 class PasswordReset(BaseModel):
     password: str
+
+
+def validate_password_strength(password: str) -> str:
+    """校验注册和密码重置使用的强密码策略。"""
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="密码至少需要 8 位")
+    if not re.search(r"[A-Z]", password):
+        raise HTTPException(status_code=400, detail="密码必须包含大写字母")
+    if not re.search(r"[a-z]", password):
+        raise HTTPException(status_code=400, detail="密码必须包含小写字母")
+    if not re.search(r"\d", password):
+        raise HTTPException(status_code=400, detail="密码必须包含数字")
+    return password
 
 
 def get_db() -> sqlite3.Connection:
@@ -191,6 +206,7 @@ def get_user_by_username(username: str) -> Optional[dict]:
 
 
 def create_user(username: str, password: str, email: str = "") -> dict:
+    validate_password_strength(password)
     password_hash = pwd_context.hash(password)
     conn = get_db()
     try:
@@ -209,7 +225,7 @@ def create_user(username: str, password: str, email: str = "") -> dict:
     except sqlite3.IntegrityError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="用户名已存在",
+            detail="注册失败，请检查邀请码、用户名或密码",
         )
     finally:
         conn.close()
