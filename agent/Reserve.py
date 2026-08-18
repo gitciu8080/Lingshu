@@ -59,6 +59,7 @@ RESERVE_SYS_PROMPT = """你是二进制逆向与动态调试专家（Reserve）�
 _IDA_DIR = Path("/home/kali/ida-pro-9.1")
 _IDALIB_MCP = Path("/home/kali/.local/bin/idalib-mcp")
 _UVX_FALLBACK = Path("/home/kali/.local/bin/uvx")
+_GDB_MCP_INSTALLED = Path("/home/kali/.local/bin/gdb-multi-mcp")
 _GDB_MCP_SOURCE = (
     "git+https://github.com/Mistyovo/gdb-multi-mcp"
     "@6e8048b8e933bbbae79b6da16fe69249f56fe30d"
@@ -89,7 +90,7 @@ _GDB_RESTRICTED_ENTRY_TOOLS = frozenset({
 
 
 def _resolve_gdb_mcp_command() -> str:
-    """返回 uvx 启动器，支持环境变量覆盖。"""
+    """返回固定安装的 GDB MCP 启动器，支持环境变量覆盖。"""
     configured = os.getenv("LINGSHU_GDB_MCP_COMMAND", "").strip()
     if configured:
         candidate = Path(configured).expanduser()
@@ -99,6 +100,11 @@ def _resolve_gdb_mcp_command() -> str:
         if resolved:
             return resolved
         raise RuntimeError(f"GDB MCP 启动器不存在: {configured}")
+
+    # 优先使用已安装并缓存依赖的固定可执行文件，避免 systemd 环境下
+    # 通过 uvx --offline 重新解析依赖导致 MCP 子进程立即退出。
+    if _GDB_MCP_INSTALLED.is_file():
+        return str(_GDB_MCP_INSTALLED)
 
     resolved = shutil.which("uvx")
     if resolved:

@@ -126,6 +126,7 @@ class RuntimeConfig:
             # DeepSeek
             deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", "").strip(),
             deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
+            deepseek_gateway_mode=os.getenv("DEEPSEEK_GATEWAY_MODE", "base_url").strip().lower(),
             deepseek_model_low=os.getenv("DEEPSEEK_MODEL_LOW", "deepseek-v4-flash"),
             deepseek_model_min=os.getenv("DEEPSEEK_MODEL_MIN", "deepseek-v4-flash"),
             deepseek_model_max=os.getenv("DEEPSEEK_MODEL_MAX", "deepseek-v4-pro"),
