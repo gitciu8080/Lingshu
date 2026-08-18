@@ -13,6 +13,7 @@ import {
   Database,
   FlaskConical,
   FileDown,
+  FileText,
   GitBranch,
   LogOut,
   LoaderCircle,
@@ -175,6 +176,8 @@ type Mission = Record<string, unknown> & {
   exploitation_approved?: boolean;
   report_available?: boolean;
   report_url?: string;
+  markdown_available?: boolean;
+  markdown_url?: string;
   provider?: string;
   model?: string;
   model_level?: string;
@@ -1839,12 +1842,13 @@ type ModelDraft = ModelApiConfigInput & { clear_api_key?: boolean };
 
 function blankModelDraft(category: "llm" | "embedding"): ModelDraft {
   return category === "llm" ? {
-    name: "", category, provider: "deepseek", api_style: "responses", base_url: "https://api.deepseek.com",
+    name: "", category, provider: "deepseek", api_style: "responses", base_url: "https://api.deepseek.com", gateway_mode: "base_url",
     api_key: "", model_low: "deepseek-v4-flash", model_min: "deepseek-v4-flash", model_max: "deepseek-v4-pro",
     model_name: "", dimensions: 0, pass_dimensions: true, enabled: true,
     settings: { temperature: 0.7, top_p: 0.95, max_tokens: 0, max_retries: 3, context_size: 200000, timeout_seconds: 600, thinking_enabled: true },
   } : {
     name: "", category, provider: "openai-compatible", api_style: "embeddings", base_url: "",
+    gateway_mode: "base_url",
     api_key: "", model_low: "", model_min: "", model_max: "", model_name: "",
     dimensions: 1536, pass_dimensions: true, enabled: true,
     settings: { temperature: 0.7, top_p: 0.95, max_tokens: 0, max_retries: 3, context_size: 8191, timeout_seconds: 600, thinking_enabled: false },
@@ -1855,6 +1859,7 @@ function modelDraftFromConfig(item: ModelApiConfig): ModelDraft {
   return {
     name: item.name, category: item.category, provider: item.provider,
     api_style: item.api_style, base_url: item.base_url, api_key: "",
+    gateway_mode: item.gateway_mode || "base_url",
     model_low: item.model_low, model_min: item.model_min, model_max: item.model_max,
     model_name: item.model_name, dimensions: item.dimensions,
     pass_dimensions: item.pass_dimensions, enabled: item.enabled,
@@ -1891,7 +1896,8 @@ function ModelConfigDialog({ editing, category, onClose, onSaved }: {
           <label>Provider 标识<small>可自行输入；小写字母开头，仅允许字母、数字、_、-</small><input list={`provider-presets-${category}`} pattern="[a-z][a-z0-9_-]{1,31}" value={draft.provider} onChange={(e) => { const provider = e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""); setDraft((old) => ({ ...old, provider, api_style: !embedding && provider === "qwen" ? "chat_completions" : old.api_style, settings: { ...old.settings, temperature: provider === "qwen" ? 0.3 : 0.7, context_size: provider === "qwen" ? 128000 : old.api_style === "responses" ? 200000 : 65536 } })); }} required /><datalist id={`provider-presets-${category}`}>{embedding && <option value="openai-compatible" />}<option value="deepseek" /><option value="qwen" /><option value="openai" /><option value="ollama" /><option value="vllm" /><option value="moonshot" /></datalist></label></div>
           <label>API 协议<small>必须与服务端端点实际协议一致</small><select value={draft.api_style} onChange={(e) => { const api_style = e.target.value as ModelDraft["api_style"]; setDraft((old) => ({ ...old, api_style, settings: { ...old.settings, context_size: api_style === "responses" ? 200000 : 65536 } })); }} disabled={embedding || draft.provider === "qwen"}>{embedding ? <option value="embeddings">Embeddings API</option> : draft.provider === "qwen" ? <option value="chat_completions">Chat Completions</option> : <><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option></>}</select></label>
         </fieldset>
-        <fieldset className="model-form-section"><legend><i>02</i> Credential</legend><label>Base URL<small>仅填写基础地址，不要包含凭据、查询参数或片段</small><input value={draft.base_url} onChange={(e) => change("base_url", e.target.value)} placeholder="https://example.com/v1" required /></label>
+        <fieldset className="model-form-section"><legend><i>02</i> Credential</legend><label>Base URL<small>复制平台生成的完整网关 URL；不要手动追加 /v1、/responses 或 /chat/completions</small><input value={draft.base_url} onChange={(e) => change("base_url", e.target.value)} placeholder="https://example.com/llm-gateway/proxy/e/…" required /></label>
+          {!embedding && draft.provider === "deepseek" && draft.api_style === "responses" && <label>网关端点模式<small>平台原始 URL 若为 https://api.deepseek.com/responses，请选择完整资源端点</small><select value={draft.gateway_mode} onChange={(e) => change("gateway_mode", e.target.value)}><option value="base_url">标准 Base URL（请求 /responses）</option><option value="full_endpoint">完整资源端点网关（请求网关根路径）</option></select></label>}
           <label>API Key<small>{editing?.has_api_key ? `当前 ${editing.api_key_masked}；留空则保持不变` : "将使用 Fernet 加密后保存"}</small><input type="password" value={draft.api_key || ""} onChange={(e) => change("api_key", e.target.value)} placeholder={editing?.has_api_key ? "留空保持现有密钥" : "sk-…"} autoComplete="new-password" disabled={!!draft.clear_api_key} /></label>
           {editing?.has_api_key && <label className="inline-danger"><input type="checkbox" checked={!!draft.clear_api_key} onChange={(e) => change("clear_api_key", e.target.checked)} /> 删除已保存 API Key</label>}
         </fieldset>
@@ -2393,6 +2399,20 @@ function ConsoleApp() {
       toast.error(`报告下载失败：${String(err)}`);
     }
   };
+  const downloadReportMarkdown = async () => {
+    if (!active) return;
+    try {
+      const blob = await api.reportMarkdown(active);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `lingshu-report-${active}.md`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast.error(`Markdown 报告下载失败：${String(err)}`);
+    }
+  };
   const downloadJsonl = async () => {
     if (!active) return;
     const prefixInput = window.prompt("请输入竞赛题号（可填写多个，例如 01 或 01-03），用于生成文件名前缀：", "");
@@ -2568,6 +2588,12 @@ function ConsoleApp() {
                 <button className="report-download" onClick={() => void downloadReport()}>
                   <FileDown size={14} />
                   下载报告
+                </button>
+              )}
+              {active && detail.markdown_available && (
+                <button className="report-download" onClick={() => void downloadReportMarkdown()} title="下载 Markdown 格式的 Summary 报告">
+                  <FileText size={14} />
+                  下载 Markdown
                 </button>
               )}
               {active && (

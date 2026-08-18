@@ -26,6 +26,7 @@ KEY_PATH = _ROOT / "data" / "model_api.key"
 _LOCK = threading.RLock()
 _PROVIDER_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 _LLM_STYLES = {"chat_completions", "responses"}
+_GATEWAY_MODES = {"base_url", "full_endpoint"}
 
 
 class ModelRegistryError(ValueError):
@@ -180,6 +181,11 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
         raise ModelRegistryError("内置 Qwen 适配器使用 Chat Completions 协议")
     if category == "embedding" and api_style != "embeddings":
         raise ModelRegistryError("嵌入模型 API 协议必须为 embeddings")
+    gateway_mode = str(payload.get("gateway_mode") or "base_url").strip().lower()
+    if category != "llm":
+        gateway_mode = "base_url"
+    if gateway_mode not in _GATEWAY_MODES:
+        raise ModelRegistryError("网关端点模式仅支持 base_url 或 full_endpoint")
 
     raw = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
     try:
@@ -209,6 +215,7 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
     result = {
         "name": name, "category": category, "provider": provider,
         "api_style": api_style, "base_url": _clean_url(payload.get("base_url")),
+        "gateway_mode": gateway_mode,
         "model_low": str(payload.get("model_low") or "").strip(),
         "model_min": str(payload.get("model_min") or "").strip(),
         "model_max": str(payload.get("model_max") or "").strip(),
@@ -377,6 +384,7 @@ def load_runtime_overrides() -> dict[str, Any]:
         if provider == "deepseek":
             overrides.update(
                 deepseek_api_key=item["api_key"], deepseek_base_url=item["base_url"],
+                deepseek_gateway_mode=item.get("gateway_mode", "base_url"),
                 deepseek_model_low=item["model_low"], deepseek_model_min=item["model_min"],
                 deepseek_model_max=item["model_max"], deepseek_model_settings=item["settings"],
                 deepseek_responses_models=(
@@ -391,11 +399,12 @@ def load_runtime_overrides() -> dict[str, Any]:
             )
         else:
             custom[provider] = {
-                key: item[key] for key in (
+                key: item.get(key) for key in (
                     "name", "api_style", "base_url", "api_key", "model_low",
-                    "model_min", "model_max", "settings",
+                    "model_min", "model_max", "gateway_mode", "settings",
                 )
             }
+            custom[provider]["gateway_mode"] = custom[provider].get("gateway_mode") or "base_url"
     if custom:
         overrides["custom_llm_configs"] = custom
     embedding = _active_embedding()

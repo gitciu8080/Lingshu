@@ -147,6 +147,7 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
         model: str,
         parameters: "DeepSeekResponsesModel.Parameters | None" = None,
         web_search: bool = False,
+        gateway_mode: str = "base_url",
         **kwargs,
     ) -> None:
         """初始化 DeepSeek Responses API 模型。
@@ -167,6 +168,63 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
             **kwargs,
         )
         self.web_search_enabled = web_search
+        if gateway_mode not in {"base_url", "full_endpoint"}:
+            raise ValueError("DeepSeek gateway_mode 仅支持 base_url 或 full_endpoint")
+        self.gateway_mode = gateway_mode
+
+    async def _call_api(
+        self,
+        model_name: str,
+        messages,
+        tools=None,
+        tool_choice=None,
+        **generate_kwargs: Any,
+    ):
+        """调用 Responses API，并支持完整资源端点网关。
+
+        平台若以 ``https://api.deepseek.com/responses`` 注册渠道，网关根
+        路径已映射到上游 Responses 资源。此时不能再请求 ``/responses``，
+        否则会形成重复路径；通过 OpenAI 客户端底层 post 保留同一请求体，
+        仅切换请求路径。
+        """
+        formatted_messages = await self.formatter.format(messages)
+        api_kwargs: dict[str, Any] = {
+            "model": model_name,
+            "input": formatted_messages,
+            "stream": self.stream,
+        }
+        if self.parameters.max_tokens is not None:
+            api_kwargs["max_output_tokens"] = self.parameters.max_tokens
+        if self.parameters.temperature is not None:
+            api_kwargs["temperature"] = self.parameters.temperature
+        if self.parameters.thinking_enable and self.parameters.reasoning_effort:
+            api_kwargs["reasoning"] = {"effort": self.parameters.reasoning_effort}
+        api_kwargs.update({
+            k: v for k, v in generate_kwargs.items()
+            if k not in {"modalities", "audio"}
+        })
+        fmt_tools, fmt_tool_choice = self._format_tools(tools, tool_choice)
+        if fmt_tools is not None:
+            api_kwargs["tools"] = fmt_tools
+        if fmt_tool_choice is not None:
+            api_kwargs["tool_choice"] = fmt_tool_choice
+
+        from datetime import datetime
+        from openai.types.responses import Response, ResponseStreamEvent
+        from openai import AsyncStream
+
+        start_datetime = datetime.now()
+        request_path = "/" if self.gateway_mode == "full_endpoint" else "/responses"
+        response = await self.client.post(
+            request_path,
+            cast_to=Response,
+            body=api_kwargs,
+            stream=self.stream,
+            stream_cls=AsyncStream[ResponseStreamEvent] if self.stream else None,
+        )
+        if self.stream:
+            return self._parse_stream_response(start_datetime, response)
+        return self._parse_completion_response(start_datetime, response)
 
     async def _parse_stream_response(
         self,
@@ -281,7 +339,6 @@ def DeepSeek(
         _effort = "high"
     else:
         _effort = "max"
-
     return DeepSeekResponsesModel(
         credential=OpenAICredential(
             api_key=SecretStr(runtime.get_api_key("deepseek")),
@@ -295,6 +352,7 @@ def DeepSeek(
             max_tokens=max_tokens,
         ),
         web_search=web_search,
+        gateway_mode=runtime.deepseek_gateway_mode,
         stream=True,
         max_retries=max_retries,
         context_size=context_size,

@@ -46,6 +46,7 @@ export type ModelApiConfig = {
   provider: string;
   api_style: "chat_completions" | "responses" | "embeddings";
   base_url: string;
+  gateway_mode: "base_url" | "full_endpoint";
   has_api_key: boolean;
   api_key_masked: string;
   model_low: string;
@@ -271,6 +272,17 @@ export const api = {
     if (!response.ok) {
       const data = await response.json().catch(() => null);
       throw new Error(data?.detail || `报告下载失败 (${response.status})`);
+    }
+    return response.blob();
+  },
+  reportMarkdown: async (id: string) => {
+    const response = await fetch(
+      base + `/api/session/${encodeURIComponent(id)}/report/markdown`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new Error(data?.detail || `Markdown 报告下载失败 (${response.status})`);
     }
     return response.blob();
   },

@@ -309,56 +309,67 @@ def _make_summary_collector(
     轻量映射，保证与历史 transcript 格式一致。
     """
     buffers: dict[str, str] = {}
+    # Summary 报告生成阶段由 run_summary_report 置为 False：Summary 自身的
+    # 流式事件只转发给前端展示，不回流进 _runtime_messages（避免自我污染）。
+    collect_state = {"enabled": True}
 
     def collector(event_type: str, **payload: Any) -> None:
-        if event_type in ("text_delta", "thinking_delta"):
-            key = f"{event_type.removesuffix('_delta')}:{payload.get('agent', '')}"
-            buffers[key] = buffers.get(key, "") + (
-                payload.get("delta") or payload.get("content") or ""
-            )
-        elif event_type in ("text_end", "thinking_end"):
-            key = f"{event_type.removesuffix('_end')}:{payload.get('agent', '')}"
-            full = buffers.pop(key, "") or payload.get("full_text") or payload.get("content") or ""
-            if full.strip():
-                messages.append({
-                    "event_type": "text_end",
-                    "agent_name": str(payload.get("agent") or "system"),
-                    "content": full,
-                })
-        elif event_type in _SUMMARY_TRANSCRIPT_TYPES:
-            agent_name = str(payload.get("agent") or "system")
-            if event_type == "mission_start":
-                content = f"目标: {payload.get('target', '')} | 任务: {payload.get('goal', '')}"
-            elif event_type == "mission_end":
-                content = f"状态: {payload.get('status', '未知')}"
-            elif event_type == "phase_change":
-                content = str(payload.get("phase", ""))
-                agent_name = "system"
-            elif event_type == "plan_updated":
-                content = json.dumps({
-                    "items": payload.get("items", []),
-                    "phase": payload.get("phase", ""),
-                }, ensure_ascii=False)
-            elif event_type == "tool_call_end":
-                tool_name = str(payload.get("tool_name") or "").strip() or "unknown"
-                output = str(payload.get("output") or "").strip()
-                content = (
-                    f"[工具调用: {tool_name}] {output}"
-                    if output
-                    else f"[工具调用: {tool_name}]（无输出）"
+        if collect_state["enabled"]:
+            if event_type in ("text_delta", "thinking_delta"):
+                key = f"{event_type.removesuffix('_delta')}:{payload.get('agent', '')}"
+                buffers[key] = buffers.get(key, "") + (
+                    payload.get("delta") or payload.get("content") or ""
                 )
-            elif event_type == "error":
-                content = str(payload.get("message", ""))
-            else:
-                content = str(payload.get("content") or "")
-            if content.strip():
-                messages.append({
-                    "event_type": event_type,
-                    "agent_name": agent_name,
-                    "content": content,
-                })
+            elif event_type in ("text_end", "thinking_end"):
+                key = f"{event_type.removesuffix('_end')}:{payload.get('agent', '')}"
+                full = buffers.pop(key, "") or payload.get("full_text") or payload.get("content") or ""
+                # 推理链（thinking_end）仅供前端实时展示，不进入 Summary 报告素材：
+                # 混入后模型会把 Agent 的内心独白当作会话正文复述进报告。正式回复
+                # （text_end）与系统/工具事件仍正常收集。
+                if event_type != "thinking_end" and full.strip():
+                    messages.append({
+                        "event_type": "text_end",
+                        "agent_name": str(payload.get("agent") or "system"),
+                        "content": full,
+                    })
+            elif event_type in _SUMMARY_TRANSCRIPT_TYPES:
+                agent_name = str(payload.get("agent") or "system")
+                if event_type == "mission_start":
+                    content = f"目标: {payload.get('target', '')} | 任务: {payload.get('goal', '')}"
+                elif event_type == "mission_end":
+                    content = f"状态: {payload.get('status', '未知')}"
+                elif event_type == "phase_change":
+                    content = str(payload.get("phase", ""))
+                    agent_name = "system"
+                elif event_type == "plan_updated":
+                    content = json.dumps({
+                        "items": payload.get("items", []),
+                        "phase": payload.get("phase", ""),
+                    }, ensure_ascii=False)
+                elif event_type == "tool_call_end":
+                    tool_name = str(payload.get("tool_name") or "").strip() or "unknown"
+                    output = str(payload.get("output") or "").strip()
+                    content = (
+                        f"[工具调用: {tool_name}] {output}"
+                        if output
+                        else f"[工具调用: {tool_name}]（无输出）"
+                    )
+                elif event_type == "error":
+                    content = str(payload.get("message", ""))
+                else:
+                    content = str(payload.get("content") or "")
+                if content.strip():
+                    messages.append({
+                        "event_type": event_type,
+                        "agent_name": agent_name,
+                        "content": content,
+                    })
         if base_callback is not None:
             base_callback(event_type, **payload)
+
+    # Summary 报告生成阶段暂停/恢复收集（供 run_summary_report 使用）。
+    collector.suspend = lambda: collect_state.update(enabled=False)
+    collector.resume = lambda: collect_state.update(enabled=True)
 
     return collector
 
@@ -371,6 +382,9 @@ def _build_summary_transcript(messages: list[dict], maximum_chars: int = 120_000
         event_type = str(item.get("event_type") or "message")
         content = str(item.get("content") or "").strip()
         if not content:
+            continue
+        # 兜底：推理链记录（旧数据或异常混入）绝不出现在报告素材中。
+        if event_type in ("thinking_end", "thinking_delta"):
             continue
         agent = str(item.get("agent_name") or "system")
         signature = (agent, content)
@@ -427,7 +441,10 @@ async def run_summary_report(
     prompt = (
         "请总结以下一次完整授权安全测试。\n\n"
         f"【结构化任务状态】\n{json.dumps(mission_data, ensure_ascii=False, indent=2)[:50000]}\n\n"
-        f"【完整会话记录】\n{transcript}"
+        f"【完整会话记录】\n{transcript}\n\n"
+        "【写作约束】会话记录中的条目是实际发生的对话、动作与工具结果。"
+        "报告必须基于这些事实撰写，不得复述、引用或编造任何 Agent 的"
+        "内心独白、计划性思考或推理过程；未发生的步骤不得写入报告。"
     )
     if event_callback is not None:
         event_callback(
@@ -451,6 +468,11 @@ async def run_summary_report(
             context_config=build_agent_context_config(),
         )
         token = bind_agent_tasks(agent_tasks if agent_tasks is not None else set())
+        # Summary 自身的流式事件只转发给前端展示，不回流进 _runtime_messages
+        # （否则下一次报告生成会把本次总结过程当成任务会话内容）。
+        _suspended = hasattr(event_callback, "suspend")
+        if _suspended:
+            event_callback.suspend()
         try:
             result = await stream_agent_reply(
                 summary_agent,
@@ -459,6 +481,8 @@ async def run_summary_report(
                 on_event=event_callback,
             )
         finally:
+            if _suspended and hasattr(event_callback, "resume"):
+                event_callback.resume()
             reset_agent_tasks(token)
         summary = (result.get_text_content() or "").strip()
         if not summary:

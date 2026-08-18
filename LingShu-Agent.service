@@ -16,6 +16,12 @@ Restart=always
 
 RestartSec=5
 
+# 首次 RAG/Milvus 初始化可能超过 systemd 默认启动窗口。
+TimeoutStartSec=180s
+# MCP 客户端、RAG 连接和持久化队列需要异步收尾；15 秒会误判为卡死并强制 SIGKILL。
+TimeoutStopSec=90s
+KillMode=control-group
+
 Environment="PYTHONUNBUFFERED=1"
 
 StandardOutput=journal

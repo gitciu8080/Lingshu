@@ -874,10 +874,30 @@ async def _app_lifespan(_: FastAPI):
 
         async with agentscope_lifespan():
             rag = get_rag_service(_PROJECT_ROOT)
-            await rag.start()
+            # 知识库是可选子系统；嵌入端点或 Milvus Lite 不可用时不能阻塞
+            # FastAPI 的 startup。后台初始化完成后，/api/knowledge/status
+            # 会反映 available/error，检索接口在 ready 前安全返回不可用状态。
+            rag_start_task = asyncio.create_task(
+                rag.start(), name="lingshu-rag-startup",
+            )
+            def _log_rag_startup(task: asyncio.Task) -> None:
+                if task.cancelled():
+                    return
+                error = task.exception()
+                if error is not None:
+                    logger.error(
+                        "知识库后台初始化异常: %s", error,
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+
+            rag_start_task.add_done_callback(_log_rag_startup)
             try:
                 yield
             finally:
+                if not rag_start_task.done():
+                    rag_start_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await rag_start_task
                 await rag.close()
                 if _persistence_queue is not None:
                     await _persistence_queue.join()
@@ -1053,6 +1073,7 @@ class ModelAPIConfigPayload(BaseModel):
     provider: str = Field(min_length=2, max_length=32)
     api_style: str = Field(pattern="^(chat_completions|responses|embeddings)$")
     base_url: str = Field(min_length=8, max_length=500)
+    gateway_mode: str = Field(default="base_url", pattern="^(base_url|full_endpoint)$")
     api_key: str | None = Field(default=None, max_length=4096)
     clear_api_key: bool = False
     model_low: str = Field(default="", max_length=300)
@@ -1748,6 +1769,13 @@ async def get_session_detail(session_id: str, current_user: dict = Depends(get_c
         try:
             mission_data = json.loads(session_file.read_text(encoding="utf-8"))
             session["mission_state"] = mission_data
+            session["markdown_available"] = bool(
+                (mission_data.get("summary") or "").strip()
+            )
+            if session["markdown_available"]:
+                session["markdown_url"] = (
+                    f"/api/session/{session_id}/report/markdown"
+                )
         except (json.JSONDecodeError, OSError):
             pass
     # 解析 target_info（如果存在）
@@ -1803,6 +1831,32 @@ async def download_session_report(
         report_path,
         media_type="application/pdf",
         filename=f"lingshu-report-{session_id}.pdf",
+    )
+
+
+@app.get("/api/session/{session_id}/report/markdown")
+async def download_session_report_markdown(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """下载当前用户所属会话的 Summary Agent Markdown 报告。"""
+    await _verify_session_owner(session_id, current_user["id"])
+    markdown = ""
+    session_file = _sessions_dir / f"{session_id}.json"
+    if session_file.is_file():
+        try:
+            mission_data = json.loads(session_file.read_text(encoding="utf-8"))
+            markdown = (mission_data.get("summary") or "").strip()
+        except (json.JSONDecodeError, OSError):
+            markdown = ""
+    if not markdown:
+        raise HTTPException(status_code=404, detail="该会话尚未生成 Markdown 报告")
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="lingshu-report-{session_id}.md"'
+        },
     )
 
 

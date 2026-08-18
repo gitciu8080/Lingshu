@@ -125,6 +125,20 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertIsInstance(model, OpenAIResponseModel)
         self.assertEqual(model.model, "model-min")
 
+    def test_deepseek_full_endpoint_gateway_mode_persists_to_runtime(self) -> None:
+        payload = self.llm("gateway", "gateway-key")
+        payload["gateway_mode"] = "full_endpoint"
+        created = model_registry.create_model_config(payload, 1)
+        self.assertEqual(created["gateway_mode"], "full_endpoint")
+        overrides = model_registry.load_runtime_overrides()
+        self.assertEqual(overrides["deepseek_gateway_mode"], "full_endpoint")
+
+    def test_gateway_mode_rejects_unknown_value(self) -> None:
+        payload = self.llm("bad-gateway", "gateway-key")
+        payload["gateway_mode"] = "unsupported"
+        with self.assertRaisesRegex(model_registry.ModelRegistryError, "网关端点模式"):
+            model_registry.create_model_config(payload, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
