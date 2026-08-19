@@ -47,6 +47,7 @@ export type ModelApiConfig = {
   api_style: "chat_completions" | "responses" | "embeddings";
   base_url: string;
   gateway_mode: "base_url" | "full_endpoint";
+  native_tools: string[];
   has_api_key: boolean;
   api_key_masked: string;
   model_low: string;

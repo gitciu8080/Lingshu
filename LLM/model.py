@@ -90,6 +90,15 @@ class _ResponseEventAlias:
         return getattr(self._event, name)
 
 
+class _SyntheticResponseEvent:
+    """由 response.completed 的完整输出补出的兼容流事件。"""
+
+    def __init__(self, event_type: str, **payload: Any) -> None:
+        self.type = event_type
+        for key, value in payload.items():
+            setattr(self, key, value)
+
+
 class DeepSeekResponseFormatter(OpenAIResponseFormatter):
     """Formatter that ensures ThinkingBlock carries a reasoning_item_id.
 
@@ -132,7 +141,9 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
         ``high`` / ``max``（``none`` 表示关闭思考模式）。
         """
 
-        reasoning_effort: Literal["none", "low", "high", "max"] | None = Field(
+        reasoning_effort: Literal[
+            "none", "minimal", "low", "medium", "high", "xhigh", "max",
+        ] | None = Field(
             default=None,
             title="Reasoning Effort",
             description=(
@@ -148,6 +159,8 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
         parameters: "DeepSeekResponsesModel.Parameters | None" = None,
         web_search: bool = False,
         gateway_mode: str = "base_url",
+        native_tools: list[dict[str, Any]] | None = None,
+        reasoning_wire_format: str = "responses",
         **kwargs,
     ) -> None:
         """初始化 DeepSeek Responses API 模型。
@@ -168,6 +181,10 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
             **kwargs,
         )
         self.web_search_enabled = web_search
+        self.native_tools = list(native_tools or [])
+        if reasoning_wire_format not in {"responses", "zhipu"}:
+            raise ValueError("reasoning_wire_format 仅支持 responses 或 zhipu")
+        self.reasoning_wire_format = reasoning_wire_format
         if gateway_mode not in {"base_url", "full_endpoint"}:
             raise ValueError("DeepSeek gateway_mode 仅支持 base_url 或 full_endpoint")
         self.gateway_mode = gateway_mode
@@ -197,7 +214,15 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
             api_kwargs["max_output_tokens"] = self.parameters.max_tokens
         if self.parameters.temperature is not None:
             api_kwargs["temperature"] = self.parameters.temperature
-        if self.parameters.thinking_enable and self.parameters.reasoning_effort:
+        if self.reasoning_wire_format == "zhipu":
+            # GLM Responses 仍沿用智谱原生推理参数：thinking + 顶层
+            # reasoning_effort；请求主体则保持 OpenAI Responses 的 input。
+            api_kwargs["thinking"] = {
+                "type": "enabled" if self.parameters.thinking_enable else "disabled",
+            }
+            if self.parameters.thinking_enable and self.parameters.reasoning_effort:
+                api_kwargs["reasoning_effort"] = self.parameters.reasoning_effort
+        elif self.parameters.thinking_enable and self.parameters.reasoning_effort:
             api_kwargs["reasoning"] = {"effort": self.parameters.reasoning_effort}
         api_kwargs.update({
             k: v for k, v in generate_kwargs.items()
@@ -226,6 +251,18 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
             return self._parse_stream_response(start_datetime, response)
         return self._parse_completion_response(start_datetime, response)
 
+    def _format_tools(self, tools, tool_choice):
+        """保留 AgentScope 函数工具，并在无函数工具时注入模型原生工具。"""
+        fmt_tools, fmt_tool_choice = super()._format_tools(tools, tool_choice)
+        if fmt_tools:
+            return fmt_tools, fmt_tool_choice
+        native = list(self.native_tools)
+        if self.web_search_enabled and not native:
+            native = [{"type": "web_search"}]
+        if native:
+            return native, fmt_tool_choice or "auto"
+        return fmt_tools, fmt_tool_choice
+
     async def _parse_stream_response(
         self,
         start_datetime,
@@ -234,12 +271,90 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
         """Accept DeepSeek's current reasoning_text streaming event name."""
 
         async def normalized_events():
+            saw_text_delta = False
+            saw_reasoning_delta = False
+            added_tool_items: set[str] = set()
+            argument_tool_items: set[str] = set()
             async for event in response:
-                if event.type == "response.reasoning_text.delta":
+                event_type = getattr(event, "type", "")
+                if event_type in {
+                    "response.reasoning_text.delta",
+                    "response.reasoning.delta",
+                    "response.reasoning_content.delta",
+                    "response.thinking.delta",
+                }:
+                    saw_reasoning_delta = True
                     yield _ResponseEventAlias(
                         event,
                         "response.reasoning_summary_text.delta",
                     )
+                elif event_type in {
+                    "response.text.delta",
+                    "response.message.delta",
+                    "response.content.delta",
+                }:
+                    saw_text_delta = True
+                    yield _ResponseEventAlias(event, "response.output_text.delta")
+                elif event_type == "response.output_text.delta":
+                    saw_text_delta = True
+                    yield event
+                elif event_type == "response.reasoning_summary_text.delta":
+                    saw_reasoning_delta = True
+                    yield event
+                elif event_type == "response.output_item.added":
+                    item = getattr(event, "item", None)
+                    item_id = str(getattr(item, "id", "") or "")
+                    if item_id:
+                        added_tool_items.add(item_id)
+                    yield event
+                elif event_type == "response.function_call_arguments.delta":
+                    item_id = str(getattr(event, "item_id", "") or "")
+                    if item_id:
+                        argument_tool_items.add(item_id)
+                    yield event
+                elif event_type == "response.completed":
+                    # 部分 GLM Responses 兼容网关只发送 completed，未发送
+                    # output_text/function arguments 增量。AgentScope 原解析器
+                    # 只从增量构建最终 Msg，因此在 completed 前补齐缺失块。
+                    completed = getattr(event, "response", None)
+                    for item in getattr(completed, "output", []) or []:
+                        item_type = getattr(item, "type", None)
+                        if item_type == "message" and not saw_text_delta:
+                            for part in getattr(item, "content", []) or []:
+                                text = str(getattr(part, "text", "") or "")
+                                if text:
+                                    yield _SyntheticResponseEvent(
+                                        "response.output_text.delta", delta=text,
+                                    )
+                                    saw_text_delta = True
+                        elif item_type == "reasoning" and not saw_reasoning_delta:
+                            summary = " ".join(
+                                str(getattr(part, "text", "") or "")
+                                for part in getattr(item, "summary", []) or []
+                                if getattr(part, "text", "")
+                            )
+                            if summary:
+                                yield _SyntheticResponseEvent(
+                                    "response.reasoning_summary_text.delta",
+                                    delta=summary,
+                                )
+                                saw_reasoning_delta = True
+                        elif item_type == "function_call":
+                            item_id = str(getattr(item, "id", "") or "")
+                            if item_id and item_id not in added_tool_items:
+                                yield _SyntheticResponseEvent(
+                                    "response.output_item.added", item=item,
+                                )
+                                added_tool_items.add(item_id)
+                            arguments = str(getattr(item, "arguments", "") or "")
+                            if item_id and arguments and item_id not in argument_tool_items:
+                                yield _SyntheticResponseEvent(
+                                    "response.function_call_arguments.delta",
+                                    item_id=item_id,
+                                    delta=arguments,
+                                )
+                                argument_tool_items.add(item_id)
+                    yield event
                 else:
                     yield event
 
@@ -248,20 +363,6 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
             normalized_events(),
         ):
             yield chunk
-
-    def _format_tools(
-        self,
-        tools: list[dict] | None,
-        tool_choice: object | None,
-    ) -> tuple[list[dict] | None, object | None]:
-        """在工具列表中注入服务端联网搜索工具（可开关）。"""
-        fmt_tools, fmt_tool_choice = super()._format_tools(tools, tool_choice)
-        if self.web_search_enabled:
-            search_tool = [{"type": "web_search"}]
-            fmt_tools = search_tool + (fmt_tools if fmt_tools else [])
-        return fmt_tools, fmt_tool_choice
-
-
 
 def DeepSeek(
         Ver: str = "Min",
@@ -353,10 +454,146 @@ def DeepSeek(
         ),
         web_search=web_search,
         gateway_mode=runtime.deepseek_gateway_mode,
+        native_tools=[{"type": name} for name in runtime.deepseek_native_tools],
         stream=True,
         max_retries=max_retries,
         context_size=context_size,
         client_kwargs={"timeout": timeout_seconds},
+    )
+
+
+class ZhipuChatModel(OpenAIChatModel):
+    """智谱 GLM Chat Completions 适配器。
+
+    智谱通过 OpenAI 兼容端点承载 GLM 的 thinking、reasoning_effort、函数
+    调用和 web_search 原生工具。完整代理 URL 不做拼接或重写。
+    """
+
+    class Parameters(OpenAIChatModel.Parameters):
+        reasoning_effort: Literal[
+            "none", "low", "medium", "high", "max",
+        ] | None = None
+
+    def __init__(self, *args, web_search: bool = False, native_tools=None,
+                 gateway_mode: str = "base_url", **kwargs):
+        self.web_search_enabled = web_search
+        self.native_tools = list(native_tools or [])
+        if gateway_mode not in {"base_url", "full_endpoint"}:
+            raise ValueError("Zhipu gateway_mode 仅支持 base_url 或 full_endpoint")
+        self.gateway_mode = gateway_mode
+        super().__init__(*args, **kwargs)
+
+    def _format_tools(self, tools, tool_choice):
+        fmt_tools, fmt_tool_choice = super()._format_tools(tools, tool_choice)
+        # 智谱文档规定函数、知识库、联网搜索能力互斥；已有函数工具优先。
+        if fmt_tools:
+            return fmt_tools, fmt_tool_choice
+        if self.web_search_enabled or "web_search" in self.native_tools:
+            return [{
+                "type": "web_search",
+                "web_search": {
+                    "enable": True,
+                    "search_engine": "search_pro",
+                    "search_result": True,
+                    "count": 10,
+                    "content_size": "medium",
+                },
+            }], fmt_tool_choice or "auto"
+        return fmt_tools, fmt_tool_choice
+
+    async def _call_api(self, model_name, messages, tools=None, tool_choice=None,
+                        **generate_kwargs):
+        """在完整代理 URL 模式下请求网关根路径，避免重复追加资源路径。"""
+        if self.gateway_mode != "full_endpoint":
+            return await super()._call_api(
+                model_name, messages, tools, tool_choice, **generate_kwargs,
+            )
+        # 与 AgentScope OpenAIChatModel 保持同一请求体和解析流程，只将
+        # ``chat.completions.create`` 替换为客户端根路径 POST。
+        from datetime import datetime
+        from openai.types.chat import ChatCompletion, ChatCompletionChunk
+        from openai import AsyncStream
+
+        formatted_messages = await self.formatter.format(messages)
+        kwargs = {"model": model_name, "messages": formatted_messages, "stream": self.stream}
+        if self.parameters.max_tokens is not None:
+            kwargs["max_completion_tokens"] = self.parameters.max_tokens
+        if self.parameters.temperature is not None:
+            kwargs["temperature"] = self.parameters.temperature
+        if self.parameters.top_p is not None:
+            kwargs["top_p"] = self.parameters.top_p
+        if self.parameters.thinking_enable and self.parameters.reasoning_effort:
+            kwargs["reasoning_effort"] = self.parameters.reasoning_effort
+        if self.extra_body:
+            kwargs.update(self.extra_body)
+        kwargs.update(generate_kwargs)
+        fmt_tools, fmt_tool_choice = self._format_tools(tools, tool_choice)
+        if fmt_tools:
+            kwargs["tools"] = fmt_tools
+            if not self.parameters.parallel_tool_calls:
+                kwargs["parallel_tool_calls"] = False
+        if fmt_tool_choice is not None:
+            kwargs["tool_choice"] = fmt_tool_choice
+        if self.stream:
+            kwargs["stream_options"] = {"include_usage": True}
+        started = datetime.now()
+        response = await self.client.post(
+            "/", cast_to=ChatCompletion,
+            body=kwargs, stream=self.stream,
+            stream_cls=AsyncStream[ChatCompletionChunk] if self.stream else None,
+        )
+        if self.stream:
+            return self._parse_stream_response(started, response)
+        return self._parse_completion_response(started, response)
+
+
+class ZhipuResponsesModel(DeepSeekResponsesModel):
+    """GLM Responses API 适配器。
+
+    使用 OpenAI Responses 的 ``input``、原生工具和流式事件协议，同时按
+    智谱模型要求传递 ``thinking`` 与顶层 ``reasoning_effort``。
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs["reasoning_wire_format"] = "zhipu"
+        super().__init__(*args, **kwargs)
+
+
+def Zhipu(
+        Ver: str = "Min",
+        temperature: float | None = None,
+        config: RuntimeConfig | None = None,
+):
+    """创建智谱 GLM 模型，按 Low/Min/Max 控制 thinking 与推理强度。"""
+    runtime = config or RuntimeConfig.from_env()
+    settings = runtime.model_settings("zhipu")
+    model_name = runtime.model_name(Ver, provider="zhipu")
+    temperature = float(settings.get("temperature", 0.7)) if temperature is None else temperature
+    max_tokens = int(settings.get("max_tokens", 0) or 0) or None
+    thinking_enabled = Ver != "Low" and bool(settings.get("thinking_enabled", True))
+    effort = {"Low": "none", "Min": "high", "Max": "max"}[Ver]
+    native_tools = [{"type": name} for name in runtime.zhipu_native_tools]
+    # 内置 zhipu Provider 统一使用 Responses，避免网页选择、JSON 注册表和
+    # 环境变量配置之间出现协议漂移。需要 Chat Completions 时应注册一个
+    # 自定义 Provider 标识，由 OpenAICompatible 处理。
+    return ZhipuResponsesModel(
+        credential=OpenAICredential(
+            api_key=SecretStr(runtime.get_api_key("zhipu")),
+            base_url=runtime.get_base_url("zhipu"),
+        ),
+        model=model_name,
+        parameters=DeepSeekResponsesModel.Parameters(
+            thinking_enable=thinking_enabled,
+            reasoning_effort=effort,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ),
+        native_tools=native_tools,
+        gateway_mode=runtime.zhipu_gateway_mode,
+        stream=True,
+        max_retries=int(settings.get("max_retries", 3)),
+        context_size=int(settings.get("context_size", 200000)),
+        client_kwargs={"timeout": float(settings.get("timeout_seconds", 600))},
     )
 
 
@@ -423,6 +660,8 @@ def OpenAICompatible(
     thinking_enable = Ver != "Low" and bool(settings.get("thinking_enabled", True))
     effort = {"Low": "none", "Min": "medium", "Max": "high"}.get(Ver, "medium")
     max_tokens = int(settings.get("max_tokens", 0) or 0) or None
+    if provider == "zhipu":
+        return Zhipu(Ver=Ver, temperature=temperature, config=runtime)
     common = {
         "credential": OpenAICredential(
             api_key=SecretStr(runtime.get_api_key(provider)),
@@ -435,14 +674,16 @@ def OpenAICompatible(
         "client_kwargs": {"timeout": float(settings.get("timeout_seconds", 600))},
     }
     if provider_config.get("api_style") == "responses":
-        return OpenAIResponseModel(
+        return DeepSeekResponsesModel(
             **common,
-            parameters=OpenAIResponseModel.Parameters(
+            parameters=DeepSeekResponsesModel.Parameters(
                 temperature=temperature,
                 thinking_enable=thinking_enable,
                 reasoning_effort=effort if thinking_enable else None,
                 max_tokens=max_tokens,
             ),
+            native_tools=[{"type": name} for name in (provider_config.get("native_tools") or [])],
+            gateway_mode=str(provider_config.get("gateway_mode") or "base_url"),
         )
     return OpenAIChatModel(
         **common,
@@ -479,6 +720,8 @@ def create_model(
     """
     if provider == "qwen":
         return Qwen(Ver=Ver, temperature=temperature, config=config)
+    if provider == "zhipu":
+        return Zhipu(Ver=Ver, temperature=temperature, config=config)
     if provider != "deepseek":
         return OpenAICompatible(
             provider=provider, Ver=Ver, temperature=temperature, config=config,
