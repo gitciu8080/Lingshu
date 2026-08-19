@@ -1029,7 +1029,9 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
   const submitLock = useRef(false);
   useEffect(() => {
     if (providers.length && !providers.some((item) => item.id === provider)) {
-      setProvider(providers[0].id);
+      const defaultProvider = providers[0].id;
+      setProvider(defaultProvider);
+      setModel(defaultProvider === "zhipu" ? "Max" : "Min");
     }
   }, [providers, provider]);
   const submit = async (e: FormEvent) => {
@@ -1125,7 +1127,7 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
                 模型提供商
                 <select
                   value={provider}
-                  onChange={(e) => setProvider(e.target.value)}
+                  onChange={(e) => { const next = e.target.value; setProvider(next); setModel(next === "zhipu" ? "Max" : "Min"); }}
                   disabled={!providers.length}
                 >
                   {!providers.length && <option value="">未配置可用模型</option>}
@@ -1199,7 +1201,9 @@ function RerunMission({
 
   useEffect(() => {
     if (open && providers.length && !providers.some((item) => item.id === provider)) {
-      setProvider(providers[0].id);
+      const defaultProvider = providers[0].id;
+      setProvider(defaultProvider);
+      setModel(defaultProvider === "zhipu" ? "Max" : "Min");
     }
   }, [open, providers, provider]);
 
@@ -1300,7 +1304,7 @@ function RerunMission({
                 模型提供商
                 <select
                   value={provider}
-                  onChange={(event) => setProvider(event.target.value)}
+                  onChange={(event) => { const next = event.target.value; setProvider(next); setModel(next === "zhipu" ? "Max" : "Min"); }}
                   disabled={!providers.length}
                 >
                   {!providers.length && <option value="">未配置可用模型</option>}
@@ -1842,13 +1846,13 @@ type ModelDraft = ModelApiConfigInput & { clear_api_key?: boolean };
 
 function blankModelDraft(category: "llm" | "embedding"): ModelDraft {
   return category === "llm" ? {
-    name: "", category, provider: "deepseek", api_style: "responses", base_url: "https://api.deepseek.com", gateway_mode: "base_url",
+    name: "", category, provider: "deepseek", api_style: "responses", base_url: "https://api.deepseek.com", gateway_mode: "base_url", native_tools: [],
     api_key: "", model_low: "deepseek-v4-flash", model_min: "deepseek-v4-flash", model_max: "deepseek-v4-pro",
     model_name: "", dimensions: 0, pass_dimensions: true, enabled: true,
     settings: { temperature: 0.7, top_p: 0.95, max_tokens: 0, max_retries: 3, context_size: 200000, timeout_seconds: 600, thinking_enabled: true },
   } : {
     name: "", category, provider: "openai-compatible", api_style: "embeddings", base_url: "",
-    gateway_mode: "base_url",
+    gateway_mode: "base_url", native_tools: [],
     api_key: "", model_low: "", model_min: "", model_max: "", model_name: "",
     dimensions: 1536, pass_dimensions: true, enabled: true,
     settings: { temperature: 0.7, top_p: 0.95, max_tokens: 0, max_retries: 3, context_size: 8191, timeout_seconds: 600, thinking_enabled: false },
@@ -1860,6 +1864,7 @@ function modelDraftFromConfig(item: ModelApiConfig): ModelDraft {
     name: item.name, category: item.category, provider: item.provider,
     api_style: item.api_style, base_url: item.base_url, api_key: "",
     gateway_mode: item.gateway_mode || "base_url",
+    native_tools: item.native_tools || [],
     model_low: item.model_low, model_min: item.model_min, model_max: item.model_max,
     model_name: item.model_name, dimensions: item.dimensions,
     pass_dimensions: item.pass_dimensions, enabled: item.enabled,
@@ -1872,7 +1877,7 @@ function ModelConfigDialog({ editing, category, onClose, onSaved }: {
 }) {
   const [draft, setDraft] = useState<ModelDraft>(() => editing ? modelDraftFromConfig(editing) : blankModelDraft(category));
   const [saving, setSaving] = useState(false);
-  const change = (key: keyof ModelDraft, value: string | number | boolean) => setDraft((old) => ({ ...old, [key]: value }));
+  const change = (key: keyof ModelDraft, value: string | string[] | number | boolean) => setDraft((old) => ({ ...old, [key]: value }));
   const changeSetting = (key: keyof ModelDraft["settings"], value: number | boolean) => setDraft((old) => ({ ...old, settings: { ...old.settings, [key]: value } }));
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setSaving(true);
@@ -1885,7 +1890,7 @@ function ModelConfigDialog({ editing, category, onClose, onSaved }: {
     finally { setSaving(false); }
   };
   const embedding = category === "embedding";
-  const modelClass = embedding ? "OpenAIEmbeddingModel" : draft.provider === "qwen" ? "QwenChatModel · OpenAIChatModel" : draft.provider === "deepseek" ? (draft.api_style === "responses" ? "DeepSeekResponsesModel · OpenAIResponseModel" : "DeepSeekChatModel") : draft.api_style === "responses" ? "OpenAIResponseModel" : "OpenAIChatModel";
+  const modelClass = embedding ? "OpenAIEmbeddingModel" : draft.provider === "qwen" ? "QwenChatModel · OpenAIChatModel" : draft.provider === "zhipu" ? (draft.api_style === "responses" ? "ZhipuResponsesModel · OpenAIResponseModel" : "ZhipuChatModel · OpenAIChatModel") : draft.provider === "deepseek" ? (draft.api_style === "responses" ? "DeepSeekResponsesModel · OpenAIResponseModel" : "DeepSeekChatModel") : draft.api_style === "responses" ? "OpenAIResponseModel" : "OpenAIChatModel";
   const credentialClass = !embedding && draft.provider === "deepseek" && draft.api_style === "chat_completions" ? "DeepSeekCredential" : "OpenAICredential";
   return <Dialog.Root open onOpenChange={(open) => !open && onClose()}><Dialog.Portal><Dialog.Overlay className="overlay model-config-overlay" />
     <Dialog.Content className="modal model-config-modal"><Dialog.Title>{editing ? "修改" : "添加"}{embedding ? "嵌入模型" : "大模型"} API</Dialog.Title>
@@ -1893,11 +1898,12 @@ function ModelConfigDialog({ editing, category, onClose, onSaved }: {
       <form onSubmit={submit} className="model-config-form">
         <section className="model-runtime-card"><span>AGENTSCOPE RUNTIME</span><b>{modelClass}</b><small>{credentialClass} · stream={embedding ? "N/A" : "True"}</small></section>
         <fieldset className="model-form-section"><legend><i>01</i> 基本信息与 Provider</legend><div className="model-form-grid"><label>配置名称<small>仅用于管理后台识别</small><input value={draft.name} onChange={(e) => change("name", e.target.value)} required /></label>
-          <label>Provider 标识<small>可自行输入；小写字母开头，仅允许字母、数字、_、-</small><input list={`provider-presets-${category}`} pattern="[a-z][a-z0-9_-]{1,31}" value={draft.provider} onChange={(e) => { const provider = e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""); setDraft((old) => ({ ...old, provider, api_style: !embedding && provider === "qwen" ? "chat_completions" : old.api_style, settings: { ...old.settings, temperature: provider === "qwen" ? 0.3 : 0.7, context_size: provider === "qwen" ? 128000 : old.api_style === "responses" ? 200000 : 65536 } })); }} required /><datalist id={`provider-presets-${category}`}>{embedding && <option value="openai-compatible" />}<option value="deepseek" /><option value="qwen" /><option value="openai" /><option value="ollama" /><option value="vllm" /><option value="moonshot" /></datalist></label></div>
-          <label>API 协议<small>必须与服务端端点实际协议一致</small><select value={draft.api_style} onChange={(e) => { const api_style = e.target.value as ModelDraft["api_style"]; setDraft((old) => ({ ...old, api_style, settings: { ...old.settings, context_size: api_style === "responses" ? 200000 : 65536 } })); }} disabled={embedding || draft.provider === "qwen"}>{embedding ? <option value="embeddings">Embeddings API</option> : draft.provider === "qwen" ? <option value="chat_completions">Chat Completions</option> : <><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option></>}</select></label>
+          <label>Provider 标识<small>可自行输入；小写字母开头，仅允许字母、数字、_、-</small><input list={`provider-presets-${category}`} pattern="[a-z][a-z0-9_-]{1,31}" value={draft.provider} onChange={(e) => { const provider = e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""); setDraft((old) => { const api_style = !embedding && provider === "qwen" ? "chat_completions" : !embedding && provider === "zhipu" ? "responses" : old.api_style; return { ...old, provider, api_style, settings: { ...old.settings, temperature: provider === "qwen" ? 0.3 : 0.7, context_size: provider === "qwen" ? 128000 : api_style === "responses" ? 200000 : 65536 } }; }); }} required /><datalist id={`provider-presets-${category}`}>{embedding && <option value="openai-compatible" />}<option value="deepseek" /><option value="qwen" /><option value="zhipu" /><option value="openai" /><option value="ollama" /><option value="vllm" /><option value="moonshot" /></datalist></label></div>
+          <label>API 协议<small>内置 Zhipu 固定使用 Responses；其它自定义 Provider 可自由选择</small><select value={draft.api_style} onChange={(e) => { const api_style = e.target.value as ModelDraft["api_style"]; setDraft((old) => ({ ...old, api_style, settings: { ...old.settings, context_size: api_style === "responses" ? 200000 : 65536 } })); }} disabled={embedding || draft.provider === "qwen" || draft.provider === "zhipu"}>{embedding ? <option value="embeddings">Embeddings API</option> : draft.provider === "qwen" ? <option value="chat_completions">Chat Completions</option> : draft.provider === "zhipu" ? <option value="responses">Responses API</option> : <><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option></>}</select></label>
         </fieldset>
         <fieldset className="model-form-section"><legend><i>02</i> Credential</legend><label>Base URL<small>复制平台生成的完整网关 URL；不要手动追加 /v1、/responses 或 /chat/completions</small><input value={draft.base_url} onChange={(e) => change("base_url", e.target.value)} placeholder="https://example.com/llm-gateway/proxy/e/…" required /></label>
-          {!embedding && draft.provider === "deepseek" && draft.api_style === "responses" && <label>网关端点模式<small>平台原始 URL 若为 https://api.deepseek.com/responses，请选择完整资源端点</small><select value={draft.gateway_mode} onChange={(e) => change("gateway_mode", e.target.value)}><option value="base_url">标准 Base URL（请求 /responses）</option><option value="full_endpoint">完整资源端点网关（请求网关根路径）</option></select></label>}
+          {!embedding && draft.api_style === "responses" && <label>网关端点模式<small>完整代理 URL 会原样转发；仅平台把资源端点注册为网关时选择完整端点</small><select value={draft.gateway_mode} onChange={(e) => change("gateway_mode", e.target.value)}><option value="base_url">标准 Base URL（请求 API 资源路径）</option><option value="full_endpoint">完整资源端点网关（请求网关根路径）</option></select></label>}
+          {!embedding && <label className="inline-toggle"><input type="checkbox" checked={draft.native_tools.includes("web_search")} onChange={(e) => change("native_tools", e.target.checked ? ["web_search"] : [])} /><span><b>启用模型原生联网搜索</b><small>智谱使用 web_search 工具；Responses 兼容端点使用 provider 原生工具格式</small></span></label>}
           <label>API Key<small>{editing?.has_api_key ? `当前 ${editing.api_key_masked}；留空则保持不变` : "将使用 Fernet 加密后保存"}</small><input type="password" value={draft.api_key || ""} onChange={(e) => change("api_key", e.target.value)} placeholder={editing?.has_api_key ? "留空保持现有密钥" : "sk-…"} autoComplete="new-password" disabled={!!draft.clear_api_key} /></label>
           {editing?.has_api_key && <label className="inline-danger"><input type="checkbox" checked={!!draft.clear_api_key} onChange={(e) => change("clear_api_key", e.target.checked)} /> 删除已保存 API Key</label>}
         </fieldset>

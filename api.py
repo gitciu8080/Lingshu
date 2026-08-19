@@ -1022,7 +1022,7 @@ class MissionStartRequest(BaseModel):
     target: str = Field(..., description="授权目标 IP / IP:端口 / 主机名 / 文件路径")
     goal: str = Field(default="获取 Flag", description="任务目标描述")
     provider: str = Field(default="deepseek", pattern="^[a-z][a-z0-9_-]{1,31}$", description="模型提供商标识")
-    model: str = Field(default="Min", description="思考级别: Low | Min | Max")
+    model: str = Field(default="Min", pattern="^(Low|Min|Max)$", description="思考级别: Low | Min | Max；Zhipu 未显式指定时默认 Max")
     qwen_tool_call_mode: str | None = Field(
         default=None, pattern="^(simple|standard)$",
         description="Qwen 工具调用难度: simple（扁平兼容）| standard（批量嵌套）",
@@ -1074,6 +1074,7 @@ class ModelAPIConfigPayload(BaseModel):
     api_style: str = Field(pattern="^(chat_completions|responses|embeddings)$")
     base_url: str = Field(min_length=8, max_length=500)
     gateway_mode: str = Field(default="base_url", pattern="^(base_url|full_endpoint)$")
+    native_tools: list[str] = Field(default_factory=list, max_length=8)
     api_key: str | None = Field(default=None, max_length=4096)
     clear_api_key: bool = False
     model_low: str = Field(default="", max_length=300)
@@ -1309,7 +1310,7 @@ async def model_providers(current_user: dict = Depends(get_current_user)):
     for item in await asyncio.to_thread(active_llm_providers):
         providers[item["provider"]] = {
             "id": item["provider"], "label": item["name"],
-            "api_style": item["api_style"], "builtin": item["provider"] in {"deepseek", "qwen"},
+            "api_style": item["api_style"], "builtin": item["provider"] in {"deepseek", "qwen", "zhipu"},
         }
     return {"providers": list(providers.values())}
 
@@ -1492,6 +1493,8 @@ async def knowledge_reindex(current_user: dict = Depends(get_current_user)):
 @app.post("/api/session/start")
 async def session_start(req: MissionStartRequest, current_user: dict = Depends(get_current_user)):
     """创建并启动新会话。"""
+    fields_set = getattr(req, "model_fields_set", set())
+    model_level = "Max" if req.provider == "zhipu" and "model" not in fields_set else req.model
     enabled_providers = {
         item["provider"] for item in await asyncio.to_thread(active_llm_providers)
     }
@@ -1506,7 +1509,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     async with _session_creation_lock:
         fingerprint = (
             current_user["id"], authorized_target, req.goal.strip(),
-            req.provider, req.model, req.source_session_id or "",
+            req.provider, model_level, req.source_session_id or "",
         )
         now = time.monotonic()
         # 清除过期请求指纹，限制内存增长。
@@ -1546,7 +1549,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         target=authorized_target,
         goal=req.goal,
         provider=req.provider,
-        model=req.model,
+        model=model_level,
         title=f"[{session_id[:8]}] 安全测试任务",
         session_id=session_id,
     )
@@ -1572,11 +1575,11 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
 
     # 推送启动事件
     callback("mission_start", target=authorized_target, goal=req.goal,
-             provider=req.provider, model=req.model, qwen_tool_call_mode=req.qwen_tool_call_mode)
+             provider=req.provider, model=model_level, qwen_tool_call_mode=req.qwen_tool_call_mode)
 
     # 创建后台任务
     task = asyncio.create_task(
-        _run_and_cleanup(session_id, ctx, authorized_target, req.goal, req.model, req.provider, callback,
+        _run_and_cleanup(session_id, ctx, authorized_target, req.goal, model_level, req.provider, callback,
                          initial_context=initial_context, nss_context=req.nss_context,
                          qwen_tool_call_mode=req.qwen_tool_call_mode)
     )

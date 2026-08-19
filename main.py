@@ -901,7 +901,7 @@ async def run_mission(
     Args:
         target: 授权目标，支持 IP / IP:端口 / 主机名 / 文件路径等
         goal: 任务目标描述（默认“获取 Flag”）
-        model_ver: 模型思考级别，Low(快速) / Min(默认) / Max(深度推理)
+        model_ver: 模型思考级别；未指定时 Zhipu 默认 Max，其它 Provider 默认 Min
         provider: 模型提供商标识；支持 deepseek、qwen 与 Web 注册的自定义 Provider
         qwen_tool_call_mode: Qwen 工具调用模式，simple（扁平低难度）或
             standard（批量嵌套）；None 时读取 QWEN_TOOL_CALL_MODE。
@@ -916,6 +916,7 @@ async def run_mission(
     Returns:
         最终任务状态 MissionState（含 plan / flag / success 等）
     """
+    model_ver = model_ver or ("Max" if provider == "zhipu" else "Min")
     # ── 1. 解析目标 ──
     # normalize_target 负责把原始输入规范化为 TargetSpec，
     # 自动识别类型（network/archive/single_file/directory）并校验授权范围。
@@ -1709,7 +1710,7 @@ def build_parser() -> argparse.ArgumentParser:
       --target / -t   授权目标（必填）: IP / IP:端口 / 主机名 / 文件路径
       --goal / -g     任务目标描述，默认"获取 Flag"
       --provider / -p 模型提供商标识，支持 Superadmin 注册的 Provider
-      --model / -m    思考级别: Low(快速) / Min(默认) / Max(深度推理)
+      --model / -m    思考级别；Zhipu 默认 Max，其它 Provider 默认 Min
       --qwen-tool-mode Qwen 工具协议: simple(兼容) 或 standard(批量嵌套)
     """
     parser = argparse.ArgumentParser(
@@ -1727,9 +1728,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model", "-m",
-        default="Min",
+        default=None,
         choices=["Low", "Min", "Max"],
-        help="思考级别：Low(快速) / Min(默认) / Max(深度推理)",
+        help="思考级别：Low/Min/Max；Zhipu 默认 Max，其它 Provider 默认 Min",
     )
     parser.add_argument(
         "--qwen-tool-mode",

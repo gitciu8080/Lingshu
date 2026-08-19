@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import model_registry
 
@@ -138,6 +140,66 @@ class ModelRegistryTests(unittest.TestCase):
         payload["gateway_mode"] = "unsupported"
         with self.assertRaisesRegex(model_registry.ModelRegistryError, "网关端点模式"):
             model_registry.create_model_config(payload, 1)
+
+    def test_native_tool_configuration_is_persisted(self) -> None:
+        payload = self.llm("zhipu", "zhipu-key")
+        payload.update(
+            provider="zhipu",
+            api_style="responses",
+            base_url="https://open.bigmodel.cn/api/paas/v4",
+            model_low="glm-5.2", model_min="glm-5.2", model_max="glm-5.2",
+            native_tools=["web_search"],
+        )
+        created = model_registry.create_model_config(payload, 1)
+        self.assertEqual(created["native_tools"], ["web_search"])
+        overrides = model_registry.load_runtime_overrides()
+        self.assertEqual(overrides["zhipu_native_tools"], ("web_search",))
+
+    def test_zhipu_factory_maps_thinking_levels_and_native_search(self) -> None:
+        from config import RuntimeConfig
+        from LLM.model import Zhipu, ZhipuResponsesModel
+
+        runtime = RuntimeConfig(
+            zhipu_api_key="zhipu-key",
+            zhipu_native_tools=("web_search",),
+        )
+        low = Zhipu("Low", config=runtime)
+        maximum = Zhipu("Max", config=runtime)
+        self.assertIsInstance(low, ZhipuResponsesModel)
+        self.assertFalse(low.parameters.thinking_enable)
+        self.assertEqual(maximum.parameters.reasoning_effort, "max")
+        tools, choice = maximum._format_tools(None, None)
+        self.assertEqual(choice, "auto")
+        self.assertEqual(tools[0]["type"], "web_search")
+
+    def test_zhipu_responses_uses_vendor_reasoning_wire_format(self) -> None:
+        from agentscope.message import UserMsg
+        from config import RuntimeConfig
+        from LLM.model import Zhipu, ZhipuResponsesModel
+
+        runtime = RuntimeConfig(
+            zhipu_api_key="zhipu-key",
+            zhipu_model_low="glm-5.3",
+            zhipu_model_min="glm-5.3",
+            zhipu_model_max="glm-5.3",
+            zhipu_responses_models=("glm-5.3",),
+            zhipu_native_tools=("web_search",),
+        )
+        model = Zhipu("Max", config=runtime)
+        self.assertIsInstance(model, ZhipuResponsesModel)
+        model.stream = False
+        model.client.post = AsyncMock(return_value=SimpleNamespace(
+            output=[], usage=None, id="response-test",
+        ))
+        asyncio.run(model._call_api(
+            "glm-5.3", [UserMsg(name="user", content="hello")],
+        ))
+        body = model.client.post.await_args.kwargs["body"]
+        self.assertIn("input", body)
+        self.assertNotIn("messages", body)
+        self.assertEqual(body["thinking"], {"type": "enabled"})
+        self.assertEqual(body["reasoning_effort"], "max")
+        self.assertEqual(body["tools"], [{"type": "web_search"}])
 
 
 if __name__ == "__main__":

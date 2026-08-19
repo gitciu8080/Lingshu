@@ -27,6 +27,7 @@ _LOCK = threading.RLock()
 _PROVIDER_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 _LLM_STYLES = {"chat_completions", "responses"}
 _GATEWAY_MODES = {"base_url", "full_endpoint"}
+_NATIVE_TOOLS = {"web_search"}
 
 
 class ModelRegistryError(ValueError):
@@ -179,6 +180,8 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
         raise ModelRegistryError("大模型 API 协议仅支持 chat_completions 或 responses")
     if category == "llm" and provider == "qwen" and api_style != "chat_completions":
         raise ModelRegistryError("内置 Qwen 适配器使用 Chat Completions 协议")
+    if category == "llm" and provider == "zhipu" and api_style != "responses":
+        raise ModelRegistryError("内置 Zhipu 适配器固定使用 Responses 协议")
     if category == "embedding" and api_style != "embeddings":
         raise ModelRegistryError("嵌入模型 API 协议必须为 embeddings")
     gateway_mode = str(payload.get("gateway_mode") or "base_url").strip().lower()
@@ -186,6 +189,12 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
         gateway_mode = "base_url"
     if gateway_mode not in _GATEWAY_MODES:
         raise ModelRegistryError("网关端点模式仅支持 base_url 或 full_endpoint")
+    native_tools = payload.get("native_tools")
+    if native_tools is None:
+        native_tools = []
+    if not isinstance(native_tools, list) or any(str(item).strip().lower() not in _NATIVE_TOOLS for item in native_tools):
+        raise ModelRegistryError("原生工具仅支持 web_search")
+    native_tools = list(dict.fromkeys(str(item).strip().lower() for item in native_tools))
 
     raw = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
     try:
@@ -216,6 +225,7 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
         "name": name, "category": category, "provider": provider,
         "api_style": api_style, "base_url": _clean_url(payload.get("base_url")),
         "gateway_mode": gateway_mode,
+        "native_tools": native_tools,
         "model_low": str(payload.get("model_low") or "").strip(),
         "model_min": str(payload.get("model_min") or "").strip(),
         "model_max": str(payload.get("model_max") or "").strip(),
@@ -391,17 +401,30 @@ def load_runtime_overrides() -> dict[str, Any]:
                     tuple(dict.fromkeys((item["model_low"], item["model_min"], item["model_max"])))
                     if item["api_style"] == "responses" else ()
                 ),
+                deepseek_native_tools=tuple(item.get("native_tools") or ()),
             )
         elif provider == "qwen":
             overrides.update(
                 qwen_api_key=item["api_key"], qwen_base_url=item["base_url"],
                 qwen_model=item["model_min"], qwen_model_settings=item["settings"],
             )
+        elif provider == "zhipu":
+            overrides.update(
+                zhipu_api_key=item["api_key"], zhipu_base_url=item["base_url"],
+                zhipu_model_low=item["model_low"], zhipu_model_min=item["model_min"],
+                zhipu_model_max=item["model_max"], zhipu_model_settings=item["settings"],
+                zhipu_responses_models=(
+                    tuple(dict.fromkeys((item["model_low"], item["model_min"], item["model_max"])))
+                    if item["api_style"] == "responses" else ()
+                ),
+                zhipu_native_tools=tuple(item.get("native_tools") or ()),
+                zhipu_gateway_mode=item.get("gateway_mode", "base_url"),
+            )
         else:
             custom[provider] = {
                 key: item.get(key) for key in (
                     "name", "api_style", "base_url", "api_key", "model_low",
-                    "model_min", "model_max", "gateway_mode", "settings",
+                    "model_min", "model_max", "gateway_mode", "native_tools", "settings",
                 )
             }
             custom[provider]["gateway_mode"] = custom[provider].get("gateway_mode") or "base_url"
