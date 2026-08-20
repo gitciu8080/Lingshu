@@ -37,8 +37,19 @@ def _rel(root: Path, path: Path) -> str:
     return str(path.resolve().relative_to(root.resolve()))
 
 
-def create_workspace_tools(root: str | Path) -> list[AllowedFunctionTool]:
-    """创建绑定到指定工作区根目录的受限文件工具。"""
+def create_workspace_tools(
+    root: str | Path,
+    *,
+    executor: "Any | None" = None,
+) -> list[AllowedFunctionTool]:
+    """创建绑定到指定工作区根目录的受限文件工具。
+
+    Args:
+        root: 工作区根目录（宿主路径）。
+        executor: LingshuDockerExecutor 实例。提供时 read/glob/grep 在
+            Docker 容器内执行（路径自动映射到 /workspace）；None 时在
+            宿主文件系统执行。
+    """
     workdir = Path(root).resolve()
 
     async def workspace_read(path: str, max_bytes: int = 200_000) -> str:
@@ -52,6 +63,15 @@ def create_workspace_tools(root: str | Path) -> list[AllowedFunctionTool]:
             文件内容；超出 max_bytes 时返回截断内容与提示。
         """
         target = _resolve_within(workdir, path)
+        if executor is not None:
+            container_path = executor.map_path(str(target))
+            data = await executor.read_bytes(container_path, max_bytes=max_bytes + 1)
+            if len(data) > max_bytes:
+                return (
+                    data[:max_bytes].decode("utf-8", errors="replace")
+                    + f"\n...[已截断，完整文件 {len(data)} 字节，可通过 scoped_shell 读取]"
+                )
+            return data.decode("utf-8", errors="replace")
         if not target.is_file():
             raise FileNotFoundError(f"文件不存在: {path}")
         data = target.read_bytes()
@@ -77,11 +97,15 @@ def create_workspace_tools(root: str | Path) -> list[AllowedFunctionTool]:
         pattern_path = Path(pattern)
         if pattern_path.is_absolute() or ".." in pattern_path.parts:
             raise PermissionError("glob 模式必须是工作区内的相对路径")
-        for hit in workdir.glob(pattern):
-            if hit.is_file():
-                matches.append(_rel(workdir, hit))
-            if len(matches) >= max_results:
-                break
+        if executor is not None:
+            hits = await executor.glob(pattern)
+            matches = hits[:max_results]
+        else:
+            for hit in workdir.glob(pattern):
+                if hit.is_file():
+                    matches.append(_rel(workdir, hit))
+                if len(matches) >= max_results:
+                    break
         if not matches:
             return "(无匹配)"
         return "\n".join(matches)
@@ -101,6 +125,22 @@ def create_workspace_tools(root: str | Path) -> list[AllowedFunctionTool]:
         Returns:
             匹配行列表；为空时返回 "(无匹配)"。
         """
+        # 正则合法性先校验（executor 路径同样需要 RE 语义一致）
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"非法正则: {exc}") from exc
+
+        if executor is not None:
+            # 保持宿主分支的「工作区相对路径」输出语义：grep 在 /workspace
+            # 下执行，path 直接用工作区相对路径（先做逃逸防护校验）。
+            _resolve_within(workdir, path)
+            return await executor.grep(
+                pattern,
+                path=path,
+                max_results=max_results,
+            )
+
         start = _resolve_within(workdir, path)
         if not start.is_dir():
             raise NotADirectoryError(f"路径不是目录: {path}")

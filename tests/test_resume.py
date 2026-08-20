@@ -18,6 +18,14 @@ from TaskState import MissionState, MissionStore, Phase
 SESSION_ID = "resume-test-session"
 
 
+def setUpModule() -> None:
+    """这些 resume 语义测试与 docker 工作区无关，统一按 local 模式跑，
+    避免新建会话时真实拉起 docker 容器（默认 workspace_mode=docker）。"""
+    import os
+
+    os.environ.setdefault("LINGSHU_WORKSPACE_MODE", "local")
+
+
 def _store() -> MissionStore:
     base = Path(tempfile.mkdtemp(prefix="lingshu-resume-"))
     return MissionStore.for_session(SESSION_ID, base_dir=base)

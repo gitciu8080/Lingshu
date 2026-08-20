@@ -1,4 +1,4 @@
-"""阶段 5 测试：LINGSHU_WORKSPACE_MODE=local 默认，legacy 保留旧行为。"""
+"""阶段 5 测试：LINGSHU_WORKSPACE_MODE=docker 默认（v0.4.0），legacy 保留旧行为。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from config import RuntimeConfig
 
 
 class WorkspaceModeConfigTest(unittest.TestCase):
-    def test_default_is_local(self) -> None:
+    def test_default_is_docker(self) -> None:
         with patch.dict("os.environ", {}, clear=False):
             # 移除可能存在的环境变量
             saved = RuntimeConfig
@@ -20,7 +20,7 @@ class WorkspaceModeConfigTest(unittest.TestCase):
             old = os.environ.pop("LINGSHU_WORKSPACE_MODE", None)
             try:
                 cfg = RuntimeConfig.from_env()
-                self.assertEqual(cfg.workspace_mode, "local")
+                self.assertEqual(cfg.workspace_mode, "docker")
             finally:
                 if old is not None:
                     os.environ["LINGSHU_WORKSPACE_MODE"] = old
@@ -30,10 +30,10 @@ class WorkspaceModeConfigTest(unittest.TestCase):
             cfg = RuntimeConfig.from_env()
             self.assertEqual(cfg.workspace_mode, "legacy")
 
-    def test_unknown_value_falls_back_to_local(self) -> None:
+    def test_unknown_value_falls_back_to_docker(self) -> None:
         with patch.dict("os.environ", {"LINGSHU_WORKSPACE_MODE": "bogus"}, clear=False):
             cfg = RuntimeConfig.from_env()
-            self.assertEqual(cfg.workspace_mode, "local")
+            self.assertEqual(cfg.workspace_mode, "docker")
 
 
 class LegacyModeNoWorkspaceTest(unittest.IsolatedAsyncioTestCase):

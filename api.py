@@ -865,9 +865,20 @@ async def _app_lifespan(_: FastAPI):
         name="lingshu-sqlite-persistence",
     )
     antsword = get_antsword_service()
+    # docker 部署下 AntSword 已作为独立容器 MCP(127.0.0.1:30080/sse)常驻，
+    # API 只负责"连接复用"而非宿主拉起 Electron/Xvfb：仍探测就绪状态，
+    # 但不自启动进程组，避免与容器部署的实例冲突。
+    _workspace_mode = os.getenv("LINGSHU_WORKSPACE_MODE", "docker").strip().lower()
     try:
         try:
-            await antsword.start()
+            if _workspace_mode == "docker":
+                if not await antsword.is_ready():
+                    logger.warning(
+                        "docker 模式下未检测到 AntSword MCP(127.0.0.1:30080)，"
+                        "请确认容器已启动；Attack 接入时会再次尝试",
+                    )
+            else:
+                await antsword.start()
         except Exception as exc:  # AntSword 故障不应阻止 WebUI 和其他 Agent 启动
             antsword.last_error = str(exc)
             logger.exception("AntSword MCP 自动启动失败")

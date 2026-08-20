@@ -16,7 +16,12 @@ from workspace_service import WorkspaceService
 
 
 def _service() -> WorkspaceService:
-    return WorkspaceService(Path(tempfile.mkdtemp(prefix="lingshu-ws-test-")))
+    # 这些 is 隔离/删除语义测试与 docker 执行环境无关，统一按 local 跑，
+    # 避免本地缺 docker 权限时误报（docker 模式在 get() 时真实拉容器）。
+    return WorkspaceService(
+        Path(tempfile.mkdtemp(prefix="lingshu-ws-test-")),
+        mode="local",
+    )
 
 
 class WorkspaceIdTest(unittest.TestCase):
@@ -99,6 +104,7 @@ class WorkspaceLifecycleTest(unittest.IsolatedAsyncioTestCase):
         svc = WorkspaceService(
             Path(tempfile.mkdtemp(prefix="lingshu-ws-ttl-")),
             idle_ttl_seconds=0.0,
+            mode="local",
         )
         ws = await svc.get(3, "sess-ttl")
         await ws.offload_context("probe", [AssistantMsg(name="p", content="x")])

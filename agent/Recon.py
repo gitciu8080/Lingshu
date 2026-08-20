@@ -57,9 +57,17 @@ def create_network_recon_agent(
     context_config=None,
     state=None,
     artifact_root: str | Path | None = None,
+    executor: "Any | None" = None,
 ) -> Agent:
     toolkit = StrictJSONToolkit(
-        tools=[create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root), create_cve_search_tool()],
+        tools=[
+            create_scoped_shell_tool(
+                target, project_dir, timeout,
+                registry=scope_registry, role="recon",
+                artifact_root=artifact_root, executor=executor,
+            ),
+            create_cve_search_tool(),
+        ],
     )
     return Agent(
         name=NETWORK_RECON_EXPERT,
@@ -111,13 +119,14 @@ def create_artifact_triage_agent(
     context_config=None,
     state=None,
     artifact_root: str | Path | None = None,
+    executor: "Any | None" = None,
 ) -> Agent:
     """创建文件分析 Agent，工作目录约束在 workdir 内。"""
     toolkit = StrictJSONToolkit(
         tools=[
-            create_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root),
-            create_tesseract_ocr_tool(workdir, timeout=min(timeout, 90)),
-            create_tonydec_tool(workdir),
+            create_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root, executor=executor),
+            create_tesseract_ocr_tool(workdir, timeout=min(timeout, 90), executor=executor),
+            create_tonydec_tool(workdir, executor=executor),
         ],
     )
     return Agent(

@@ -589,6 +589,7 @@ def create_scoped_shell_tool(
     role: str = "",
     artifact_root: str | Path | None = None,
     return_tail: int = 4000,
+    executor: "Any | None" = None,
 ) -> AllowedFunctionTool:
     """创建仅允许触达指定目标的 Shell 工具。
 
@@ -604,6 +605,8 @@ def create_scoped_shell_tool(
             不再硬截断 20KB/6KB；同时维护 ``artifacts/manifest.jsonl``。
             为 None 时保持旧行为（内存截断，向后兼容）。
         return_tail: v2 模式下返回值携带的尾部字节数。
+        executor: LingshuDockerExecutor 实例。提供时命令在会话 Docker
+            容器内执行（校验仍在宿主侧完成）；None 时在宿主机执行。
     """
     workdir = str(Path(cwd).resolve())
     artifacts_root = Path(artifact_root).resolve() if artifact_root is not None else None
@@ -628,6 +631,23 @@ def create_scoped_shell_tool(
             tool_dir.mkdir(parents=True, exist_ok=True)
             stdout_path = tool_dir / "stdout.txt"
             stderr_path = tool_dir / "stderr.txt"
+
+        # ── docker 模式：命令在容器内执行，输出仍落盘到宿主 artifacts ──
+        if executor is not None:
+            cwd_in = executor.map_path(workdir)
+            return await _run_docker_scoped_shell(
+                executor=executor,
+                command=command,
+                cwd_in=cwd_in,
+                timeout=timeout,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                artifacts_root=artifacts_root,
+                role=role,
+                seq=seq if artifacts_root is not None else 0,
+                started_at=started_at,
+                return_tail=return_tail,
+            )
 
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -765,6 +785,94 @@ def create_scoped_shell_tool(
         description="在 Kali 中执行仅限当前授权目标的命令，并返回退出码、标准输出和错误。",
         is_concurrency_safe=False,
     )
+
+
+async def _run_docker_scoped_shell(
+    *,
+    executor: "Any",
+    command: str,
+    cwd_in: str,
+    timeout: int,
+    stdout_path: Path | None,
+    stderr_path: Path | None,
+    artifacts_root: Path | None,
+    role: str,
+    seq: int,
+    started_at: str,
+    return_tail: int,
+) -> str:
+    """在 Docker 容器内执行 scoped_shell 命令，输出落盘到宿主 artifacts。
+
+    与宿主机路径语义一致：完整 stdout/stderr 写入 ``stdout_path``/
+    ``stderr_path``，返回值携带尾部与相对引用，并追加 manifest.jsonl。
+    """
+    from Tools.docker_exec import DockerExecOutcome
+
+    outcome: DockerExecOutcome = await executor.exec_shell(
+        command,
+        cwd=cwd_in,
+        timeout=timeout,
+    )
+    stdout_bytes = outcome.stdout or b""
+    stderr_bytes = outcome.stderr or b""
+    returncode = outcome.exit_code if outcome.exit_code is not None else -1
+    finished_at = datetime.now(timezone.utc).astimezone().isoformat()
+
+    # 落盘完整输出（宿主路径；docker 输出先写内存再落盘，后续可再优化为流式）
+    out_sha = err_sha = ""
+    if stdout_path is not None and stderr_path is not None and artifacts_root is not None:
+        stdout_path.write_bytes(stdout_bytes)
+        stderr_path.write_bytes(stderr_bytes)
+        out_sha = hashlib.sha256(stdout_bytes).hexdigest()
+        err_sha = hashlib.sha256(stderr_bytes).hexdigest()
+        _append_manifest(
+            artifacts_root,
+            {
+                "timestamp": finished_at,
+                "role": role or "agent",
+                "tool": "scoped_shell",
+                "command": command,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "returncode": returncode,
+                "timed_out": bool(outcome.timed_out),
+                "backend": "docker",
+                "stdout": {
+                    "path": f"artifacts/{role or 'agent'}/tool-{seq:04d}/stdout.txt",
+                    "bytes": len(stdout_bytes),
+                    "sha256": out_sha,
+                },
+                "stderr": {
+                    "path": f"artifacts/{role or 'agent'}/tool-{seq:04d}/stderr.txt",
+                    "bytes": len(stderr_bytes),
+                    "sha256": err_sha,
+                },
+            },
+        )
+        out_text = stdout_bytes.decode("utf-8", errors="replace")[-return_tail:]
+        err_text = stderr_bytes.decode("utf-8", errors="replace")[-return_tail:]
+        relative_out = f"artifacts/{role or 'agent'}/tool-{seq:04d}/stdout.txt"
+        if outcome.timed_out:
+            return (
+                f"<returncode>-1</returncode>"
+                f"<stderr>命令超过 {timeout} 秒，已在容器内终止（完整输出已落盘）</stderr>"
+                f"<stdout_artifact>{relative_out} bytes={len(stdout_bytes)}"
+                f" sha256={out_sha[:16] if out_sha else ''}</stdout_artifact>"
+                f"<stdout_tail>{out_text}</stdout_tail>"
+                f"<stderr_tail>{err_text}</stderr_tail>"
+            )
+        return (
+            f"<returncode>{returncode}</returncode>"
+            f"<stdout_artifact>{relative_out} bytes={len(stdout_bytes)}"
+            f" sha256={out_sha[:16]}</stdout_artifact>"
+            f"<stdout_tail>{out_text}</stdout_tail>"
+            f"<stderr_tail>{err_text}</stderr_tail>"
+        )
+
+    # legacy：无 artifacts 根时内存截断
+    out = stdout_bytes.decode("utf-8", errors="replace")[-20000:]
+    err = stderr_bytes.decode("utf-8", errors="replace")[-6000:]
+    return f"<returncode>{returncode}</returncode><stdout>{out}</stdout><stderr>{err}</stderr>"
 
 
 async def _stream_to_artifact(

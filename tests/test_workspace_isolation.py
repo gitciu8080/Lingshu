@@ -32,7 +32,7 @@ class CrossSessionIsolationTest(unittest.IsolatedAsyncioTestCase):
         return ws, tools
 
     async def test_workspace_tools_cannot_see_other_session_artifacts(self) -> None:
-        svc = WorkspaceService(Path(tempfile.mkdtemp(prefix="lingshu-iso-")))
+        svc = WorkspaceService(Path(tempfile.mkdtemp(prefix="lingshu-iso-")), mode="local")
         try:
             _, tools_a = await self._session(svc, 1, "sess-a")
             await self._session(svc, 1, "sess-b")
@@ -57,7 +57,7 @@ class CrossSessionIsolationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_same_attachment_inputs_are_isolated(self) -> None:
         """同一附件 blob 链接到两个会话：输入内容一致但修改互不影响。"""
-        svc = WorkspaceService(Path(tempfile.mkdtemp(prefix="lingshu-arch-")))
+        svc = WorkspaceService(Path(tempfile.mkdtemp(prefix="lingshu-arch-")), mode="local")
         try:
             digest = svc.put_blob(b"attachment-content")
             in_a = svc.link_input(1, "sess-a", digest, "task.zip")
@@ -80,7 +80,7 @@ class CrossSessionIsolationTest(unittest.IsolatedAsyncioTestCase):
 
 class DeleteVisibilityTest(unittest.IsolatedAsyncioTestCase):
     async def test_artifacts_gone_after_delete(self) -> None:
-        svc = WorkspaceService(Path(tempfile.mkdtemp(prefix="lingshu-del-")))
+        svc = WorkspaceService(Path(tempfile.mkdtemp(prefix="lingshu-del-")), mode="local")
         try:
             await svc.get(1, "sess-del")
             art = svc.artifacts_dir(1, "sess-del") / "recon" / "tool-0001"
@@ -101,7 +101,7 @@ class DeleteVisibilityTest(unittest.IsolatedAsyncioTestCase):
             await svc.close_all()
 
     async def test_artifact_path_escape_rejected(self) -> None:
-        svc = WorkspaceService(Path(tempfile.mkdtemp(prefix="lingshu-esc-")))
+        svc = WorkspaceService(Path(tempfile.mkdtemp(prefix="lingshu-esc-")), mode="local")
         try:
             await svc.get(1, "sess-esc")
             with self.assertRaises(PermissionError):

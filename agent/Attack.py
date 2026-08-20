@@ -114,6 +114,7 @@ _CYBERPENDA_SKILL_MAP: dict[str, list[str]] = {
     "ai-ml": ["llm-security"],
 }
 _CYBERPENDA_ROOT = "Skills/cyberpenda-bundles"
+_KALI_FULL_SKILL = "Skills/kali-full-tools"
 
 
 async def _connect_antsword_mcp(
@@ -214,6 +215,8 @@ def _build_skill_list(
 
     # writeup 始终加载
     skill_paths.append(_SKILL_PATH_MAP["writeup"])
+    # kali-full 工具清单始终加载（docker 工作区内能力目录）
+    skill_paths.append(_KALI_FULL_SKILL)
     # CyberPenda bundles 完整保存在仓库中，但运行时只加载与当前分类相关的目录。
     categories: list[str] = []
     if category_decision:
@@ -248,6 +251,7 @@ async def create_attack_agent(
     state=None,
     artifact_root: str | Path | None = None,
     exploitation_approved: Callable[[], bool] | None = None,
+    executor: "Any | None" = None,
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -294,9 +298,9 @@ async def create_attack_agent(
             AllowedFunctionTool(analysis, is_read_only=True),
             AllowedFunctionTool(cve_search, is_read_only=True),
             AllowedFunctionTool(execute_sagemath, is_read_only=True), 
-            create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="attack", artifact_root=artifact_root),
-            create_tesseract_ocr_tool(project_dir, timeout=min(timeout, 90)),
-            create_tonydec_tool(project_dir),
+            create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="attack", artifact_root=artifact_root, executor=executor),
+            create_tesseract_ocr_tool(project_dir, timeout=min(timeout, 90), executor=executor),
+            create_tonydec_tool(project_dir, executor=executor),
             *antsword_tools,
         ],
         skills_or_loaders=skill_list,

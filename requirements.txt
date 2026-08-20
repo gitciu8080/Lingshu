@@ -226,7 +226,7 @@ requests==2.34.2
 requests-oauthlib==2.0.0
 rich==15.0.0
 rich-rst==2.1.0
-ripgrep==15.1.0
+#ripgrep
 ROPGadget==7.7
 rpds-py==2026.6.3
 rpyc==6.0.2

@@ -14,6 +14,7 @@ import json  # 审批方案选择协议与结构化消息解析
 import logging  # 日志记录（Summary 报告等收尾阶段的异常追溯）
 import os  # 环境变量与路径操作
 import re  # 从最终证据中提取 CVE 等标题特征
+import shutil  # Docker 模式下归档/文件复制到 v2 session input/
 import sys  # 修改模块搜索路径，确保能 import 本目录下的包
 import uuid  # CLI 模式任务级 mission_id 生成
 from collections.abc import Callable  # 回调类型注解
@@ -1088,7 +1089,7 @@ async def run_mission(
         mission_id = uuid.uuid4().hex[:12]
     else:
         mission_id = session_id
-    use_v2_workspace = runtime.workspace_mode == "local"
+    use_v2_workspace = runtime.workspace_mode in {"docker", "local"}
     if use_v2_workspace:
         mission.workspace_id = ws_service.workspace_id(user_id, mission_id)
         # 安全检查点镜像写入工作区 mission/checkpoint.json（权威 JSON 的原子副本）
@@ -1183,21 +1184,111 @@ async def run_mission(
 
         tool_json_token = bind_tool_json_failure_handler(_record_tool_json_failure)
 
-        # ── v0.3.0：获取会话 Workspace（LocalWorkspace + 业务目录）──
+        # ── v0.3.0：获取会话 Workspace（Docker/Local + 业务目录）──
         # 同一会话所有内部 Agent 共享同一 Workspace：
         #   - offloader：压缩上下文与超限工具结果卸载（角色分区）
         #   - scoped_shell artifacts 根：完整工具输出落盘
         # 任务结束时不删除磁盘数据；TTL 仅关闭 MCP/释放对象。
         # legacy 模式（LINGSHU_WORKSPACE_MODE=legacy）跳过：旧行为使用
         # 全局 WorkDir，仅用于打开旧会话。
+        executor = None
         if use_v2_workspace:
             workspace = await ws_service.get(user_id, mission_id)
             context_config = build_agent_context_config()
             ws_root = ws_service.workspace_dir(user_id, mission_id)
+            if runtime.workspace_mode == "docker":
+                # docker 模式：scoped_shell/workspace 文件工具在容器内执行。
+                from Tools.docker_exec import LingshuDockerExecutor
+
+                backend = workspace.get_backend()
+                session_dir = ws_service.workspace_dir(user_id, mission_id)
+
+                def _to_container(path: str | Path) -> str:
+                    # 会话目录内的宿主路径映射到 /workspace；项目目录、
+                    # 归档 workdir 等会话外路径一律落到容器默认 /workspace。
+                    try:
+                        return ws_service.host_to_container(
+                            user_id, mission_id, path,
+                        )
+                    except ValueError:
+                        return "/workspace"
+
+                executor = LingshuDockerExecutor(
+                    backend,
+                    to_container=_to_container,
+                    default_timeout=runtime.command_timeout,
+                )
         else:
             workspace = None
             context_config = None
             ws_root = None
+
+        # ── 4c. Docker 模式：将文件目标迁移到 v2 session input/ ──
+        # _prepare_workspace 将归档解压到旧 WorkDir/ 路径，该路径不在
+        # v2 session 目录内，Docker 容器无法通过 /workspace 访问。
+        # 将文件复制到 session 的 input/ 目录并重定向 workdir，使容器内
+        # Agent 能通过 /workspace/input/ 看到所有目标文件。
+        if (
+            use_v2_workspace
+            and ws_root is not None
+            and target_spec.kind in ("archive", "single_file", "directory")
+            and not resume
+        ):
+            try:
+                workdir_resolved = workdir.resolve()
+                ws_root_resolved = ws_root.resolve()
+                if not str(workdir_resolved).startswith(str(ws_root_resolved)):
+                    session_input = ws_root / "input"
+                    session_input.mkdir(parents=True, exist_ok=True)
+                    if target_spec.kind == "archive":
+                        dest = session_input / workdir.name
+                        if not dest.exists():
+                            shutil.copytree(
+                                str(workdir), str(dest),
+                                copy_function=shutil.copy2,
+                                dirs_exist_ok=True,
+                            )
+                            print(
+                                f"[系统] 归档文件已复制到 session input/: {dest}"
+                            )
+                        workdir = dest
+                    elif target_spec.kind == "single_file":
+                        src = target_spec.original_path
+                        dest = session_input / src.name
+                        if not dest.exists():
+                            try:
+                                dest.write_bytes(src.read_bytes())
+                            except OSError:
+                                shutil.copy2(str(src), str(dest))
+                            print(
+                                f"[系统] 单文件已复制到 session input/: {dest}"
+                            )
+                        workdir = dest.parent
+                        target_str = str(dest)
+                    elif target_spec.kind == "directory":
+                        dest = session_input / workdir.name
+                        if not dest.exists():
+                            shutil.copytree(
+                                str(workdir), str(dest),
+                                copy_function=shutil.copy2,
+                                dirs_exist_ok=True,
+                            )
+                            print(
+                                f"[系统] 目录已复制到 session input/: {dest}"
+                            )
+                        workdir = dest
+            except Exception as exc:  # noqa: BLE001
+                # 文件迁移失败不阻断任务：Recon 会收到错误信息并由
+                # Orchestrator 决策（已添加的 except Exception 兜底）。
+                logger.warning(
+                    "Docker 文件迁移到 session input/ 失败: %s", exc,
+                )
+                if event_callback is not None:
+                    event_callback(
+                        "error",
+                        message=f"归档文件迁移到 Docker 工作区失败: {exc}",
+                        agent="system",
+                    )
 
         # ── 5. 模型与基础 Agent ──
         # Qwen 启动前必须核对 llama.cpp 实际加载的模型。只有服务端唯一模型
@@ -1274,6 +1365,7 @@ async def run_mission(
                 context_config=context_config,
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
                 artifact_root=ws_root,
+                executor=executor,
             )
         else:
             recon = create_artifact_triage_agent(
@@ -1283,6 +1375,7 @@ async def run_mission(
                 context_config=context_config,
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
                 artifact_root=ws_root,
+                executor=executor,
             )
 
         # ── 7. Brain 战略规划（包含分类结果）──
@@ -1422,6 +1515,7 @@ async def run_mission(
             state=build_role_agent_state(mission_id, "attack") if use_v2_workspace else None,
             artifact_root=ws_root,
             exploitation_approved=lambda: mission.exploitation_approved,
+            executor=executor,
         )
 
         reserve = await create_reverse_agent(
@@ -1438,6 +1532,7 @@ async def run_mission(
             context_config=context_config,
             state=build_role_agent_state(mission_id, "reserve") if use_v2_workspace else None,
             artifact_root=ws_root,
+            executor=executor,
         )
 
         scope_auditor = create_scope_auditor_agent(model)

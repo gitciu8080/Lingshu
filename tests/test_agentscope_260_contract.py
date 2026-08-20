@@ -31,6 +31,16 @@ class VersionContractTest(unittest.TestCase):
             WorkspaceBase,
         )
 
+    def test_lingshu_docker_workspace_subclasses_dockerworkspace(self) -> None:
+        """LingshuDockerWorkspace 必须继承 DockerWorkspace（host 网络子类化）。"""
+        from agentscope.workspace import DockerWorkspace
+
+        from workspace_service import LingshuDockerWorkspace
+
+        self.assertTrue(issubclass(LingshuDockerWorkspace, DockerWorkspace))
+        inst = LingshuDockerWorkspace(base_image="kali-full:latest")
+        self.assertEqual(inst.base_image, "kali-full:latest")
+
 
 class ContextConfigContractTest(unittest.TestCase):
     def test_context_config_fields_match_plan_contract(self) -> None:

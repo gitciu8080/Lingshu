@@ -47,11 +47,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agentscope.workspace import LocalWorkspace
+from agentscope.workspace import DockerWorkspace, LocalWorkspace
 
 # 默认工作区根目录固定在项目内，不依赖启动命令的当前目录。
 _PROJECT_ROOT = Path(__file__).resolve().parent
 _DEFAULT_ROOT = _PROJECT_ROOT / "WorkDir" / "v2"
+
+# 容器内工作区挂载点（DockerWorkspace 约定：host_workdir → /workspace）。
+_CONTAINER_WORKDIR = "/workspace"
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -60,28 +63,116 @@ def _sha256_bytes(data: bytes) -> str:
 
 @dataclass
 class _CachedWorkspace:
-    """缓存条目：LocalWorkspace 实例 + 最近使用时间戳。"""
+    """缓存条目：Workspace 实例 + 最近使用时间戳。"""
 
-    workspace: LocalWorkspace
+    workspace: "Any"
     last_used: float = field(default_factory=time.monotonic)
 
 
+class LingshuDockerWorkspace(DockerWorkspace):
+    """灵枢的 Docker 工作区：host 网络 + 原始套接字能力。
+
+    kali-full 镜像的 nmap（SYN 扫描等）需要 NET_RAW，嗅探/网络工具需要
+    NET_ADMIN；渗透任务依赖 --net=host 与宿主机一致的网络视角。agentscope
+    2.0.6 原生的 DockerWorkspace 不开放 HostConfig 定制，这里子类化在
+    创建容器时注入 ``NetworkMode=host`` 与 ``CapAdd``。
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        base_image: str = "kali-full:latest",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, base_image=base_image, **kwargs)
+
+    async def _create_and_start_container(self) -> None:  # noqa: D102
+        # 复用父类镜像构建/标签/启动逻辑，但容器配置需要注入 HostConfig，
+        # 因此此处整体重写（父类方法不返回 container 前无法中途改写）。
+        await self._build_or_reuse_image()
+
+        config: dict[str, Any] = {
+            "Image": self._image_tag,
+            "Cmd": ["sleep", "infinity"],
+            "WorkingDir": self.workdir,
+            "Labels": {
+                "agentscope.workspace": "true",
+                "agentscope.workspace.id": self.workspace_id,
+                "lingshu.workspace": "true",
+            },
+        }
+        if self.env:
+            config["Env"] = [f"{k}={v}" for k, v in self.env.items()]
+
+        host_config: dict[str, Any] = {
+            "NetworkMode": "host",
+            "CapAdd": ["NET_RAW", "NET_ADMIN"],
+        }
+        if self.host_workdir is not None:
+            os.makedirs(self.host_workdir, exist_ok=True)
+            host_config["Binds"] = [
+                f"{os.path.abspath(self.host_workdir)}:{self.workdir}:rw",
+            ]
+        config["HostConfig"] = host_config
+
+        self._container = await self._client.containers.create_or_replace(
+            name=f"as_ws_{self.workspace_id}",
+            config=config,
+        )
+        await self._container.start()
+
+        from agentscope.workspace._docker._docker_backend import DockerBackend
+
+        self._backend = DockerBackend(self._container, self.workdir)
+
+
 class WorkspaceService:
-    """按 (user_id, session_id) 隔离的 LocalWorkspace 生命周期管理器。"""
+    """按 (user_id, session_id) 隔离的 Workspace 生命周期管理器。"""
 
     def __init__(
         self,
         root: str | Path = _DEFAULT_ROOT,
         *,
         idle_ttl_seconds: float = 3600.0,
+        mode: str = "docker",
+        base_image: str = "kali-full:latest",
+        gateway_port: int | None = None,
+        extra_pip: tuple[str, ...] = (),
     ) -> None:
         candidate = Path(root).expanduser()
         self.root = (
             candidate if candidate.is_absolute() else _PROJECT_ROOT / candidate
         ).resolve()
         self.idle_ttl_seconds = idle_ttl_seconds
+        # docker | local | legacy：决定 get() 构造哪种 Workspace。
+        if mode not in {"docker", "local", "legacy"}:
+            mode = "docker"
+        self.mode = mode
+        self.base_image = base_image or "kali-full:latest"
+        self.gateway_port = gateway_port
+        self.extra_pip = tuple(extra_pip)
         self._cache: dict[str, _CachedWorkspace] = {}
         self._lock = asyncio.Lock()
+
+    def host_to_container(self, user_id: int | None, session_id: str, path: str | Path) -> str:
+        """把会话目录内的宿主路径映射为容器内 /workspace 相对路径。
+
+        docker 模式下返回 ``/workspace/<rel>``；非 docker 模式返回原绝对路径
+        字符串。路径必须是会话工作目录内的文件，否则抛出 ValueError。
+        """
+        host_dir = self.workspace_dir(user_id, session_id).resolve()
+        target = Path(path).expanduser().resolve()
+        try:
+            rel = target.relative_to(host_dir)
+        except ValueError:
+            raise ValueError(
+                f"路径不在会话工作区内: {path}（工作区 {host_dir}）"
+            ) from None
+        if self.mode == "docker":
+            # 容器内挂载点为 /workspace：拼接相对段到其下。
+            rel_parts = [part for part in rel.parts if part not in {".", ".."}]
+            return _CONTAINER_WORKDIR + "/" + "/".join(rel_parts)
+        return str(target)
 
     # ── 路径与 ID 推导（确定性） ──
 
@@ -121,11 +212,13 @@ class WorkspaceService:
         *,
         default_mcps: list[Any] | None = None,
         skill_paths: list[str | Path] | None = None,
-    ) -> LocalWorkspace:
+    ) -> "Any":
         """获取（必要时创建并初始化）会话的工作区。
 
-        TTL 语义：缓存命中即刷新 last_used；空闲超过 TTL 的工作区由
-        :meth:`close_idle` 关闭（仅释放资源，不删除磁盘数据）。
+        docker 模式返回 :class:`LingshuDockerWorkspace`（工具在容器内执行），
+        local 模式返回 :class:`LocalWorkspace`（宿主机执行）。TTL 语义：
+        缓存命中即刷新 last_used；空闲超过 TTL 的工作区由 :meth:`close_idle`
+        关闭（仅释放资源，不删除磁盘数据）。
         """
         key = self.workspace_id(user_id, session_id)
         async with self._lock:
@@ -136,17 +229,52 @@ class WorkspaceService:
 
             workdir = self.workspace_dir(user_id, session_id)
             workdir.mkdir(parents=True, exist_ok=True)
-            # 业务目录（LocalWorkspace 只管理 .mcp/skills/data/sessions）
+            # 业务目录（Workspace 只管理 .mcp/skills/data/sessions）
             for sub in ("input", "artifacts", "reports", "mission"):
                 (workdir / sub).mkdir(parents=True, exist_ok=True)
 
-            workspace = LocalWorkspace(
-                workdir=str(workdir),
-                workspace_id=key,
-                default_mcps=default_mcps,
-                skill_paths=[str(p) for p in (skill_paths or [])],
-            )
-            await workspace.initialize()
+            if self.mode == "docker":
+                kwargs: dict[str, Any] = {}
+                if self.gateway_port is not None:
+                    kwargs["gateway_port"] = self.gateway_port
+                workspace = LingshuDockerWorkspace(
+                    base_image=self.base_image,
+                    host_workdir=str(workdir),
+                    extra_pip=list(self.extra_pip),
+                    default_mcps=default_mcps,
+                    skill_paths=[str(p) for p in (skill_paths or [])],
+                    **kwargs,
+                )
+            else:
+                workspace = LocalWorkspace(
+                    workdir=str(workdir),
+                    workspace_id=key,
+                    default_mcps=default_mcps,
+                    skill_paths=[str(p) for p in (skill_paths or [])],
+                )
+
+            try:
+                await workspace.initialize()
+            except Exception as exc:
+                if self.mode == "docker":
+                    # docker 模式初始化失败给出可操作指引，并保留真实异常链
+                    # 便于排障（如派生镜像构建缺网络/缺 uv 等）。
+                    import logging as _logging
+
+                    _logging.getLogger(__name__).warning(
+                        "Docker 工作区初始化失败（%s）: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    raise RuntimeError(
+                        "Docker 工作区初始化失败：请确认 docker daemon 可访问、"
+                        f"基础镜像 {self.base_image!r} 已构建，且首次派生镜像"
+                        "构建（网关 venv，需网络）已成功。"
+                        "若构建期网络受限，可先用 "
+                        "'./scripts/build_workspace_image.sh' 预热派生镜像。"
+                        f"底层错误: {type(exc).__name__}: {exc}"
+                    ) from exc
+                raise
             self._cache[key] = _CachedWorkspace(workspace)
             return workspace
 
@@ -324,5 +452,23 @@ def get_workspace_service(
         kwargs: dict[str, Any] = {}
         if idle_ttl_seconds is not None:
             kwargs["idle_ttl_seconds"] = idle_ttl_seconds
+        # 模式与镜像配置可由调用方主动传入；单例创建后后续调用沿用首次值。
+        # 兼容旧调用：未显式传参时从环境变量读取（与 config.RuntimeConfig
+        # 一致），保证 CLI 直接构造也能落到 docker 模式。
+        kwargs.setdefault(
+            "mode",
+            _os.getenv("LINGSHU_WORKSPACE_MODE", "docker").strip().lower(),
+        )
+        kwargs.setdefault(
+            "base_image",
+            _os.getenv("LINGSHU_WORKSPACE_BASE_IMAGE", "kali-full:latest").strip(),
+        )
+        port_raw = _os.getenv("LINGSHU_WORKSPACE_GATEWAY_PORT", "").strip()
+        kwargs.setdefault("gateway_port", int(port_raw) if port_raw else None)
+        extra_raw = _os.getenv("LINGSHU_WORKSPACE_DOCKER_EXTRA_PIP", "")
+        kwargs.setdefault(
+            "extra_pip",
+            tuple(p.strip() for p in extra_raw.split(",") if p.strip()),
+        )
         _service = WorkspaceService(effective_root, **kwargs)
     return _service

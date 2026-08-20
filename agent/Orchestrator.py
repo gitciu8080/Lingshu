@@ -170,6 +170,19 @@ def create_orchestrator_agent(
             # 不在此处消费 steering：统一由主循环捕获 CancelledError 后注入，
             # 避免指令被消费但 Orchestrator reply 又被取消导致指令丢失。
             raise
+        except Exception as exc:
+            mission.record("Orchestrator", "recon_unexpected_error", error=str(exc), error_type=type(exc).__name__)
+            store.save(mission)
+            if event_callback is not None:
+                event_callback(
+                    "error",
+                    message=f"Recon 执行异常: {type(exc).__name__}: {exc}",
+                    agent="Orchestrator",
+                )
+            return (
+                f"[Recon 异常] {type(exc).__name__}: {exc}。"
+                f"请检查工具可用性后重试，或调整 focus 范围重新调度。"
+            )
         mission.add_finding("Recon", report)
         mission.transition(Phase.ANALYSIS, "收到新的侦察证据")
         store.checkpoint(mission, "recon_report_received")
@@ -280,6 +293,20 @@ def create_orchestrator_agent(
         except asyncio.CancelledError:
             # 不在此处消费 steering：统一由主循环捕获 CancelledError 后注入。
             raise
+        except Exception as exc:
+            mission.record("Orchestrator", "attack_unexpected_error", objective=objective, error=str(exc), error_type=type(exc).__name__)
+            mission.add_attack_step(objective, f"[Attack 异常] {type(exc).__name__}: {exc}")
+            store.save(mission)
+            if event_callback is not None:
+                event_callback(
+                    "error",
+                    message=f"Attack 执行异常: {type(exc).__name__}: {exc}",
+                    agent="Orchestrator",
+                )
+            return (
+                f"[Attack 异常] {type(exc).__name__}: {exc}。"
+                f"请检查工具可用性后重试，或调整 objective 重新调度。"
+            )
         mission.add_attack_step(objective, report, service, cve)
         # 循环收敛：记录指纹与错误类型计数（确定性错误按类型累计；
         # 无确定性错误或结果含成功信号时不再累加，避免误熔断）
@@ -346,6 +373,19 @@ def create_orchestrator_agent(
             if msg is not None:
                 return msg
             raise
+        except Exception as exc:
+            mission.record("Orchestrator", "reverse_unexpected_error", binary_path=binary_path, error=str(exc), error_type=type(exc).__name__)
+            store.save(mission)
+            if event_callback is not None:
+                event_callback(
+                    "error",
+                    message=f"Reserve 执行异常: {type(exc).__name__}: {exc}",
+                    agent="Orchestrator",
+                )
+            return (
+                f"[Reserve 异常] {type(exc).__name__}: {exc}。"
+                f"请检查 IDA/GDB MCP 服务可用性后重试。"
+            )
         mission.add_finding("Reserve", report)
         store.save(mission)
         return f"[Reserve 逆向报告]\n{report}"
