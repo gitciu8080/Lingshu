@@ -1,7 +1,7 @@
 """Analysis：只进行漏洞研判，不执行命令。"""
 from agentscope.agent import Agent, ReActConfig
 from Tools.tooling import StrictJSONToolkit
-
+from Tools.AgenticMemory import create_query_memory_tool
 from Tools.CVE_Search import create_cve_search_tool
 from agent.experts import ANALYSIS_EXPERT
 

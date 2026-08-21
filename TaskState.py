@@ -165,6 +165,10 @@ class MissionState:
     # {attempt_id, flag, correct, remaining_wrong_attempts}
     nss_submit: dict[str, Any] | None = None
 
+    # slab-match 平台提交结果（由 Orchestrator 的 submit_slab_flag 工具写入）：
+    # {exercise_id, flag, submitted, correct, api_base}
+    slab_submit: dict[str, Any] | None = None
+
     # ── v0.3.0 Workspace v2 新增 ──
     # 工作区标识（workspace_service.workspace_id() 的确定性输出）
     workspace_id: str = ""

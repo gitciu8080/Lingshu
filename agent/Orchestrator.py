@@ -1,6 +1,7 @@
 """Orchestrator：唯一可以修改任务状态的战术决策核心。"""
 import asyncio
 import httpx
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -65,6 +66,7 @@ ORCHESTRATOR_SYS_PROMPT = """# 网络安全行动总指挥（Orchestrator）
 - **原功能保留**，但明确：
   - 查询历史经验（QueryMemory）仅调用智能体返回结果，不自行分析CVE匹配逻辑
   - 提交Flag（submit_nss_flag）仅触发智能体执行校验，不参与Flag正确性计算
+  - 提交Flag（submit_slab_flag）仅触发智能体执行校验，不参与Flag正确性计算
   - 任务状态更新（UpdatePlan）仅记录智能体返回的计算结果（如"攻击成功/失败"）
 
 
@@ -112,6 +114,7 @@ def create_orchestrator_agent(
     scope_auditor: Agent | None = None,
     steering_state: dict[str, Any] | None = None,
     nss_context: dict[str, Any] | None = None,
+    slab_context: dict[str, Any] | None = None,
     *,
     offloader=None,
     context_config=None,
@@ -670,6 +673,100 @@ def create_orchestrator_agent(
         )
 
 
+    async def submit_slab_flag(flag: str) -> str:
+        """向 slab-match 平台提交 Flag 并获取判定结果。
+
+        仅当任务由 slab-match 发起（携带 slab_context）时可用。
+        Args:
+            flag: 候选 Flag（DASCTF{...} / flag{...} 或花括号内内容）。
+        """
+        if not slab_context:
+            mission.record("Orchestrator", "slab_submit_unavailable", flag=flag)
+            store.save(mission)
+            return "[不可用] 当前任务未接入 slab-match 平台，无法提交。请在 complete_mission 中报告 Flag。"
+        exercise_id = slab_context.get("exercise_id")
+        access_key = slab_context.get("access_key", "")
+        api_base = slab_context.get("api_base", "https://pro.dasctf.com")
+        if not exercise_id:
+            return "[不可用] 缺少 exercise_id，无法提交。"
+
+        candidate = (flag or "").strip()
+        if not candidate:
+            return "[拒绝] Flag 不能为空。"
+        # 平台格式：DASCTF{...}/flag{...}，提交时仅需花括号内内容
+        inner: str | None = None
+        match = re.search(r"(?:DASCTF|flag)\{([^{}\r\n]+)\}", candidate)
+        if match:
+            inner = match.group(1).strip()
+        elif candidate and "{" not in candidate and "}" not in candidate \
+                and not any(ch.isspace() for ch in candidate):
+            inner = candidate
+        if not inner:
+            mission.record("Orchestrator", "slab_submit_format_warning", flag=candidate)
+            store.save(mission)
+            return (
+                f"[警告] Flag '{candidate[:80]}' 无法解析为平台格式"
+                f"（DASCTF{{...}}/flag{{...}} 或纯内容），请确认候选值后再提交。"
+            )
+
+        payload = {"exerciseId": exercise_id, "flag": inner}
+        headers = {
+            "X-Agent-AccessKey": access_key,
+            "Content-Type": "application/json",
+            # 平台 WAF 拦截 python-httpx 默认 UA
+            "User-Agent": "curl/8.5.0",
+        }
+        url = f"{api_base}/slab-match/api/v1/agent/answer-panel/answer"
+        try:
+            resp = await httpx.AsyncClient(timeout=60.0).post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            body = resp.json()
+            if body.get("code") != "00000":
+                raise RuntimeError(f"slab API 错误 {body.get('code')}: {body.get('message', body)}")
+            data = body.get("data", {})
+        except Exception as exc:
+            mission.record("Orchestrator", "slab_submit_error", flag=candidate, error=str(exc))
+            store.save(mission)
+            return f"[提交失败] 请求异常: {exc}"
+
+        correct = bool(data.get("isCorrect"))
+        mission.slab_submit = {
+            "exercise_id": exercise_id,
+            "flag": candidate,
+            "submitted": inner,
+            "correct": correct,
+            "api_base": api_base,
+        }
+        mission.record(
+            "Orchestrator", "slab_submit",
+            flag=candidate, submitted=inner, correct=correct,
+        )
+        store.checkpoint(mission, "slab_flag_submitted")
+        if event_callback:
+            event_callback("slab_submit", **mission.slab_submit)
+        if correct:
+            mission.flag = candidate
+            mission.success = True
+            # 在线判定正确立即进入 COMPLETED，残留计划项确定性收尾
+            if mission.phase not in {Phase.COMPLETED, Phase.FAILED, Phase.CANCELLED}:
+                mission.transition(Phase.COMPLETED, "slab Flag 判定正确")
+                for item in mission.plan_items:
+                    if item.get("status") == "in_progress":
+                        item["status"] = "completed"
+                    elif item.get("status") == "pending":
+                        item["status"] = "skipped"
+            store.checkpoint(mission, "slab_flag_correct")
+            push_plan_update(mission, event_callback)
+            return (
+                f"[提交成功] ✅ slab-match 判定 Flag 正确！exercise_id={exercise_id}。"
+                f"任务已标记完成，无需再调用 complete_mission。"
+            )
+        return (
+            f"[提交失败] ❌ slab-match 判定 Flag 错误（已提交 {inner}）。"
+            f"请分析失败原因，重新尝试或调用 complete_mission 如实收尾。"
+        )
+
+
     tools = [
         AllowedFunctionTool(dispatch_recon, is_concurrency_safe=False),
         AllowedFunctionTool(dispatch_attack, is_concurrency_safe=False),
@@ -683,6 +780,7 @@ def create_orchestrator_agent(
         AllowedFunctionTool(request_exploitation_approval, is_concurrency_safe=False),
         AllowedFunctionTool(request_scope_expansion, is_concurrency_safe=False),
         AllowedFunctionTool(submit_nss_flag, is_concurrency_safe=False),
+        AllowedFunctionTool(submit_slab_flag, is_concurrency_safe=False),
         create_query_memory_tool(),
     ]
     return Agent(

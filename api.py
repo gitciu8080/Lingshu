@@ -168,6 +168,8 @@ _PERSIST_EVENT_TYPES = frozenset({
     "target_info", "flag_found",
     # NSSCTF 在线提交结果
     "nss_submit",
+    # slab-match 在线提交结果
+    "slab_submit",
     "report_ready",
 })
 
@@ -251,6 +253,9 @@ def _event_persistence_operation(
         }, ensure_ascii=False)
     elif event_type == "nss_submit":
         # 保存 NSSCTF 提交结果，供历史回放
+        content = json.dumps(payload, ensure_ascii=False)
+    elif event_type == "slab_submit":
+        # 保存 slab-match 提交结果，供历史回放
         content = json.dumps(payload, ensure_ascii=False)
     elif event_type == "report_ready":
         content = json.dumps(payload, ensure_ascii=False)
@@ -588,7 +593,7 @@ def _message_to_event(message: dict) -> dict:
             event["block_id"] = f"legacy:{event_type}:{message.get('seq', 0)}"
     elif event_type == "phase_change":
         event["phase"] = content
-    elif event_type in ("approval_required", "approval_resolved", "plan_updated", "nss_submit", "expert_joined", "report_ready"):
+    elif event_type in ("approval_required", "approval_resolved", "plan_updated", "nss_submit", "slab_submit", "expert_joined", "report_ready"):
         try:
             event.update(json.loads(content))
         except (json.JSONDecodeError, TypeError):
@@ -725,7 +730,7 @@ def _save_long_term_memory(session_id, target, goal, phase, success, flag, summa
 
 async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, goal: str,
                            model_ver: str, provider: str, callback, initial_context: str | None = None,
-                           nss_context: dict | None = None, resume: bool = False,
+                           nss_context: dict | None = None, slab_context: dict | None = None, resume: bool = False,
                            qwen_tool_call_mode: str | None = None):
     """运行任务并处理清理逻辑。"""
     status_val = "completed"
@@ -745,6 +750,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             agent_tasks=ctx.agent_tasks,
             steering_state=ctx.steering_state,
             nss_context=nss_context,
+            slab_context=slab_context,
             resume=resume,
             user_id=ctx.user_id,
         )
@@ -1029,6 +1035,7 @@ class MissionStartRequest(BaseModel):
     )
     source_session_id: str | None = Field(default=None, description="重跑来源会话ID，用于注入前次任务上下文")
     nss_context: dict | None = Field(default=None, description="NSSCTF Arena 上下文（attempt_id/token/api_base），供 Orchestrator 在线提交 Flag")
+    slab_context: dict | None = Field(default=None, description="slab-match 平台上下文（exercise_id/access_key/api_base），供 Orchestrator 在线提交 Flag")
 
 
 def _normalize_user_authorized_target(value: str) -> str:
@@ -1581,6 +1588,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     task = asyncio.create_task(
         _run_and_cleanup(session_id, ctx, authorized_target, req.goal, model_level, req.provider, callback,
                          initial_context=initial_context, nss_context=req.nss_context,
+                         slab_context=req.slab_context,
                          qwen_tool_call_mode=req.qwen_tool_call_mode)
     )
     ctx.task = task
@@ -1911,7 +1919,7 @@ def _jsonl_export_record(message: dict) -> dict[str, Any]:
     # 结构化事件的 content 是 JSON；展开后便于评审直接阅读，raw 保证原样可追溯。
     if event_type in {
         "tool_call_start", "tool_call_end", "approval_required",
-        "approval_resolved", "plan_updated", "nss_submit", "report_ready",
+        "approval_resolved", "plan_updated", "nss_submit", "slab_submit", "report_ready",
     }:
         try:
             payload = json.loads(content)
