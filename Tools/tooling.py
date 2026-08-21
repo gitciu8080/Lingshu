@@ -232,23 +232,36 @@ def reset_expert_roster(token: Token) -> None:
 
 
 def interrupt_agent_tasks(tasks: set[asyncio.Task[Any]]) -> int:
-    """立即发出 AgentScope 官方中断信号，绝不等待清理完成。
+    """向最外层 AgentScope 调用发出中断信号，绝不等待清理完成。
 
     对正在运行的 ``Agent.reply_stream``，官方方式是取消承载它的
-    ``asyncio.Task``。HTTP 插话请求必须在发出该信号后马上返回，否则某个
-    慢模型调用/工具收尾会把下一条情报也堵在网络层。任务自身会在事件循环的
-    下一次调度中完成 AgentScope 的 interrupted 清理和 shell 子进程终止。
+    ``asyncio.Task``。嵌套 Agent 调用形成父子任务链时，只取消最外层任务，
+    让取消信号沿 await 链自然传播；同时取消父、子 reply 会二次打断
+    AgentScope 的未完成工具清理，使下一轮回复错误地变成空消息。
+
+    HTTP 插话请求仍会在发出信号后立即返回。旧任务若没有父链元数据，则采用
+    原有的全部取消策略，保证热更新/兼容调用不会失去中断能力。
     """
     active = tuple(task for task in tasks if not task.done())
-    for task in active:
+    active_set = set(active)
+    roots = tuple(
+        task
+        for task in active
+        if getattr(task, "_lingshu_parent_agent_task", None) not in active_set
+    )
+    targets = roots or active
+    for task in targets:
         task.cancel()
-    return len(active)
+    return len(targets)
 
 
 async def cancel_agent_tasks(tasks: set[asyncio.Task[Any]]) -> None:
     """中断并等待 Agent reply task 清理；仅用于任务终止/资源回收。"""
     active = tuple(task for task in tasks if not task.done())
-    interrupt_agent_tasks(tasks)
+    # 任务终止与运行时插话不同：此处不会再恢复 Agent，可以取消全部层级，
+    # 确保失去父 await 链的孤立工具任务也被回收。
+    for task in active:
+        task.cancel()
     if active:
         try:
             await asyncio.wait_for(
@@ -273,11 +286,17 @@ async def run_interruptible_agent_reply(
     包住整个子 Agent 调用的 task；取消时可直接打断工具协程，并让
     ``CancelledError`` 回传到 Orchestrator 主循环。
     """
+    agent_tasks = _AGENT_TASKS.get()
+    parent_task = asyncio.current_task()
     task = asyncio.create_task(
         stream_agent_reply(agent, inputs, prefix, on_event),
         name=f"agent-call:{getattr(agent, 'name', 'unknown')}",
     )
-    agent_tasks = _AGENT_TASKS.get()
+    # 记录嵌套关系，供 interrupt_agent_tasks 只中断最外层调用。父任务只有
+    # 同属本会话注册表时才参与层级判断，run_mission/API 自身不纳入其中。
+    task._lingshu_parent_agent_task = (
+        parent_task if agent_tasks is not None and parent_task in agent_tasks else None
+    )
     if agent_tasks is not None:
         agent_tasks.add(task)
     try:
@@ -305,6 +324,7 @@ async def stream_agent_reply(
         agent.reply() 返回的最终 Msg。
     """
     final_msg: Msg | None = None
+    interrupted_reply_seen = False
     agent_name = agent.name if hasattr(agent, "name") else prefix.strip("[] ")
 
     def _emit(event_type: str, **payload: Any) -> None:
@@ -323,7 +343,7 @@ async def stream_agent_reply(
         )
 
     async def _consume_reply_stream() -> None:
-        nonlocal final_msg
+        nonlocal final_msg, interrupted_reply_seen
         # 惰性发送：文本/思考块直到出现首个非空 delta 才发 _start。
         # 空块（模型无实际内容）不发 start/end，避免 web 端出现空气泡。
         text_started = False
@@ -351,6 +371,14 @@ async def stream_agent_reply(
                     # 后续 message 事件才能与刚完成的全文稳定去重。
                     _finish_open_blocks()
                     final_msg = evt_or_msg
+                    if (
+                        getattr(evt_or_msg, "finished_reason", None)
+                        == ReplyFinishedReason.INTERRUPTED
+                    ):
+                        # reply_stream(yield_final_msg=True) 在部分 AgentScope
+                        # 路径中会在中断消息后再产出一个空聚合 Msg。单独记住
+                        # 中断标志，避免被后一个 Msg 覆盖。
+                        interrupted_reply_seen = True
                     content = evt_or_msg.get_text_content() or ""
                     if content:
                         _emit("message", content=content)
@@ -429,11 +457,15 @@ async def stream_agent_reply(
             _finish_open_blocks(interrupted=asyncio.current_task().cancelling() > 0)
 
     # 官方中断机制要求 cancel 直接承载 reply_stream 的 task。
+    parent_task = asyncio.current_task()
     reply_task = asyncio.create_task(
         _consume_reply_stream(),
         name=f"agent-reply:{agent_name}",
     )
     agent_tasks = _AGENT_TASKS.get()
+    reply_task._lingshu_parent_agent_task = (
+        parent_task if agent_tasks is not None and parent_task in agent_tasks else None
+    )
     if agent_tasks is not None:
         agent_tasks.add(reply_task)
     try:
@@ -452,7 +484,11 @@ async def stream_agent_reply(
     # INTERRUPTED 的最终消息正常返回（并发工具路径会吞掉取消）。此处将其
     # 还原为 CancelledError，使中断信号沿 dispatch_* → Orchestrator 主循环
     # → run_mission 传播，触发统一的后台进程清理与 cancelled 终态收敛。
-    if getattr(final_msg, "finished_reason", None) == ReplyFinishedReason.INTERRUPTED:
+    if (
+        interrupted_reply_seen
+        or getattr(final_msg, "finished_reason", None)
+        == ReplyFinishedReason.INTERRUPTED
+    ):
         raise asyncio.CancelledError()
     # 超迭代（EXCEED_MAX_ITERS）同样以最终消息正常返回，但其文本是
     # "The maximum reasoning-acting iterations are exceeded." 这类占位串，

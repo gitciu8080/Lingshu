@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from agentscope.message import AssistantMsg, UserMsg
 from agentscope.event import TextBlockDeltaEvent, TextBlockStartEvent
+from agentscope.types import ReplyFinishedReason
 from agentscope.credential import OpenAICredential
 from pydantic import SecretStr
 
@@ -19,7 +20,12 @@ from LLM.model import DeepSeekResponsesModel
 from main import build_final_mission_title, build_mission_title, prefix_session_title
 from agent.experts import REVERSE_EXPERT, attack_expert_name, build_expert_assignments
 from agent.Reserve import _IDA_READ_ONLY_TOOLS, RESERVE_SYS_PROMPT
-from Tools.tooling import bind_expert_roster, reset_expert_roster, stream_agent_reply
+from Tools.tooling import (
+    bind_expert_roster,
+    interrupt_agent_tasks,
+    reset_expert_roster,
+    stream_agent_reply,
+)
 from integrations.agentscope_service.account_events import (
     publish_account_event,
     subscribe_account,
@@ -300,6 +306,46 @@ class ExpertRosterTest(unittest.IsolatedAsyncioTestCase):
         event_names = [event for event, _ in events]
         self.assertEqual(event_names, ["text_start", "text_delta", "text_end"])
         self.assertTrue(events[-1][1]["interrupted"])
+
+    async def test_interrupted_msg_is_not_overwritten_by_empty_aggregate(self) -> None:
+        async def reply_stream(**_kwargs):
+            yield AssistantMsg(
+                name="Alex - 行动指挥专家",
+                content="I notice the interruption. How can I help you?",
+                finished_reason=ReplyFinishedReason.INTERRUPTED,
+            )
+            # AgentScope 的部分路径会在中断消息后追加一个空聚合消息。
+            yield AssistantMsg(
+                name="Alex - 行动指挥专家",
+                content="",
+                finished_reason=ReplyFinishedReason.COMPLETED,
+            )
+
+        agent = SimpleNamespace(
+            name="Alex - 行动指挥专家",
+            reply_stream=reply_stream,
+        )
+        with self.assertRaises(asyncio.CancelledError):
+            await stream_agent_reply(agent)
+
+    async def test_interrupt_only_cancels_root_agent_task(self) -> None:
+        blocker = asyncio.Event()
+
+        async def wait_forever():
+            await blocker.wait()
+
+        root = asyncio.create_task(wait_forever(), name="agent-call:Alex")
+        child = asyncio.create_task(wait_forever(), name="agent-call:Iris")
+        root._lingshu_parent_agent_task = None
+        child._lingshu_parent_agent_task = root
+        try:
+            self.assertEqual(interrupt_agent_tasks({root, child}), 1)
+            await asyncio.sleep(0)
+            self.assertTrue(root.cancelled())
+            self.assertFalse(child.done())
+        finally:
+            child.cancel()
+            await asyncio.gather(root, child, return_exceptions=True)
 
     def test_web_plan_selects_web_attack_expert(self) -> None:
         self.assertEqual(

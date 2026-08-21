@@ -292,7 +292,7 @@ def _iter_budget(
 _SUMMARY_TRANSCRIPT_TYPES = {
     "", "message", "text_end", "user_message", "phase_change", "error",
     "approval_required", "approval_resolved", "tool_call_end", "flag_found",
-    "mission_start", "mission_end", "nss_submit", "plan_updated",
+    "mission_start", "mission_end", "nss_submit", "slab_submit", "plan_updated",
 }
 
 
@@ -871,7 +871,7 @@ def _extract_declared_network_targets(text: str) -> list[str]:
 async def run_mission(
     target: str,
     goal: str,
-    model_ver: str = "Min",
+    model_ver: str | None = None,
     provider: str = "deepseek",
     qwen_tool_call_mode: str | None = None,
     event_callback: Callable[[str, dict[str, Any]], None] | None = None,
@@ -881,6 +881,7 @@ async def run_mission(
     agent_tasks: set[asyncio.Task[Any]] | None = None,
     steering_state: dict[str, Any] | None = None,
     nss_context: dict[str, Any] | None = None,
+    slab_context: dict[str, Any] | None = None,
     authorization_source: str = "cli",
     resume: bool = False,
     user_id: int | None = None,
@@ -1458,6 +1459,7 @@ async def run_mission(
             scope_auditor=scope_auditor,
             steering_state=steering,
             nss_context=nss_context,
+            slab_context=slab_context,
             offloader=workspace,
             context_config=context_config,
             state=build_role_agent_state(mission_id, "orchestrator") if use_v2_workspace else None,

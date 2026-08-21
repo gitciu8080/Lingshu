@@ -54,7 +54,6 @@ def execute_sagemath(code: str, timeout: int | None = None) -> str:
 
         cmd = [
             CONDA_CMD, "run",
-            "--no-banner",
             "-n", SAGE_ENV_NAME,
             "sage", tmp_path,
         ]
