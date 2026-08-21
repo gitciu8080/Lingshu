@@ -28,6 +28,7 @@ _WORKDIR = _PROJECT_ROOT / "WorkDir"
 _MERMAID_RENDERER = (
     _PROJECT_ROOT / "Skills" / "beautiful-mermaid" / "scripts" / "render.js"
 )
+_REPORT_LOGO_PATH = _FRONTEND_DIR / "lingshu-logo-black.png"
 _PAGE_BREAK_MARKER = "LINGSHU_INTERNAL_PAGE_BREAK_8F4D1C"
 _MERMAID_MARKER_PREFIX = "LINGSHU_INTERNAL_MERMAID_"
 _DANGEROUS_HTML_BLOCK_RE = re.compile(
@@ -97,6 +98,13 @@ _REPORT_CSS = r"""
 @page toc {
   @top-right { content: "目录"; }
 }
+@page back-cover {
+  margin: 0;
+  @top-left { content: none; }
+  @top-right { content: none; }
+  @bottom-left { content: none; }
+  @bottom-right { content: none; }
+}
 
 * { box-sizing: border-box; }
 html { color: #17191d; background: #fff; }
@@ -130,11 +138,10 @@ body {
   border-right: 2mm solid #111318;
   border-bottom: 2mm solid #d71920;
 }
-.cover-brand { display: flex; align-items: center; gap: 7mm; }
-.cover-logo { width: 28mm; height: 28mm; object-fit: contain; }
-.cover-brand-name { color: #d71920; font-size: 13pt; font-weight: 700; letter-spacing: 1px; }
-.cover-rule { height: 1px; background: linear-gradient(90deg, #d71920, #15171b, transparent); margin: 7mm 0 23mm; }
-.cover-kicker { color: #d71920; font-size: 10pt; font-weight: 700; letter-spacing: 2px; }
+.cover-brand { width: 100%; text-align: center; }
+.cover-logo { display: block; width: 114mm; height: auto; max-height: 54mm; margin: 0 auto; object-fit: contain; }
+.cover-rule { height: 1px; background: linear-gradient(90deg, #d71920, #15171b, transparent); margin: 7mm 0 18mm; }
+.cover-kicker { color: #d71920; font-size: 12pt; font-weight: 700; letter-spacing: 2px; }
 .cover h1 { margin: 4mm 0 1mm; color: #111318; font-size: 27pt; line-height: 1.24; letter-spacing: 1px; }
 .cover h2 { margin: 0; color: #d71920; font-size: 21pt; line-height: 1.3; }
 .cover-meta { width: 100%; margin-top: 23mm; border-collapse: collapse; font-size: 9.5pt; }
@@ -202,6 +209,28 @@ figure img { width: 94%; max-height: 155mm; }
 figcaption { margin-top: 2mm; color: #676b72; font-size: 8.5pt; }
 .mermaid-fallback { text-align: left; }
 .evidence-badge { color: #fff; background: #b5121b; padding: .4mm 1.4mm; border-radius: 2mm; font-size: 8pt; }
+
+.back-cover {
+  page: back-cover;
+  break-before: page;
+  width: 210mm;
+  height: 297mm;
+  padding: 48mm 28mm 35mm;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  background:
+    radial-gradient(circle at 50% 35%, rgba(215, 25, 32, .10), transparent 32%),
+    linear-gradient(180deg, #ffffff 0%, #f8f8f8 100%);
+  border-top: 5mm solid #d71920;
+  border-bottom: 3mm solid #15171b;
+}
+.back-cover-logo { display: block; width: 114mm; height: auto; max-height: 72mm; margin: 0 auto 18mm; object-fit: contain; }
+.back-cover-description { max-width: 145mm; margin: 0 auto; color: #25282e; font-size: 12pt; line-height: 2; text-align: center; }
+.back-cover-rule { width: 28mm; height: 1mm; margin: 12mm auto 8mm; background: #d71920; }
+.back-cover-copyright { margin: 0; color: #a30d15; font-size: 10.5pt; font-weight: 700; letter-spacing: .5px; }
 """
 
 
@@ -216,16 +245,14 @@ _REPORT_TEMPLATE = r"""<!doctype html>
   <section class="cover">
     <div class="cover-brand">
       {% if logo_uri %}<img class="cover-logo" src="{{ logo_uri }}" alt="灵枢·利刃 Agent">{% endif %}
-      <div class="cover-brand-name">灵枢·利刃 Agent</div>
     </div>
     <div class="cover-rule"></div>
-    <div class="cover-kicker">AUTHORIZED SECURITY ASSESSMENT</div>
+    <div class="cover-kicker">灵枢·利刃Agent</div>
     <h1>{{ target_title }}</h1>
     <h2>安全测试报告</h2>
     <table class="cover-meta">
       <tr><th>会话编号</th><td>{{ session_id }}</td></tr>
       <tr><th>任务目标</th><td>{{ goal }}</td></tr>
-      <tr><th>最终阶段</th><td>{{ phase }}</td></tr>
       <tr><th>执行结果</th><td>{{ outcome }}</td></tr>
       <tr><th>报告日期</th><td>{{ report_date }}</td></tr>
     </table>
@@ -242,6 +269,12 @@ _REPORT_TEMPLATE = r"""<!doctype html>
   </section>
   {% endif %}
   <main class="report-body">{{ report_html | safe }}</main>
+  <section class="back-cover">
+    {% if logo_uri %}<img class="back-cover-logo" src="{{ logo_uri }}" alt="灵枢·利刃 Agent">{% endif %}
+    <p class="back-cover-description">灵枢·利刃Agent是广东交通职业技术学院信息与人工智能学院团队开发的多智能体协作网络安全渗透测试智能体。</p>
+    <div class="back-cover-rule"></div>
+    <p class="back-cover-copyright">灵枢利刃项目团队©2026</p>
+  </section>
 </body>
 </html>"""
 
@@ -540,12 +573,13 @@ def _font_path(name: str, fallback: str) -> Path:
     return path.resolve()
 
 
-def _logo_path() -> Path | None:
-    candidates = (
-        _PROJECT_ROOT / "webui" / "src" / "logo2.png",
-        _PROJECT_ROOT / "webui" / "src" / "logored.png",
-    )
-    return next((path.resolve() for path in candidates if path.is_file()), None)
+def _materialize_report_logo(asset_dir: Path) -> str:
+    """返回版本化的本地报告 Logo，避免远程签名过期导致图片缺失。"""
+    del asset_dir
+    logo_path = _REPORT_LOGO_PATH.resolve()
+    if not logo_path.is_file():
+        raise RuntimeError(f"报告 Logo 不存在: {logo_path}")
+    return logo_path.as_uri()
 
 
 def generate_weasyprint_pdf(
@@ -566,7 +600,6 @@ def generate_weasyprint_pdf(
     normalized, _missing = normalize_report_markdown(summary, mission)
     regular_font = _font_path("LINGSHU_PDF_FONT_REGULAR", "MSYH.TTC")
     bold_font = _font_path("LINGSHU_PDF_FONT_BOLD", "MSYHBD.TTC")
-    logo = _logo_path()
 
     from datetime import datetime
     raw_date = str(mission.get("updated_at") or "")
@@ -579,6 +612,7 @@ def generate_weasyprint_pdf(
 
     with tempfile.TemporaryDirectory(prefix="lingshu-report-assets-") as asset_name:
         asset_dir = Path(asset_name).resolve()
+        logo_uri = _materialize_report_logo(asset_dir)
         report_html, toc = _markdown_html(normalized, asset_dir)
         env = Environment(autoescape=select_autoescape(("html", "xml")))
         css = env.from_string(_REPORT_CSS).render(
@@ -590,11 +624,10 @@ def generate_weasyprint_pdf(
         document_html = env.from_string(_REPORT_TEMPLATE).render(
             css=css,
             document_title=f"灵枢安全测试报告 {session_id}",
-            logo_uri=logo.as_uri() if logo else "",
+            logo_uri=logo_uri,
             target_title=_target_title(mission),
             session_id=session_id,
             goal=str(mission.get("goal") or "未记录"),
-            phase=_mission_phase(mission),
             outcome=outcome,
             report_date=f"{year}年 {month:02d}月 {day:02d}日",
             toc_entries=toc,

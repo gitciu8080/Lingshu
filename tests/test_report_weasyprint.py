@@ -134,12 +134,21 @@ python -m py_compile Tools/WeasyReport.py
             self.assertGreater(path.stat().st_size, 50_000)
             self.assertEqual(path.read_bytes()[:4], b"%PDF")
             reader = PdfReader(path)
-            self.assertGreaterEqual(len(reader.pages), 6)
+            self.assertGreaterEqual(len(reader.pages), 7)
+            self.assertGreaterEqual(len(list(reader.pages[0].images)), 1)
+            self.assertGreaterEqual(len(list(reader.pages[-1].images)), 1)
             text = "\n".join(page.extract_text() or "" for page in reader.pages)
             self.assertIn("灵枢·利刃 Agent", text)
             self.assertIn("中文字体", text)
             self.assertIn("五、安全等级与建议", text)
             self.assertIn("共", text)
+            cover_text = reader.pages[0].extract_text() or ""
+            self.assertIn("灵枢·利刃Agent", cover_text)
+            self.assertNotIn("AUTHORIZED SECURITY ASSESSMENT", cover_text)
+            self.assertNotIn("最终阶段", cover_text)
+            back_text = reader.pages[-1].extract_text() or ""
+            self.assertIn("广东交通职业技术学院信息与人工智能学院", back_text)
+            self.assertIn("灵枢利刃项目团队©2026", back_text)
 
 
 if __name__ == "__main__":
