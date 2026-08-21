@@ -2,13 +2,13 @@
 session_store.py — SQLite 会话存储层
 
 管理 sessions 和 session_messages 两张表的 CRUD 操作。
-复用 auth.py 的 get_db() 获取数据库连接。
+复用 core/auth.py 的 get_db() 获取数据库连接。
 """
 
 import uuid
 from datetime import datetime
 
-from auth import get_db
+from core.auth import get_db
 
 
 def init_sessions_db():

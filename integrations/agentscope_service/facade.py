@@ -15,7 +15,7 @@ from agentscope.message import Msg
 from agentscope.types import ErrorInfo, ErrorType, ReplyFinishedReason
 
 from main import run_mission
-import session_store
+import core.session_store as session_store
 
 from .events import EventTranslator
 from .history import RoleHistoryRecorder

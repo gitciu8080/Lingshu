@@ -26,9 +26,9 @@ from agentscope.app.workspace_manager import IsolationPolicy, LocalWorkspaceMana
 from agentscope.credential import DeepSeekCredential, OpenAICredential
 from pydantic import SecretStr
 
-from auth import get_current_user
-from config import RuntimeConfig
-import session_store
+from core.auth import get_current_user
+from core.config import RuntimeConfig
+import core.session_store as session_store
 from Tools.tooling import cancel_agent_tasks
 
 from .facade import LingshuMissionAgent
@@ -213,7 +213,7 @@ async def prepare_service_session(
     if body.source_session_id:
         source = await storage.get_session(user_id, _agent_id(user_id), body.source_session_id)
         if source is None:
-            import session_store
+            import core.session_store as session_store
 
             legacy = session_store.get_session(body.source_session_id)
             if legacy is None or str(legacy.get("user_id")) != user_id:

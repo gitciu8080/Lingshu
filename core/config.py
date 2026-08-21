@@ -12,10 +12,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 _WARNED_REPEAT_PENALTIES: set[float] = set()
 
+# 项目根目录（core/ 的上一级）；.env 锚定在此，不依赖启动时的当前目录。
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-def _load_dotenv(dotenv_path: str | Path = ".env") -> None:
+
+def _load_dotenv(dotenv_path: str | Path | None = None) -> None:
     """加载 .env 文件到 os.environ（不覆盖已有的环境变量）。"""
-    path = Path(dotenv_path).resolve()
+    path = Path(dotenv_path or _PROJECT_ROOT / ".env").resolve()
     if not path.is_file():
         return
     with path.open("r", encoding="utf-8") as f:
@@ -214,7 +217,7 @@ class RuntimeConfig:
         # 超级管理员启用的数据库配置优先于 .env。注册表故障不能阻断主服务，
         # 此时保留环境变量配置并记录原因，便于运维恢复加密密钥或数据库。
         try:
-            from model_registry import load_runtime_overrides
+            from core.model_registry import load_runtime_overrides
 
             values.update(load_runtime_overrides())
         except Exception as exc:  # noqa: BLE001

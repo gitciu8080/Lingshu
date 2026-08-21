@@ -336,11 +336,17 @@ python main.py -h
 ```
 Lingshu/
 ├── main.py                 # CLI 入口 · 数据流编排
-├── config.py               # 环境变量加载 · RuntimeConfig
-├── TaskState.py            # MissionState · Phase 状态机 · 审计日志 · MissionStore
 ├── AgenticMemory.py        # 长期经验记忆（最近 50 条任务）
 ├── requirements.txt        # agentscope==2.0.4.post1
 ├── .env.example            # API Key 模板
+│
+├── core/                   # 基础共享模块（配置/认证/状态/会话/工作区）
+│   ├── config.py           # 环境变量加载 · RuntimeConfig
+│   ├── TaskState.py        # MissionState · Phase 状态机 · 审计日志 · MissionStore
+│   ├── auth.py             # 注册/登录/JWT/密码重置
+│   ├── session_store.py    # 会话/消息/流式快照 SQLite
+│   ├── model_registry.py   # Provider 注册表（加密存储、运行时覆盖）
+│   └── workspace_service.py # Workspace v2 生命周期
 │
 ├── LLM/
 │   └── model.py            # DeepSeek + Qwen 模型工厂（create_model 统一入口）

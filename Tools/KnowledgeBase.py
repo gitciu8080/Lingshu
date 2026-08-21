@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from config import RuntimeConfig
+from core.config import RuntimeConfig
 
 
 class RAGService:

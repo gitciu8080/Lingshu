@@ -7,7 +7,7 @@ import time
 from collections import defaultdict
 from typing import Any
 
-import session_store
+import core.session_store as session_store
 from .account_events import publish_account_event
 
 

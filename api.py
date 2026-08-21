@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from auth import (
+from core.auth import (
     get_current_user,
     create_user,
     verify_password,
@@ -43,17 +43,12 @@ from auth import (
 )
 
 from main import run_mission
-from config import RuntimeConfig
-from workspace_service import get_workspace_service
-from api_workspace import (
-    list_artifacts as _list_workspace_artifacts,
-    resolve_artifact_path as _resolve_artifact_path,
-    workspace_summary as _workspace_summary,
-)
+from core.config import RuntimeConfig
+from core.workspace_service import WorkspaceService, get_workspace_service
 from Tools.tooling import (
     interrupt_agent_tasks,
 )
-import session_store
+import core.session_store as session_store
 from integrations.agentscope_service import (
     agentscope_app,
     agentscope_lifespan,
@@ -63,7 +58,7 @@ from integrations.agentscope_service.account_events import publish_account_event
 from integrations.antsword_service import get_antsword_service
 from Tools.KnowledgeBase import get_rag_service
 from Tools.target import normalize_target
-from model_registry import (
+from core.model_registry import (
     ModelRegistryError,
     active_llm_providers,
     create_model_config,
@@ -1212,7 +1207,7 @@ async def register(data: UserCreate):
 
 @app.post("/auth/login", response_model=TokenResponse)
 async def login(data: UserLogin):
-    from auth import get_user_by_username as _get_user
+    from core.auth import get_user_by_username as _get_user
 
     def authenticate_and_touch() -> dict | None:
         user = _get_user(data.username)
@@ -1220,7 +1215,7 @@ async def login(data: UserLogin):
             return None
         # 与密码校验放入同一工作线程，避免 SQLite 与 bcrypt 分别阻塞
         # 主事件循环。
-        from auth import get_db
+        from core.auth import get_db
         from datetime import datetime, timezone
         conn = get_db()
         try:
@@ -2436,6 +2431,127 @@ async def react_spa(frontend_path: str):
     if html_path.is_file():
         return HTMLResponse(html_path.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
     raise HTTPException(status_code=404, detail="React 前端尚未构建")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Workspace v2 辅助（原 api_workspace.py，已并入本文件）：
+# 摘要、artifacts 枚举与防逃逸解析。
+# ──────────────────────────────────────────────────────────────────────
+
+# artifacts 根下允许下载的顶层目录（角色产物）；input/ 由上传接口管理
+_ALLOWED_ARTIFACT_ROOTS = ("artifacts", "input", "reports", "mission", "data", "skills")
+
+
+def _workspace_summary(
+    svc: WorkspaceService,
+    user_id: int | None,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """计算会话的 Workspace 摘要；工作区不存在时返回 None。
+
+    摘要包含：workspace_id、产物数/字节数、恢复状态（fresh/running/
+    resumable/uncertain/terminal）、checkpoint_seq、是否存在不确定动作。
+    全部为相对/派生信息，不暴露宿主绝对路径。
+    """
+    ws_dir = svc.workspace_dir(user_id, session_id)
+    if not ws_dir.is_dir():
+        return None
+
+    artifacts_root = ws_dir / "artifacts"
+    artifact_count = 0
+    artifact_bytes = 0
+    if artifacts_root.is_dir():
+        for p in artifacts_root.rglob("*"):
+            if p.is_file() and p.name != "manifest.jsonl":
+                artifact_count += 1
+                try:
+                    artifact_bytes += p.stat().st_size
+                except OSError:
+                    pass
+
+    # 恢复状态：权威在 checkpoint.json（MissionStore 权威 JSON 的镜像）
+    resume_status = "fresh"
+    checkpoint_seq = 0
+    uncertain = False
+    checkpoint_path = svc.checkpoint_path(user_id, session_id)
+    if checkpoint_path.is_file():
+        try:
+            data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            resume_status = data.get("resume_status", "fresh") or "fresh"
+            checkpoint_seq = int(data.get("checkpoint_seq", 0) or 0)
+            uncertain = resume_status == "uncertain"
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            resume_status = "uncertain"  # 损坏的 checkpoint 视为不确定
+            uncertain = True
+
+    return {
+        "workspace_id": svc.workspace_id(user_id, session_id),
+        "exists": True,
+        "artifacts_count": artifact_count,
+        "artifacts_bytes": artifact_bytes,
+        "resume_status": resume_status,
+        "checkpoint_seq": checkpoint_seq,
+        "resumable": resume_status in ("running", "resumable"),
+        "uncertain": uncertain,
+    }
+
+
+def _list_workspace_artifacts(
+    svc: WorkspaceService,
+    user_id: int | None,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    """列出会话可下载的产物（相对路径、大小、修改时间，按路径排序）。"""
+    ws_dir = svc.workspace_dir(user_id, session_id)
+    if not ws_dir.is_dir():
+        return []
+    items: list[dict[str, Any]] = []
+    for root in _ALLOWED_ARTIFACT_ROOTS:
+        base = ws_dir / root
+        if not base.is_dir():
+            continue
+        for p in sorted(base.rglob("*")):
+            if not p.is_file():
+                continue
+            try:
+                size = p.stat().st_size
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            items.append(
+                {
+                    "path": str(p.relative_to(ws_dir)),
+                    "size": size,
+                    "modified_at": mtime,
+                },
+            )
+    return items
+
+
+def _resolve_artifact_path(
+    svc: WorkspaceService,
+    user_id: int | None,
+    session_id: str,
+    rel_path: str,
+) -> Path:
+    """把相对路径解析为工作区内文件；逃逸/不存在抛 ValueError/FileNotFoundError。
+
+    与 Tools/workspace_tools 一致：resolve 后必须仍在工作区内，
+    符号链接逃逸同样被拦截。
+    """
+    if not rel_path or "\x00" in rel_path:
+        raise ValueError("路径为空或包含非法字符")
+    ws_dir = svc.workspace_dir(user_id, session_id)
+    if not ws_dir.is_dir():
+        raise FileNotFoundError("工作区不存在")
+    resolved = (ws_dir / rel_path).resolve()
+    try:
+        resolved.relative_to(ws_dir.resolve())
+    except ValueError:
+        raise PermissionError(f"路径超出工作区范围: {rel_path!r}") from None
+    if not resolved.is_file():
+        raise FileNotFoundError(f"产物不存在: {rel_path}")
+    return resolved
 
 
 if __name__ == "__main__":
