@@ -1,9 +1,9 @@
-"""逆向分析 Agent — 通过 IDA MCP 对二进制文件执行反编译分析。
+"""逆向分析 Agent — 通过容器化 IDA MCP 对二进制文件执行反编译分析。
 
 流程：
-  1. idalib-mcp 通过 stdio 启动并连接
-  2. 调用 idb_open 打开二进制并取得 database 会话 ID
-  3. 所有分析工具携带 database，完成后调用 idb_close
+  1. 容器化 IDA MCP（HTTP/SSE，默认 127.0.0.1:8745）常驻运行
+  2. 调用 ida_open_binary 上传二进制（POST /upload 阻塞至自动分析完成）
+  3. IDA 分析工具直接作用于当前已加载的二进制（无 database 会话参数）
 """
 from __future__ import annotations
 
@@ -28,8 +28,9 @@ RESERVE_SYS_PROMPT = """你是二进制逆向与动态调试专家（Reserve）�
 
 可用工具：
 1. scoped_shell: 受限的本地命令执行工具。
-2. ida_open_binary: 为原始二进制生成 IDA 数据库并打开，返回 database 会话 ID。
-3. IDA_Tool: IDA 逆向工具集（survey_binary / decompile / list_funcs / xrefs_to 等）。
+2. ida_open_binary: 上传二进制到容器化 IDA MCP 并等待自动分析完成，返回元数据（module/base/函数数等）。
+3. IDA_Tool: IDA 逆向工具集（get_metadata / list_functions / decompile_function /
+   disassemble_function / get_xrefs_to / list_globals / list_strings / list_imports 等）。
 4. gdb_create_session / gdb_load_core: 在授权工作区内创建 GDB 动态调试或核心转储会话。
 5. GDB_Tool: 多会话 GDB/MI 工具集（断点、运行、上下文、寄存器、内存、反汇编等）。
 6. analysis: 委托 Analysis 专家独立研判。
@@ -38,20 +39,29 @@ RESERVE_SYS_PROMPT = """你是二进制逆向与动态调试专家（Reserve）�
 工作流程（严格遵守顺序）：
 1. 先调用 analysis 获取独立研判，确定分析重点。
 2. 对文件先调用 intelpwn_analyze 获取保护机制和潜在漏洞概览。
-3. 严禁手动启动 idat，也不要直接调用 IDA_Tool.idb_open。必须先调用
-   ida_open_binary(input_path=二进制绝对路径)，并保存返回的 database 会话 ID。
-4. 先调用 survey_binary 获取概览，再按需调用 decompile / analyze_function / xrefs_to。
-   idb_open 之外的每个 IDA 分析工具都必须传入同一个 database。
-5. 分析结束后调用 idb_close(database=..., save=false) 释放会话。
-6. 需要动态验证时先调用 gdb_create_session，保存 session_id；先设置断点再运行，
+3. 严禁手动启动 idat。必须先调用 ida_open_binary(input_path=二进制绝对路径)，
+   上传并自动分析完成后，IDA 分析工具即可直接作用于当前已加载的二进制。
+4. 先调用 get_metadata 获取概览，再用 list_functions / get_function_by_name 定位目标函数，
+   按需调用 decompile_function / disassemble_function（传入函数地址）与
+   get_xrefs_to / get_callees / get_callers 做交叉引用分析。
+   IDA 分析工具作用于容器内当前加载的二进制，没有 database 会话概念，不要臆造该参数。
+5. 需要动态验证时先调用 gdb_create_session，保存 session_id；先设置断点再运行，
    每个 GDB 工具都传入同一个 session_id，结束后必须调用 close_session。
-7. GDB 工具返回结构化 JSON，必须检查 ok 字段；执行超时后先调用 interrupt，
+6. GDB 工具返回结构化 JSON，必须检查 ok 字段；执行超时后先调用 interrupt，
    不得把超时误判为程序退出。
-8. 只有证据充分时才用 scoped_shell 做验证。
-9. 禁止拒绝服务、破坏数据、植入持久化、清除日志或扩大目标范围。
-10. 你只返回结果，不改变任务状态，也不宣布整个任务完成。
+7. 只有证据充分时才用 scoped_shell 做验证。
+8. 禁止拒绝服务、破坏数据、植入持久化、清除日志或扩大目标范围。
+9. 你只返回结果，不改变任务状态，也不宣布整个任务完成。
 
 **关键：分析完成后必须立即输出结构化报告并停止。严禁反复验证或继续调用工具。**
+
+Docker 容器路径映射（重要）：
+- 你的 scoped_shell 在 Docker 容器内运行，工作区挂载点为 /workspace/。
+- 上传的附件/二进制文件位于 /workspace/input/ 目录。
+- 若系统给你的目标路径是宿主机绝对路径（如 /home/.../WorkDir/.../file.exe），
+  在 scoped_shell 中请使用对应的容器路径 /workspace/input/file.exe。
+- ida_open_binary / gdb_create_session / intelpwn_analyze 等工具会自动
+  处理路径映射，传入你看到的任意路径即可（宿主路径或容器路径均可）。
 
 报告结构：已验证事实、失败尝试、证据、当前权限、发现的 Flag（如有）和建议下一步。"""
 
@@ -135,7 +145,27 @@ def _find_gdb_mcp_executable() -> str | None:
                 return str(candidate.resolve())
 
     return None
+# 只读分析工具白名单（运行时过滤 MCP 工具列表用，不含改名/改注释/打补丁等写操作）。
+# 第一组为当前容器化镜像（ida-pro-mcp v1.4.0+upload）实际暴露的工具短名；
+# 第二组为旧版 idalib-mcp 工具短名，镜像回滚旧版本时保持兼容。
 _IDA_READ_ONLY_TOOLS = [
+    # ── ida-pro-mcp v1.4.0（容器化部署实际暴露的工具名）──
+    # 元信息 / 函数 / 全局 / 导入 / 字符串 / 类型
+    "get_metadata", "get_function_by_name", "get_function_by_address",
+    "get_current_address", "get_current_function", "convert_number",
+    "list_functions", "list_globals_filter", "list_globals", "list_imports",
+    "list_strings_filter", "list_strings", "list_local_types", "get_entry_points",
+    # 反编译 / 反汇编 / 交叉引用
+    "decompile_function", "disassemble_function",
+    "get_xrefs_to", "get_xrefs_to_field", "get_callees", "get_callers",
+    # 数据 / 内存 / 结构体 / 栈帧（只读）
+    "get_global_variable_value_by_name", "get_global_variable_value_at_address",
+    "get_stack_frame_variables", "get_defined_structures",
+    "analyze_struct_detailed", "get_struct_at_address", "get_struct_info_simple",
+    "search_structures", "read_memory_bytes",
+    "data_read_byte", "data_read_word", "data_read_dword",
+    "data_read_qword", "data_read_string",
+    # ── 旧版 idalib-mcp 工具名（向后兼容）──
     "server_health", "lookup_funcs", "int_convert", "list_funcs", "func_query",
     "list_globals", "entity_query", "imports", "imports_query", "find_regex",
     "search_text", "decompile", "disasm", "func_profile", "analyze_batch",
@@ -158,6 +188,10 @@ _GDB_RESTRICTED_ENTRY_TOOLS = frozenset({
     "rr_record",
     "start_replay_session",
 })
+
+
+# 容器内工作区挂载点（与 workspace_service / docker_exec 保持一致）。
+_CONTAINER_WORKDIR = "/workspace"
 
 
 def _resolve_gdb_mcp_command() -> str:
@@ -197,6 +231,7 @@ async def create_reverse_agent(
     state=None,
     artifact_root: str | Path | None = None,
     executor: "Any | None" = None,
+    session_dir: str | Path | None = None,
 ) -> Agent:
     async def analysis(service_info: str) -> str:
         """委托 Analysis 专家研判真实证据。
@@ -225,9 +260,9 @@ async def create_reverse_agent(
             name="IDA_Tool",
             is_stateful=False,
             mcp_config=HttpMCPConfig(url=f"{ida_base_url}/sse", timeout=30.0),
-            # idle 状态下服务器仅暴露少量工具；完整 47 个工具在 POST /upload
-            # 加载二进制后才可用。不设 enable_tools（idle 状态无法预过滤），
-            # 改由 _ida_allowed_tools 在运行时过滤。
+            # 服务器始终暴露完整工具集（47 个），但其中含改名/打补丁等写操作，
+            # 且未加载二进制时调用会报错。不设 enable_tools，改由
+            # _ida_allowed_tools 在运行时过滤出只读分析工具。
             execution_timeout=max(float(timeout), 120.0),
         )
         ida_tools = await ida_mcp.list_tools()
@@ -327,10 +362,38 @@ async def create_reverse_agent(
     if artifact_root is not None:
         authorized_file_roots.append(Path(artifact_root).expanduser().resolve())
 
+    # Docker 模式下 Agent 通过 scoped_shell 发现的文件路径是容器内路径
+    # （/workspace/...），但 IDA MCP（宿主 HTTP）和 GDB MCP（宿主 stdio）
+    # 都在宿主机运行，需要宿主路径。此闭包将容器路径反向映射回宿主路径。
+    _host_session_dir = (
+        Path(session_dir).resolve() if session_dir is not None else None
+    )
+
+    def _resolve_host_path(value: str) -> Path:
+        """尝试将路径解析为宿主文件系统路径（兼容容器路径和宿主路径）。"""
+        p = Path(value).expanduser()
+        if p.is_file():
+            return p.resolve()
+        # 容器路径 → 宿主路径：/workspace/<rel> → <session_dir>/<rel>
+        if _host_session_dir is not None:
+            p_str = str(p)
+            prefix = _CONTAINER_WORKDIR + "/"
+            if p_str.startswith(prefix):
+                rel = p_str[len(prefix):]
+                host = (_host_session_dir / rel).resolve()
+                if host.is_file():
+                    return host
+            # 直接 /workspace → session_dir 本身
+            if p_str == _CONTAINER_WORKDIR:
+                host = _host_session_dir.resolve()
+                if host.is_dir():
+                    return host
+        return p.resolve()
+
     def _authorized_file(value: str, label: str) -> Path:
-        source = Path(value).expanduser().resolve()
+        source = _resolve_host_path(value)
         if not source.is_file():
-            raise FileNotFoundError(f"{label}不存在: {source}")
+            raise FileNotFoundError(f"{label}不存在: {value}")
         if not any(source.is_relative_to(root) for root in authorized_file_roots):
             raise PermissionError(f"{label}不在本任务授权工作区内: {source}")
         return source
@@ -435,8 +498,8 @@ async def create_reverse_agent(
                 return f'{{"error":"IDA 未就绪: {body[:500]}"}}'
 
             # ── 上传成功：刷新 IDA 工具列表并动态注册 ──
-            # idle 状态下只有 1 个工具；上传后服务器暴露完整 47 个工具。
-            # 通过 toolkit.add_tool() 将新工具注入 Agent，使其可被调用。
+            # 个别服务器版本在 idle 状态下只暴露少量工具，上传后重新拉取工具
+            # 列表，把新增工具通过 toolkit.add_tool() 注入 Agent，使其可被调用。
             try:
                 refreshed = await ida_mcp.list_tools()
                 existing_names: set[str] = set()
@@ -453,7 +516,7 @@ async def create_reverse_agent(
                     ):
                         tool.is_read_only = True
                         if _toolkit_ref[0] is not None:
-                            _toolkit_ref[0].add_tool(tool)
+                            await _toolkit_ref[0].add_tool(tool)
                             added += 1
                 if added:
                     import logging as _logging
@@ -486,7 +549,7 @@ async def create_reverse_agent(
     toolkit = StrictJSONToolkit(
         tools=[
             AllowedFunctionTool(analysis, is_read_only=True),
-            create_intelpwn_tool(timeout),
+            create_intelpwn_tool(timeout, session_dir=session_dir),
             create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="reserve", artifact_root=artifact_root, executor=executor),
             AllowedFunctionTool(ida_open_binary, is_read_only=True),
             AllowedFunctionTool(gdb_create_session, is_read_only=False),

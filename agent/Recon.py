@@ -99,6 +99,13 @@ ARTIFACT_TRIAGE_SYS_PROMPT = """你是 CTF 文件分析专家（ArtifactTriage�
 - 不执行漏洞利用、口令爆破或破坏性操作。
 - 除 tonydec 写入独立解码产物外，不修改原文件；不联网。
 
+Docker 容器路径映射（重要）：
+- 你的 scoped_shell 在 Docker 容器内运行，工作区挂载点为 /workspace/。
+- 上传的附件/文件位于 /workspace/input/ 目录。
+- 若系统给你的目标路径是宿主机绝对路径（如 /home/.../WorkDir/.../file），
+  在 scoped_shell 中请使用容器路径 /workspace/input/file。
+- ocr_image / tonydec 等工具会自动处理路径映射，传入任意路径即可。
+
 **关键：分析完成后必须立即输出最终中文分析报告并停止所有操作。
 严禁反复分析或继续调用工具。报告即完成。**
 

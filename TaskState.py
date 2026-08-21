@@ -308,7 +308,6 @@ class MissionStore:
                 data["schema_version"] = SCHEMA_VERSION
                 json.dump(data, handle, ensure_ascii=False, indent=2)
                 handle.flush()
-                os.fsync(handle.fileno())
             os.replace(temp_name, self.path)
         finally:
             if os.path.exists(temp_name):
@@ -403,7 +402,6 @@ class MissionStore:
                 data["schema_version"] = SCHEMA_VERSION
                 json.dump(data, handle, ensure_ascii=False, indent=2)
                 handle.flush()
-                os.fsync(handle.fileno())
             os.replace(temp_name, target)
         finally:
             if os.path.exists(temp_name):

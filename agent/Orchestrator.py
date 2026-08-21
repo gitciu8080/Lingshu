@@ -153,7 +153,7 @@ def create_orchestrator_agent(
                 recon_agent,
                 UserMsg(
                     name="Orchestrator",
-                    content=f"授权目标：{mission.target}\n本轮重点：{focus}\n收集到足够证据后立即输出最终报告，禁止继续调用工具。",
+                    content=f"授权目标：{mission.target}\n本轮重点：{focus}\n充分使用工具收集证据。当所有必要信息已获取且无更多可探索方向时，输出最终报告。",
                 ),
                 prefix="[Recon] ",
                 on_event=event_callback,
@@ -275,7 +275,7 @@ def create_orchestrator_agent(
                     content=(
                         f"授权目标：{mission.target}\n本轮目标：{objective}\n\n"
                         f"真实目标信息：\n{target_info}\n\n"
-                        "完成分析/验证后立即输出最终报告，禁止继续调用工具。"
+                        "积极使用工具完成分析和验证。获得明确结论后输出最终报告。"
                     ),
                 ),
                 prefix="[Attack] ",
@@ -294,7 +294,18 @@ def create_orchestrator_agent(
             # 不在此处消费 steering：统一由主循环捕获 CancelledError 后注入。
             raise
         except Exception as exc:
-            mission.record("Orchestrator", "attack_unexpected_error", objective=objective, error=str(exc), error_type=type(exc).__name__)
+            error_str = str(exc)
+            # 400 tool_choice 不兼容：快速熔断，阻止 Orchestrator 改措辞重试
+            if "tool_choice" in error_str and ("Thinking mode" in error_str or "thinking" in error_str.lower()):
+                mission.record("Orchestrator", "attack_thinking_incompatible",
+                               objective=objective, error=error_str[:200])
+                mission.add_attack_step(objective, "[Attack 系统错误] thinking 模式与 tool_choice 不兼容")
+                store.save(mission)
+                return (
+                    "[系统错误] 当前模型的 thinking 模式与 tool_choice 不兼容，无法使用工具。"
+                    "请使用 Low 级别（关闭 thinking）或切换到不支持 thinking 的模型后重试。"
+                )
+            mission.record("Orchestrator", "attack_unexpected_error", objective=objective, error=error_str, error_type=type(exc).__name__)
             mission.add_attack_step(objective, f"[Attack 异常] {type(exc).__name__}: {exc}")
             store.save(mission)
             if event_callback is not None:
@@ -351,10 +362,11 @@ def create_orchestrator_agent(
                         f"授权目标：{mission.target}\n"
                         f"二进制文件：{binary_path}\n"
                         f"本轮目标：{objective}\n\n"
-                        "先调用 ida_open_binary 打开文件并保存 database 会话 ID，"
-                        "禁止手动启动 idat 或直接调用 idb_open；需要动态验证时使用 "
-                        "gdb_create_session，结束后关闭 GDB 会话。\n"
-                        "分析完成后立即输出最终报告，禁止继续调用工具。"
+                        "先调用 ida_open_binary 上传文件并等待自动分析完成，"
+                        "禁止手动启动 idat；随后直接用 IDA 分析工具（get_metadata / "
+                        "list_functions / decompile_function / get_xrefs_to 等）分析当前已加载二进制。\n"
+                        "需要动态验证时使用 gdb_create_session，结束后关闭 GDB 会话。\n"
+                        "充分使用 IDA/GDB 工具完成分析。所有目标函数已还原后输出最终报告。"
                     ),
                 ),
                 prefix="[Reserve] ",
@@ -374,7 +386,16 @@ def create_orchestrator_agent(
                 return msg
             raise
         except Exception as exc:
-            mission.record("Orchestrator", "reverse_unexpected_error", binary_path=binary_path, error=str(exc), error_type=type(exc).__name__)
+            error_str = str(exc)
+            if "tool_choice" in error_str and ("Thinking mode" in error_str or "thinking" in error_str.lower()):
+                mission.record("Orchestrator", "reverse_thinking_incompatible",
+                               binary_path=binary_path, error=error_str[:200])
+                store.save(mission)
+                return (
+                    "[系统错误] 当前模型的 thinking 模式与 tool_choice 不兼容。"
+                    "请使用 Low 级别或切换到不支持 thinking 的模型后重试。"
+                )
+            mission.record("Orchestrator", "reverse_unexpected_error", binary_path=binary_path, error=error_str, error_type=type(exc).__name__)
             store.save(mission)
             if event_callback is not None:
                 event_callback(

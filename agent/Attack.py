@@ -13,7 +13,6 @@ from types import MethodType
 
 from agentscope.agent import Agent, ReActConfig
 from agentscope.mcp import HttpMCPConfig, MCPClient
-from agentscope.message import UserMsg
 from agentscope.permission import PermissionBehavior, PermissionDecision
 
 from Tools.CVE_Search import cve_search
@@ -21,7 +20,7 @@ from Tools.OCR import create_tesseract_ocr_tool
 from Tools.SageMath import execute_sagemath        
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.TonyDec import create_tonydec_tool
-from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool, run_interruptible_agent_reply
+from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool
 from agent.experts import attack_expert_name
 
 logger = logging.getLogger(__name__)
@@ -54,20 +53,19 @@ ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
 你只能处理 Orchestrator 给出的单一授权目标，并且只使用提供的工具。
 
 你可以使用的工具：
-1. analysis:扫描智能体，用于独立研判。
-2. cve_search:cve漏洞网上查询工具。
-3. create_scoped_shell_tool:本地命令运行工具。
-4. dispatch_reverse：派遣 Reserve 对二进制文件执行 IDA 逆向分析（反编译、字符串提取等）
-5. ocr_image：使用 Tesseract 对授权工作区内的图片执行文字识别。
-6. tonydec：当文件头完整匹配 6688ff4f6886005611611618 时解码 TonyEnc 文件或目录。
-7. AntSword_Tool：对已在 AntSword 登记的授权 WebShell 执行信息、命令、
+1. cve_search:cve漏洞网上查询工具。
+2. create_scoped_shell_tool:本地命令运行工具。
+3. dispatch_reverse：派遣 Reserve 对二进制文件执行 IDA 逆向分析（反编译、字符串提取等）
+4. ocr_image：使用 Tesseract 对授权工作区内的图片执行文字识别。
+5. tonydec：当文件头完整匹配 6688ff4f6886005611611618 时解码 TonyEnc 文件或目录。
+6. AntSword_Tool：对已在 AntSword 登记的授权 WebShell 执行信息、命令、
    文件和数据库操作。工具名以 mcp__AntSword_Tool__ 开头。
-8. execute_sagemath：在隔离 SageMath 环境中执行数学/密码学计算代码。     # ← 新增
+7. execute_sagemath：在隔离 SageMath 环境中执行数学/密码学计算代码。
    适用于 RSA/ECC/离散对数/大数运算/符号求解/数论/矩阵等 CTF 题目。
    每次调用为全新会话，变量不持久化，必须用 print() 输出结果。
 
 工作原则：
-- 先调用 analysis 获取独立研判；候选 CVE 应再用 cve_search 核验。
+- 对服务证据直接在你的推理中完成研判；候选 CVE 应再用 cve_search 核验。
 - 只有证据和利用条件匹配时才使用 scoped_shell 验证或利用。
 - 对于需要反编译的，可以使用 ida 的 mcp 工具。
 - 遇到 TonyEnc 固定头时调用 tonydec 写入新输出路径，随后用 file/哈希/strings 复核产物。
@@ -84,7 +82,17 @@ ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
 - 若提供 search_knowledge 工具，可检索本地 Writeup 作为分析线索；必须以当前授权
   目标的实际证据核验，不能把知识库内容当作已验证事实。
 
-**关键：分析/验证完成后必须立即输出结构化报告并停止所有操作。严禁反复验证或继续调用工具。**
+Docker 容器路径映射（重要）：
+- 你的 scoped_shell 在 Docker 容器内运行，工作区挂载点为 /workspace/。
+- 上传的附件/文件位于 /workspace/input/ 目录。
+- 若系统给你的目标路径是宿主机绝对路径（如 /home/.../WorkDir/.../file），
+  在 scoped_shell 中请使用对应的容器路径 /workspace/input/file。
+- dispatch_reverse / ocr_image / tonydec 等工具会自动处理路径映射，
+  传入你看到的任意路径即可（宿主路径或容器路径均可）。
+
+**关键：充分利用工具完成分析和验证。获得明确结论后输出结构化报告。避免在已有充分证据的情况下重复相同操作。**
+
+分析服务证据时，直接在你的推理中完成研判，不需要调用独立的 analysis 工具。
 
 报告必须区分：已验证事实、失败尝试、证据、当前权限、发现的 Flag（如有）和建议下一步。"""
 
@@ -235,10 +243,10 @@ def _build_skill_list(
 
 async def create_attack_agent(
     model,
-    analysis_agent: Agent,
-    target: str,
-    project_dir: str | Path,
-    timeout: int,
+    analysis_agent: Agent | None = None,
+    target: str = "",
+    project_dir: str | Path = "",
+    timeout: int = 120,
     category_decision: dict | None = None,
     scope_registry: ScopeRegistry | None = None,
     max_iters: int = 20,
@@ -257,30 +265,13 @@ async def create_attack_agent(
 
     Args:
         model: LLM 模型。
-        analysis_agent: Analysis 子 Agent。
+        analysis_agent: 已废弃，保留参数兼容。Attack 现在内联分析推理。
         target: 授权目标字符串（向后兼容）。
         project_dir: 项目根目录。
         timeout: 命令超时秒数。
         category_decision: 题型分类决策（v0.2.0 新增）。为 None 时仅加载 writeup。
         max_iters: ReAct 最大推理迭代次数，由调用方按任务复杂度分配。
     """
-    async def analysis(service_info: str) -> str:
-        """请求 Analysis 专家研判真实服务证据。
-
-        Args:
-            service_info: Recon 得到的服务、版本和响应证据。
-        """
-        result = await run_interruptible_agent_reply(
-            analysis_agent,
-            UserMsg(name="Attack", content=service_info),
-            prefix="[Analysis] ",
-            on_event=event_callback,
-        )
-        return result.get_text_content() or "[Analysis] 未返回文本结果"
-
-
-
-
     skill_list = _build_skill_list(category_decision, project_dir)
 
     antsword_mcp: MCPClient | None = None
@@ -295,7 +286,6 @@ async def create_attack_agent(
 
     toolkit = StrictJSONToolkit(
         tools=[
-            AllowedFunctionTool(analysis, is_read_only=True),
             AllowedFunctionTool(cve_search, is_read_only=True),
             AllowedFunctionTool(execute_sagemath, is_read_only=True), 
             create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="attack", artifact_root=artifact_root, executor=executor),

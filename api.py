@@ -726,7 +726,8 @@ def _save_long_term_memory(session_id, target, goal, phase, success, flag, summa
 async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, goal: str,
                            model_ver: str, provider: str, callback, initial_context: str | None = None,
                            nss_context: dict | None = None, resume: bool = False,
-                           qwen_tool_call_mode: str | None = None):
+                           qwen_tool_call_mode: str | None = None,
+                           auto_approve: bool = False):
     """运行任务并处理清理逻辑。"""
     status_val = "completed"
     phase = "completed"
@@ -747,6 +748,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             nss_context=nss_context,
             resume=resume,
             user_id=ctx.user_id,
+            auto_approve=auto_approve,
         )
         # 如果 Orchestrator 已经确定完成并取得 Flag，迟到的前端取消请求不得覆盖成功终态。
         mission_completed = bool(
@@ -1040,6 +1042,7 @@ class MissionStartRequest(BaseModel):
     )
     source_session_id: str | None = Field(default=None, description="重跑来源会话ID，用于注入前次任务上下文")
     nss_context: dict | None = Field(default=None, description="NSSCTF Arena 上下文（attempt_id/token/api_base），供 Orchestrator 在线提交 Flag")
+    auto_approve: bool = Field(default=False, description="自动批准攻击阶段（跳过人工审批，适用于自动化工作台）")
 
 
 def _normalize_user_authorized_target(value: str) -> str:
@@ -1592,7 +1595,8 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     task = asyncio.create_task(
         _run_and_cleanup(session_id, ctx, authorized_target, req.goal, model_level, req.provider, callback,
                          initial_context=initial_context, nss_context=req.nss_context,
-                         qwen_tool_call_mode=req.qwen_tool_call_mode)
+                         qwen_tool_call_mode=req.qwen_tool_call_mode,
+                         auto_approve=req.auto_approve)
     )
     ctx.task = task
 

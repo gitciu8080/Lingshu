@@ -128,6 +128,38 @@ _CATEGORY_TITLES = {
     "ai-ml": "AI 安全",
 }
 
+# 预置 CTF 计划模板：当初始分类置信度 > 0.7 时跳过 Brain Agent，直接应用模板。
+_CTF_PLAN_TEMPLATES = {
+    "web": [
+        {"id": "p1", "content": "侦察目标服务：端口/HTTP 响应/指纹/目录枚举", "phase": "recon", "status": "pending", "origin": "template"},
+        {"id": "p2", "content": "分析服务版本与已知漏洞匹配", "phase": "analysis", "status": "pending", "origin": "template"},
+        {"id": "p3", "content": "构造并验证利用 payload", "phase": "exploitation", "status": "pending", "origin": "template"},
+        {"id": "p4", "content": "获取 Flag 或初始访问权限", "phase": "post_exploitation", "status": "pending", "origin": "template"},
+        {"id": "p5", "content": "汇总证据与审计报告", "phase": "complete", "status": "pending", "origin": "template"},
+    ],
+    "reverse": [
+        {"id": "p1", "content": "解压/识别文件类型与结构", "phase": "recon", "status": "pending", "origin": "template"},
+        {"id": "p2", "content": "静态分析定位核心校验逻辑", "phase": "analysis", "status": "pending", "origin": "template"},
+        {"id": "p3", "content": "逆向还原算法或动态调试", "phase": "exploitation", "status": "pending", "origin": "template"},
+        {"id": "p4", "content": "构造输入并提取 Flag", "phase": "post_exploitation", "status": "pending", "origin": "template"},
+        {"id": "p5", "content": "汇总分析报告", "phase": "complete", "status": "pending", "origin": "template"},
+    ],
+    "crypto": [
+        {"id": "p1", "content": "识别加密算法与数据结构", "phase": "recon", "status": "pending", "origin": "template"},
+        {"id": "p2", "content": "分析加密参数与数学关系", "phase": "analysis", "status": "pending", "origin": "template"},
+        {"id": "p3", "content": "构造解密算法并求解", "phase": "exploitation", "status": "pending", "origin": "template"},
+        {"id": "p4", "content": "验证 Flag 并提交", "phase": "post_exploitation", "status": "pending", "origin": "template"},
+        {"id": "p5", "content": "汇总密码分析报告", "phase": "complete", "status": "pending", "origin": "template"},
+    ],
+    "pwn": [
+        {"id": "p1", "content": "分析二进制保护机制与漏洞类型", "phase": "recon", "status": "pending", "origin": "template"},
+        {"id": "p2", "content": "定位溢出点与利用原语", "phase": "analysis", "status": "pending", "origin": "template"},
+        {"id": "p3", "content": "构造 exploit 并获取 shell", "phase": "exploitation", "status": "pending", "origin": "template"},
+        {"id": "p4", "content": "读取 Flag", "phase": "post_exploitation", "status": "pending", "origin": "template"},
+        {"id": "p5", "content": "汇总利用报告", "phase": "complete", "status": "pending", "origin": "template"},
+    ],
+}
+
 
 def build_mission_title(
     category: str,
@@ -885,6 +917,7 @@ async def run_mission(
     authorization_source: str = "cli",
     resume: bool = False,
     user_id: int | None = None,
+    auto_approve: bool = False,
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
@@ -1315,9 +1348,12 @@ async def run_mission(
                         agent="system",
                     )
 
-        # 创建共享模型；Qwen 的纯文本温度沿用这里的配置，工具调用由模型
-        # 适配层固定为 0.1。
-        model = create_model(provider=provider, Ver=model_ver, temperature=None, config=runtime)
+        # 创建混合模型策略：主模型用于 Attack/Reserve/Orchestrator 等核心角色，
+        # 轻量模型（固定 Low 级别）用于 Brain/Recon/Summary/Analysis/ScopeAuditor，
+        # 在保持关键决策质量的同时加速辅助角色。Qwen 的纯文本温度沿用这里的配置，
+        # 工具调用由模型适配层固定为 0.1。
+        main_model = create_model(provider=provider, Ver=model_ver, temperature=None, config=runtime)
+        light_model = create_model(provider=provider, Ver="Low", temperature=None, config=runtime)
         # Brain 通过 SubmitPlan 一次原子提交完整计划，避免 Qwen 长工具参数
         # 被拆成多次 AddPlan 后留下半份持久化状态。
         rag_service = get_rag_service(project_dir)
@@ -1333,7 +1369,7 @@ async def run_mission(
             else [create_submit_plan_tool(mission, store, event_callback)]
         )
         brain = create_brain_agent(
-            model,
+            light_model,
             tools=brain_tools,
             # Qwen 的逐条 AddPlan 通常需要 4~8 次登记加一次正文输出。
             max_iters=(15 if qwen_flat_plan_tools else _iter_budget(
@@ -1346,7 +1382,7 @@ async def run_mission(
             state=build_role_agent_state(mission_id, "brain") if use_v2_workspace else None,
         )
         analysis = create_analysis_agent(
-            model,
+            light_model,
             offloader=workspace,
             context_config=context_config,
             state=build_role_agent_state(mission_id, "analysis") if use_v2_workspace else None,
@@ -1358,7 +1394,7 @@ async def run_mission(
         #   file/归档  → 文件静态研判（triage）
         if target_spec.kind == "network":
             recon = create_network_recon_agent(
-                model, target_str, project_dir, runtime.command_timeout,
+                light_model, target_str, project_dir, runtime.command_timeout,
                 scope_registry=scope_registry,
                 max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
                 offloader=workspace,
@@ -1369,7 +1405,7 @@ async def run_mission(
             )
         else:
             recon = create_artifact_triage_agent(
-                model, workdir, project_dir, runtime.command_timeout,
+                light_model, workdir, project_dir, runtime.command_timeout,
                 max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
                 offloader=workspace,
                 context_config=context_config,
@@ -1499,7 +1535,7 @@ async def run_mission(
         # 传入当前任务携带的分类结果；若后续 Recon 触发重分类，
         # Orchestrator 会更新 mission.category_decision，Attack 据此动态加载 Skill。
         attack = await create_attack_agent(
-            model,
+            main_model,
             analysis,
             mission.target,
             project_dir,
@@ -1519,7 +1555,7 @@ async def run_mission(
         )
 
         reserve = await create_reverse_agent(
-            model,
+            main_model,
             analysis,
             mission.target,
             project_dir,
@@ -1533,15 +1569,21 @@ async def run_mission(
             state=build_role_agent_state(mission_id, "reserve") if use_v2_workspace else None,
             artifact_root=ws_root,
             executor=executor,
+            session_dir=ws_root,
         )
 
-        scope_auditor = create_scope_auditor_agent(model)
+        scope_auditor = create_scope_auditor_agent(light_model)
+
+        # ── 自动预批准（slab/workbench 模式）──
+        if auto_approve and not mission.exploitation_approved:
+            mission.exploitation_approved = True
+            mission.record("system", "auto_approve", reason="自动化模式预批准攻击阶段")
 
         # ── 9. Orchestrator 主循环 ──
         # 战术调度核心：持有 recon/attack/state/store 的唯一调度者，
         # 负责推进阶段、调度侦察与攻击、处理重分类、最终调用 complete_mission 收尾。
         orchestrator = create_orchestrator_agent(
-            model=model,
+            model=main_model,
             recon_agent=recon,
             attack_agent=attack,
             reserve_agent=reserve,
@@ -1700,17 +1742,22 @@ async def run_mission(
         # 报告阶段刻意放在任务终态固化之后：总结 Agent 失败/中断不得改变
         # 主任务结论（成功/失败已由 Orchestrator 确定并持久化）。失败路径
         # （模型护栏异常/未预期异常）同样先出报告再报失败，见 _finalize_summary_report。
-        await _finalize_summary_report(
-            mission,
-            provider=provider,
-            model_ver=model_ver,
-            messages=_runtime_messages,
-            event_callback=event_callback,
-            reports_dir=_SUMMARY_REPORTS_DIR,
-            report_key=mission.session_id or mission_id,
-            offloader=workspace,
-            agent_tasks=active_agent_tasks,
-            store=store,
+        # Summary 异步化：任务终态已固化，报告和 PDF 在后台生成，不阻塞返回。
+        if event_callback is not None:
+            event_callback("mission_end", status=mission.phase.value, agent="system")
+        _summary_task = asyncio.create_task(
+            _finalize_summary_report(
+                mission,
+                provider=provider,
+                model_ver=model_ver,
+                messages=_runtime_messages,
+                event_callback=event_callback,
+                reports_dir=_SUMMARY_REPORTS_DIR,
+                report_key=mission.session_id or mission_id,
+                offloader=workspace,
+                agent_tasks=active_agent_tasks,
+                store=store,
+            )
         )
         return mission
 

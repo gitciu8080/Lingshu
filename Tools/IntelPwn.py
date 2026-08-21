@@ -11,9 +11,39 @@ from Tools.tooling import AllowedFunctionTool
 _INTELPWN_SCRIPT = Path(__file__).with_name("intelpwn") / "intelpwn.py"
 _MAX_OUTPUT_CHARS = 20000
 
+# 容器内工作区挂载点（与 workspace_service / docker_exec 保持一致）。
+_CONTAINER_WORKDIR = "/workspace"
 
-def create_intelpwn_tool(timeout: int) -> AllowedFunctionTool:
-    """创建仅执行 IntelPwn 静态分析的工具。"""
+
+def create_intelpwn_tool(
+    timeout: int,
+    *,
+    session_dir: str | Path | None = None,
+) -> AllowedFunctionTool:
+    """创建仅执行 IntelPwn 静态分析的工具。
+
+    Args:
+        timeout: 命令超时秒数。
+        session_dir: Docker 模式下会话工作区的宿主路径；提供后自动将
+            容器内 ``/workspace/...`` 路径反向映射回宿主路径。
+    """
+    _host_session_dir = (
+        Path(session_dir).resolve() if session_dir is not None else None
+    )
+
+    def _resolve_host_path(value: str) -> Path:
+        p = Path(value).expanduser()
+        if p.is_file():
+            return p.resolve()
+        if _host_session_dir is not None:
+            p_str = str(p)
+            prefix = _CONTAINER_WORKDIR + "/"
+            if p_str.startswith(prefix):
+                rel = p_str[len(prefix):]
+                host = (_host_session_dir / rel).resolve()
+                if host.is_file():
+                    return host
+        return p.resolve()
 
     async def intelpwn_analyze(binary_path: str) -> str:
         """分析本地二进制文件的保护机制和潜在漏洞。
@@ -21,9 +51,9 @@ def create_intelpwn_tool(timeout: int) -> AllowedFunctionTool:
         固定使用 JSON 报告且禁用 exploit 生成；不支持远程利用和 fuzz。
 
         Args:
-            binary_path: 待分析的本地二进制文件绝对路径。
+            binary_path: 待分析的本地二进制文件绝对路径（宿主或容器路径均可）。
         """
-        binary = Path(binary_path).expanduser().resolve()
+        binary = _resolve_host_path(binary_path)
         if not binary.is_file():
             return f"[错误] 二进制文件不存在或不是普通文件: {binary}"
         if not _INTELPWN_SCRIPT.is_file():

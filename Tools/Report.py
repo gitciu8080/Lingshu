@@ -8,6 +8,7 @@ Markdown 产物：支持独占一行的 ``---`` 分页语义、``![alt](src)`` �
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 import re
 import socket
@@ -22,6 +23,16 @@ from typing import Any
 _IMAGE_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _HR_RE = re.compile(r"^-{3,}$")
 _IMAGE_LINE_RE = re.compile(r"^!\[([^\]]*)\]\((.+)\)$")
+logger = logging.getLogger(__name__)
+
+
+def prepare_mission_report_markdown(
+    summary: str,
+    mission: dict[str, Any],
+) -> tuple[str, list[str]]:
+    """规范 Summary Markdown，并返回由后端补齐的缺失章节。"""
+    from Tools.WeasyReport import normalize_report_markdown
+    return normalize_report_markdown(summary, mission)
 
 # 灵枢·利刃 模板封面/封底要素（与 pentest-report-template skill 一致）
 _COVER_LOGO_URL = (
@@ -124,7 +135,7 @@ def _register_pdf_fonts(pdfmetrics: Any, TTFont: Any, UnicodeCIDFont: Any) -> tu
     return "STSong-Light", "STSong-Light"
 
 
-def generate_mission_pdf(
+def _generate_reportlab_pdf(
     session_id: str,
     summary: str,
     mission: dict[str, Any],
@@ -593,3 +604,32 @@ def generate_mission_pdf(
         if os.path.exists(temporary_name):
             os.unlink(temporary_name)
     return destination
+
+
+def generate_mission_pdf(
+    session_id: str,
+    summary: str,
+    mission: dict[str, Any],
+    output_dir: str | Path,
+) -> Path:
+    """优先用 WeasyPrint 生成专业 HTML/CSS 报告，故障时降级 ReportLab。
+
+    ``LINGSHU_PDF_ENGINE=reportlab`` 可用于紧急回退或缺少系统图形库的部署。
+    降级不改变 Summary 内容和报告下载路径。
+    """
+    engine = os.getenv("LINGSHU_PDF_ENGINE", "weasyprint").strip().lower()
+    if engine != "reportlab":
+        try:
+            from Tools.WeasyReport import generate_weasyprint_pdf
+            return generate_weasyprint_pdf(
+                session_id,
+                summary,
+                mission,
+                output_dir,
+            )
+        except Exception as exc:
+            logger.exception(
+                "WeasyPrint 报告生成失败，降级使用 ReportLab: %s",
+                exc,
+            )
+    return _generate_reportlab_pdf(session_id, summary, mission, output_dir)

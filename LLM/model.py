@@ -231,7 +231,9 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
         fmt_tools, fmt_tool_choice = self._format_tools(tools, tool_choice)
         if fmt_tools is not None:
             api_kwargs["tools"] = fmt_tools
-        if fmt_tool_choice is not None:
+        # thinking 模式下 DeepSeek/Zhipu 不支持 tool_choice 参数；
+        # 省略时语义等价于 "auto"，模型自主决定是否调用工具。
+        if fmt_tool_choice is not None and not self.parameters.thinking_enable:
             api_kwargs["tool_choice"] = fmt_tool_choice
 
         from datetime import datetime
@@ -532,7 +534,8 @@ class ZhipuChatModel(OpenAIChatModel):
             kwargs["tools"] = fmt_tools
             if not self.parameters.parallel_tool_calls:
                 kwargs["parallel_tool_calls"] = False
-        if fmt_tool_choice is not None:
+        # thinking 模式下不支持 tool_choice 参数
+        if fmt_tool_choice is not None and not self.parameters.thinking_enable:
             kwargs["tool_choice"] = fmt_tool_choice
         if self.stream:
             kwargs["stream_options"] = {"include_usage": True}
