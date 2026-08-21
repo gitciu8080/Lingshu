@@ -110,18 +110,18 @@ _SKILL_PATH_MAP: dict[str, str] = {
     "writeup": "Skills/ctf-skills/ctf-writeup",
 }
 
-_CYBERPENDA_SKILL_MAP: dict[str, list[str]] = {
-    "web": ["api-security", "pentest-tools"],
-    "pwn": ["pwn-chain"],
-    "reverse": ["reverse-skill-router", "reverse-engineering"],
-    "crypto": ["ctf-sandbox-orchestrator"],
-    "forensics": ["digital-forensics"],
-    "malware": ["malware-analysis"],
-    "misc": ["ctf-sandbox-orchestrator"],
-    "osint": ["pentest-tools"],
-    "ai-ml": ["llm-security"],
-}
-_CYBERPENDA_ROOT = "Skills/cyberpenda-bundles"
+# _CYBERPENDA_SKILL_MAP: dict[str, list[str]] = {
+#     "web": ["api-security", "pentest-tools"],
+#     "pwn": ["pwn-chain"],
+#     "reverse": ["reverse-skill-router", "reverse-engineering"],
+#     "crypto": ["ctf-sandbox-orchestrator"],
+#     "forensics": ["digital-forensics"],
+#     "malware": ["malware-analysis"],
+#     "misc": ["ctf-sandbox-orchestrator"],
+#     "osint": ["pentest-tools"],
+#     "ai-ml": ["llm-security"],
+# }
+# _CYBERPENDA_ROOT = "Skills/cyberpenda-bundles"
 _KALI_FULL_SKILL = "Skills/kali-full-tools"
 
 
@@ -226,18 +226,22 @@ def _build_skill_list(
     # kali-full 工具清单始终加载（docker 工作区内能力目录）
     skill_paths.append(_KALI_FULL_SKILL)
     # CyberPenda bundles 完整保存在仓库中，但运行时只加载与当前分类相关的目录。
-    categories: list[str] = []
-    if category_decision:
-        primary = str(category_decision.get("primary") or "")
-        categories = [primary, *[str(value) for value in category_decision.get("secondary", [])]]
-    cyberpenda_names = ["attack-chain"]
-    for category in categories:
-        cyberpenda_names.extend(_CYBERPENDA_SKILL_MAP.get(category, []))
-    for name in dict.fromkeys(cyberpenda_names):
-        path = f"{_CYBERPENDA_ROOT}/{name}"
-        if project_path and not (project_path / path / "SKILL.md").is_file():
-            continue
-        skill_paths.append(path)
+
+    #加载CyberPenda已关闭
+    # categories: list[str] = []
+    # if category_decision:
+    #     primary = str(category_decision.get("primary") or "")
+    #     categories = [primary, *[str(value) for value in category_decision.get("secondary", [])]]
+    # cyberpenda_names = ["attack-chain"]
+    # for category in categories:
+    #     cyberpenda_names.extend(_CYBERPENDA_SKILL_MAP.get(category, []))
+    # for name in dict.fromkeys(cyberpenda_names):
+    #     path = f"{_CYBERPENDA_ROOT}/{name}"
+    #     if project_path and not (project_path / path / "SKILL.md").is_file():
+    #         continue
+    #     skill_paths.append(path)
+
+
     return skill_paths
 
 
