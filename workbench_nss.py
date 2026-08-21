@@ -21,7 +21,10 @@ FastAPI + SSE）创建会话并消费事件流，从而在前端控制台实时�
     python workbench_nss.py
     python workbench_nss.py --rounds 3
     python workbench_nss.py --loop --api-url http://localhost:8080
-    python workbench_nss.py --model Max
+    # 默认使用 Web 管理中启用的 zhipu / GLM，推理强度 Max
+    python workbench_nss.py --provider zhipu
+    # 仍可显式覆盖 Provider 和推理强度
+    python workbench_nss.py --provider deepseek --model Min
 """
 from __future__ import annotations
 
@@ -40,13 +43,21 @@ import httpx
 NSS_API_BASE = "https://www.nssctf.cn/api"
 
 # 默认 Agent Token：优先读环境变量 NSSCTF_AGENT_TOKEN，否则使用此默认值
-DEFAULT_TOKEN = "nss_agent_qLvExRxvLtSUIDiRkQToFedw2RZf9OHcZ0b5S8t5lqI"
+# DEFAULT_TOKEN = "nss_agent_qLvExRxvLtSUIDiRkQToFedw2RZf9OHcZ0b5S8t5lqI"
+DEFAULT_TOKEN = "nss_agent_3n-RbnCNc8r8JgFONn4-1OcCntgoDHXoiV1syInHRR4"
+
 
 # ── 灵枢 Web 后端 ──
 DEFAULT_API_URL = os.environ.get("LINGSHU_API_URL", "http://localhost:8080")
 # 默认 Web 登录账号（auth.py 中创建的用户）
 DEFAULT_USERNAME = os.environ.get("LINGSHU_USER", "admin")
 DEFAULT_PASSWORD = os.environ.get("LINGSHU_PASS", "gdcp@2026")
+# NSS Workbench 默认使用 GLM。可由 CLI 或环境变量覆盖；未显式指定
+# --model 时，zhipu 使用 Max，其它 Provider 使用 Min。
+DEFAULT_PROVIDER = (
+    os.environ.get("NSS_LLM_PROVIDER", "zhipu").strip().lower() or "zhipu"
+)
+DEFAULT_MODEL = os.environ.get("NSS_MODEL_LEVEL", "").strip()
 
 # 附件 / 题面工作目录
 ARENA_WORKDIR = Path(__file__).resolve().parent / "WorkDir" / "arena"
@@ -56,6 +67,15 @@ ARENA_WORKDIR.mkdir(parents=True, exist_ok=True)
 TTL_MARGIN = 120
 
 NSS_FLAG_PATTERN = re.compile(r"NSSCTF\{[^{}\r\n]+\}")
+
+
+def _resolve_model_level(provider: str, requested: str | None) -> str:
+    """解析推理强度：Zhipu/GLM 默认 Max，其它 Provider 默认 Min。"""
+    if requested:
+        if requested not in {"Low", "Min", "Max"}:
+            raise ValueError("推理强度仅支持 Low、Min、Max")
+        return requested
+    return "Max" if provider.strip().lower() == "zhipu" else "Min"
 
 
 def _mask_token(token: str) -> str:
@@ -229,6 +249,22 @@ async def _login(api_url: str, username: str, password: str) -> str:
         resp.raise_for_status()
         body = resp.json()
         return body["access_token"]
+
+
+async def _enabled_model_providers(api_url: str, token: str) -> set[str]:
+    """读取 Web 管理中启用的模型 Provider，避免创建任务后才发现配置无效。"""
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{api_url}/api/model-providers",
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return {
+            str(item.get("id") or "").strip().lower()
+            for item in resp.json().get("providers", [])
+            if str(item.get("id") or "").strip()
+        }
 
 
 async def _start_session(
@@ -681,18 +717,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="单题最多解题轮数（最少 1 轮，默认 1；提交错误后可按配置重跑）",
     )
     parser.add_argument(
-        "--model", "-m", default="Min", choices=["Low", "Min", "Max"],
-        help="思考级别：Low(快速) / Min(默认) / Max(深度推理)",
+        "--model", "-m", default=DEFAULT_MODEL or None,
+        choices=["Low", "Min", "Max"],
+        help=(
+            "思考级别：Zhipu/GLM 默认 Max，其它 Provider 默认 Min；"
+            "也可用 NSS_MODEL_LEVEL 设置"
+        ),
     )
     parser.add_argument(
-        "--provider", "-p", default="deepseek", choices=["deepseek", "qwen"],
-        help="模型提供商（deepseek 或 qwen）",
+        "--provider", "-p", default=DEFAULT_PROVIDER,
+        help=(
+            "模型提供商（默认 zhipu；支持 deepseek、qwen 及 Web 管理中"
+            "启用的自定义 Provider，也可用 NSS_LLM_PROVIDER 设置）"
+        ),
     )
     return parser
 
 
 async def main() -> None:
     args = build_parser().parse_args()
+    args.provider = str(args.provider).strip().lower()
+    if not args.provider:
+        raise ValueError("模型 Provider 不能为空")
+    args.model = _resolve_model_level(args.provider, args.model)
     nss_token = args.token or os.environ.get("NSSCTF_AGENT_TOKEN") or DEFAULT_TOKEN
     print(f"[workbench] NSSCTF Agent Token: {_mask_token(nss_token)}")
     print(f"[workbench] 灵枢 Web API: {args.api_url} | 模型: {args.provider}/{args.model}")
@@ -703,6 +750,20 @@ async def main() -> None:
     except Exception as exc:
         raise SystemExit(f"[配置错误] 登录灵枢 Web 后端失败: {exc}") from exc
     print(f"[workbench] 已登录 Web 后端（用户: {args.username}）")
+
+    try:
+        enabled_providers = await _enabled_model_providers(
+            args.api_url,
+            web_token,
+        )
+    except Exception as exc:
+        raise SystemExit(f"[配置错误] 无法读取灵枢模型列表: {exc}") from exc
+    if args.provider not in enabled_providers:
+        enabled = "、".join(sorted(enabled_providers)) or "无"
+        raise SystemExit(
+            f"[配置错误] Provider '{args.provider}' 未在 Web 管理中启用；"
+            f"当前可用：{enabled}"
+        )
 
     solved = 0
     failed = 0
