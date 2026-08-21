@@ -55,7 +55,10 @@ from Tools.Plan import (  # Brain 计划登记工具
     create_submit_plan_tool,
     push_plan_update,
 )
-from Tools.Report import generate_mission_pdf  # 任务总结 PDF 报告生成
+from Tools.Report import (  # 任务总结 Markdown 规范化与 PDF 报告生成
+    generate_mission_pdf,
+    prepare_mission_report_markdown,
+)
 from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
 from Tools.KnowledgeBase import get_rag_service
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
@@ -508,8 +511,17 @@ async def run_summary_report(
                 content=f"{summary}\n\n> 自动降级原因：{summary_exc}",
             )
 
+    summary, repaired_sections = prepare_mission_report_markdown(
+        summary,
+        mission.to_dict(),
+    )
     mission.summary = summary
-    mission.record("Summary", "conversation_summarized", message_count=len(messages))
+    mission.record(
+        "Summary",
+        "conversation_summarized",
+        message_count=len(messages),
+        repaired_sections=repaired_sections,
+    )
     if store is not None:
         store.save(mission)
         mission_data = mission.to_dict()

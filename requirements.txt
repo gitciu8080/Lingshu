@@ -222,6 +222,7 @@ redis==6.4.0
 referencing==0.37.0
 reme-ai==0.4.1.6
 reportlab==4.5.1
+weasyprint==68.0
 requests==2.34.2
 requests-oauthlib==2.0.0
 rich==15.0.0
