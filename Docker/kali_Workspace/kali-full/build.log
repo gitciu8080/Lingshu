@@ -1,0 +1,416 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 6.51kB done
+#1 DONE 0.1s
+
+#2 [internal] load metadata for docker.io/kalilinux/kali-rolling:latest
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 82B done
+#3 DONE 0.0s
+
+#4 [ 1/15] FROM docker.io/kalilinux/kali-rolling:latest@sha256:1a2eb0501a2dbe8aa8f513b0791699dbd9b539696768f40b2cbe1dead2fb0d67
+#4 resolve docker.io/kalilinux/kali-rolling:latest@sha256:1a2eb0501a2dbe8aa8f513b0791699dbd9b539696768f40b2cbe1dead2fb0d67 0.0s done
+#4 DONE 0.0s
+
+#5 [ 2/15] RUN printf 'Types: deb\nURIs: http://mirrors.ustc.edu.cn/kali\nSuites: kali-rolling\nComponents: main contrib non-free non-free-firmware\nSigned-By: /usr/share/keyrings/kali-archive-keyring.gpg\n' > /etc/apt/sources.list.d/kali.sources &&     echo 'Acquire::http::Retry "5";' > /etc/apt/apt.conf.d/99retry
+#5 CACHED
+
+#6 [ 4/15] RUN apt-get update &&     apt-get -y install kali-linux-headless git curl wget vim less &&     apt-get clean
+#6 CACHED
+
+#7 [ 6/15] RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple &&     pip config set global.break-system-packages true
+#7 CACHED
+
+#8 [ 3/15] RUN dpkg --add-architecture i386 && apt-get update
+#8 CACHED
+
+#9 [ 5/15] RUN apt-get update &&     apt-get -y install crackmapexec ghidra feroxbuster subfinder joomscan strace         gdb gdbserver libc6-dbg         build-essential python3-dev python3-venv python3-setuptools         steghide apktool zbar-tools python3-sympy ropper         wine &&     apt-get clean
+#9 CACHED
+
+#10 [ 7/15] RUN set -e;     apt-get update && apt-get -y install cmake ninja-build pkg-config;     pip install "unicorn==2.1.3";     pip install volatility3 pwntools pycryptodome;     pip install distorm3 || { apt-get update; apt-get -y install python3-distorm3; }
+#10 CACHED
+
+#11 [internal] load build context
+#11 transferring context: 40B done
+#11 DONE 0.0s
+
+#12 [ 8/15] RUN set -e;     apt-get update && apt-get -y install libcrypt-dev;     rm -f /lib64/ld-linux-x86-64.so.2.new; cp /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2.new && mv -f /lib64/ld-linux-x86-64.so.2.new /lib64/ld-linux-x86-64.so.2;     curl -fsSL -o /tmp/miniconda2.sh         https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda2-latest-Linux-x86_64.sh &&     bash /tmp/miniconda2.sh -b -p /opt/miniconda2 &&     rm -f /tmp/miniconda2.sh &&     cp /usr/bin/ld /opt/miniconda2/compiler_compat/ld &&     /opt/miniconda2/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir "pip==20.3.4" &&     /opt/miniconda2/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir         distorm3 "pycryptodome==3.10.1" "ujson==1.35" "openpyxl==2.6.4" pytz "Pillow==6.2.2" &&     curl -fsSL -o /tmp/vol2.tar.gz         https://gh-proxy.org/https://github.com/volatilityfoundation/volatility/archive/refs/tags/2.6.1.tar.gz &&     tar -xzf /tmp/vol2.tar.gz -C /tmp &&     mv /tmp/volatility-2.6.1 /opt/volatility2 &&     rm -f /tmp/vol2.tar.gz &&     printf '#!/bin/bash\nexec /opt/miniconda2/bin/python /opt/volatility2/vol.py "$@"\n' > /usr/local/bin/volatility &&     chmod +x /usr/local/bin/volatility &&     ln -sf /opt/volatility2/vol.py /usr/local/bin/vol.py &&     /opt/miniconda2/bin/python /opt/volatility2/vol.py --info >/dev/null
+#12 0.362 Get:1 http://mirrors.ustc.edu.cn/kali kali-rolling InRelease [34.0 kB]
+#12 0.459 Get:2 http://mirrors.ustc.edu.cn/kali kali-rolling/main i386 Packages [20.8 MB]
+#12 11.63 Get:3 http://mirrors.ustc.edu.cn/kali kali-rolling/main amd64 Packages [21.4 MB]
+#12 23.14 Get:4 http://mirrors.ustc.edu.cn/kali kali-rolling/main i386 Contents (deb) [47.9 MB]
+#12 49.07 Get:5 http://mirrors.ustc.edu.cn/kali kali-rolling/main amd64 Contents (deb) [53.3 MB]
+#12 97.35 Fetched 143 MB in 1min 26s (1665 kB/s)
+#12 97.35 Reading package lists...
+#12 99.71 Reading package lists...
+#12 102.0 Building dependency tree...
+#12 102.5 Reading state information...
+#12 102.7 Solving dependencies...
+#12 103.5 The following additional packages will be installed:
+#12 103.5   libcrypt1
+#12 103.6 The following NEW packages will be installed:
+#12 103.6   libcrypt-dev
+#12 103.6 The following packages will be upgraded:
+#12 103.6   libcrypt1
+#12 103.7 1 upgraded, 1 newly installed, 0 to remove and 14 not upgraded.
+#12 103.7 Need to get 231 kB of archives.
+#12 103.7 After this operation, 406 kB of additional disk space will be used.
+#12 103.7 Get:1 http://mirrors.ustc.edu.cn/kali kali-rolling/main amd64 libcrypt1 amd64 1:4.5.2+20251210-1 [100 kB]
+#12 103.8 Get:2 http://mirrors.ustc.edu.cn/kali kali-rolling/main amd64 libcrypt-dev amd64 1:4.5.2+20251210-1 [130 kB]
+#12 106.9 Fetched 231 kB in 0s (1206 kB/s)
+#12 107.0 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 276194 files and directories currently installed.)
+#12 107.3 Preparing to unpack .../libcrypt1_1%3a4.5.2+20251210-1_amd64.deb ...
+#12 107.3 Unpacking libcrypt1:amd64 (1:4.5.2+20251210-1) over (1:4.5.1-1+b1) ...
+#12 107.5 Setting up libcrypt1:amd64 (1:4.5.2+20251210-1) ...
+#12 107.6 Selecting previously unselected package libcrypt-dev:amd64.
+#12 107.6 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 276193 files and directories currently installed.)
+#12 107.9 Preparing to unpack .../libcrypt-dev_1%3a4.5.2+20251210-1_amd64.deb ...
+#12 107.9 Unpacking libcrypt-dev:amd64 (1:4.5.2+20251210-1) ...
+#12 108.0 Setting up libcrypt-dev:amd64 (1:4.5.2+20251210-1) ...
+#12 108.0 Processing triggers for libc-bin (2.42-17) ...
+#12 136.0 PREFIX=/opt/miniconda2
+#12 136.2 Unpacking payload ...
+#12 141.0   0%|          | 0/37 [00:00<?, ?it/s]Extracting : tk-8.6.8-hbc83047_0.conda:   0%|          | 0/37 [00:00<?, ?it/s]Extracting : tk-8.6.8-hbc83047_0.conda:   3%|▎         | 1/37 [00:00<00:09,  3.84it/s]Extracting : ca-certificates-2020.1.1-0.conda:   3%|▎         | 1/37 [00:00<00:09,  3.84it/s]Extracting : zlib-1.2.11-h7b6447c_3.conda:   5%|▌         | 2/37 [00:00<00:09,  3.84it/s]    Extracting : wheel-0.33.6-py27_0.conda:   8%|▊         | 3/37 [00:00<00:08,  3.84it/s]   Extracting : cryptography-2.8-py27h1ba5d50_0.conda:  11%|█         | 4/37 [00:00<00:08,  3.84it/s]Extracting : readline-8.0-h7b6447c_0.conda:  14%|█▎        | 5/37 [00:00<00:08,  3.84it/s]        Extracting : libgcc-ng-9.1.0-hdf63c60_0.conda:  16%|█▌        | 6/37 [00:00<00:08,  3.84it/s]Extracting : libgcc-ng-9.1.0-hdf63c60_0.conda:  19%|█▉        | 7/37 [00:00<00:05,  5.12it/s]Extracting : libffi-3.3-he6710b0_1.conda:  19%|█▉        | 7/37 [00:00<00:05,  5.12it/s]     Extracting : asn1crypto-1.3.0-py27_0.conda:  22%|██▏       | 8/37 [00:00<00:05,  5.12it/s]Extracting : python-2.7.18-h15b4118_1.conda:  24%|██▍       | 9/37 [00:00<00:05,  5.12it/s]Extracting : python-2.7.18-h15b4118_1.conda:  27%|██▋       | 10/37 [00:00<00:04,  5.53it/s]Extracting : pycparser-2.20-py_0.conda:  27%|██▋       | 10/37 [00:00<00:04,  5.53it/s]     Extracting : six-1.13.0-py27_0.conda:  30%|██▉       | 11/37 [00:00<00:04,  5.53it/s]  Extracting : ncurses-6.2-he6710b0_1.conda:  32%|███▏      | 12/37 [00:00<00:04,  5.53it/s]Extracting : ruamel_yaml-0.15.87-py27h7b6447c_0.conda:  35%|███▌      | 13/37 [00:00<00:04,  5.53it/s]Extracting : pip-19.3.1-py27_0.conda:  38%|███▊      | 14/37 [00:00<00:04,  5.53it/s]                 Extracting : pyopenssl-19.1.0-py27_0.conda:  41%|████      | 15/37 [00:00<00:03,  5.53it/s]Extracting : pysocks-1.7.1-py27_0.conda:  43%|████▎     | 16/37 [00:00<00:03,  5.53it/s]   Extracting : enum34-1.1.6-py27_1.conda:  46%|████▌     | 17/37 [00:00<00:03,  5.53it/s] Extracting : sqlite-3.31.1-h62c20be_1.conda:  49%|████▊     | 18/37 [00:00<00:03,  5.53it/s]Extracting : requests-2.22.0-py27_1.conda:  51%|█████▏    | 19/37 [00:00<00:03,  5.53it/s]  Extracting : conda-package-handling-1.6.0-py27h7b6447c_0.conda:  54%|█████▍    | 20/37 [00:00<00:03,  5.53it/s]Extracting : _libgcc_mutex-0.1-main.conda:  57%|█████▋    | 21/37 [00:00<00:02,  5.53it/s]                     Extracting : yaml-0.1.7-had09818_2.conda:  59%|█████▉    | 22/37 [00:00<00:02,  5.53it/s] Extracting : urllib3-1.25.7-py27_0.conda:  62%|██████▏   | 23/37 [00:00<00:02,  5.53it/s]Extracting : idna-2.8-py27_0.conda:  65%|██████▍   | 24/37 [00:00<00:02,  5.53it/s]      Extracting : libstdcxx-ng-9.1.0-hdf63c60_0.conda:  68%|██████▊   | 25/37 [00:01<00:02,  5.53it/s]Extracting : openssl-1.1.1g-h7b6447c_0.conda:  70%|███████   | 26/37 [00:01<00:01,  5.53it/s]    Extracting : tqdm-4.46.0-py_0.conda:  73%|███████▎  | 27/37 [00:01<00:01,  5.53it/s]         Extracting : cffi-1.14.0-py27he30daa8_1.conda:  76%|███████▌  | 28/37 [00:01<00:01,  5.53it/s]Extracting : setuptools-44.0.0-py27_0.conda:  78%|███████▊  | 29/37 [00:01<00:01,  5.53it/s]  Extracting : setuptools-44.0.0-py27_0.conda:  81%|████████  | 30/37 [00:01<00:00,  7.77it/s]Extracting : certifi-2019.11.28-py27_0.conda:  81%|████████  | 30/37 [00:01<00:00,  7.77it/s]Extracting : pycosat-0.6.3-py27h7b6447c_0.conda:  84%|████████▍ | 31/37 [00:01<00:00,  7.77it/s]Extracting : chardet-3.0.4-py27_1003.conda:  86%|████████▋ | 32/37 [00:01<00:00,  7.77it/s]     Extracting : ipaddress-1.0.23-py_0.conda:  89%|████████▉ | 33/37 [00:01<00:00,  7.77it/s]  Extracting : futures-3.3.0-py27_0.conda:  92%|█████████▏| 34/37 [00:01<00:00,  7.77it/s] Extracting : libedit-3.1.20181209-hc058e9b_0.conda:  95%|█████████▍| 35/37 [00:01<00:00,  7.77it/s]Extracting : conda-4.8.3-py27_0.tar.bz2:  97%|█████████▋| 36/37 [00:01<00:00,  7.77it/s]           Extracting : conda-4.8.3-py27_0.tar.bz2: 100%|██████████| 37/37 [00:01<00:00,  8.56it/s]                                                                                        Collecting package metadata (current_repodata.json): ...working... done
+#12 144.1 Solving environment: ...working... done
+#12 144.4 
+#12 144.4 ## Package Plan ##
+#12 144.4 
+#12 144.4   environment location: /opt/miniconda2
+#12 144.4 
+#12 144.4   added / updated specs:
+#12 144.4     - _libgcc_mutex==0.1=main
+#12 144.4     - asn1crypto==1.3.0=py27_0
+#12 144.4     - ca-certificates==2020.1.1=0
+#12 144.4     - certifi==2019.11.28=py27_0
+#12 144.4     - cffi==1.14.0=py27he30daa8_1
+#12 144.4     - chardet==3.0.4=py27_1003
+#12 144.4     - conda-package-handling==1.6.0=py27h7b6447c_0
+#12 144.4     - conda==4.8.3=py27_0
+#12 144.4     - cryptography==2.8=py27h1ba5d50_0
+#12 144.4     - enum34==1.1.6=py27_1
+#12 144.4     - futures==3.3.0=py27_0
+#12 144.4     - idna==2.8=py27_0
+#12 144.4     - ipaddress==1.0.23=py_0
+#12 144.4     - libedit==3.1.20181209=hc058e9b_0
+#12 144.4     - libffi==3.3=he6710b0_1
+#12 144.4     - libgcc-ng==9.1.0=hdf63c60_0
+#12 144.4     - libstdcxx-ng==9.1.0=hdf63c60_0
+#12 144.4     - ncurses==6.2=he6710b0_1
+#12 144.4     - openssl==1.1.1g=h7b6447c_0
+#12 144.4     - pip==19.3.1=py27_0
+#12 144.4     - pycosat==0.6.3=py27h7b6447c_0
+#12 144.4     - pycparser==2.20=py_0
+#12 144.4     - pyopenssl==19.1.0=py27_0
+#12 144.4     - pysocks==1.7.1=py27_0
+#12 144.4     - python==2.7.18=h15b4118_1
+#12 144.4     - readline==8.0=h7b6447c_0
+#12 144.4     - requests==2.22.0=py27_1
+#12 144.4     - ruamel_yaml==0.15.87=py27h7b6447c_0
+#12 144.4     - setuptools==44.0.0=py27_0
+#12 144.4     - six==1.13.0=py27_0
+#12 144.4     - sqlite==3.31.1=h62c20be_1
+#12 144.4     - tk==8.6.8=hbc83047_0
+#12 144.4     - tqdm==4.46.0=py_0
+#12 144.4     - urllib3==1.25.7=py27_0
+#12 144.4     - wheel==0.33.6=py27_0
+#12 144.4     - yaml==0.1.7=had09818_2
+#12 144.4     - zlib==1.2.11=h7b6447c_3
+#12 144.4 
+#12 144.4 
+#12 144.4 The following NEW packages will be INSTALLED:
+#12 144.4 
+#12 144.4   _libgcc_mutex      pkgs/main/linux-64::_libgcc_mutex-0.1-main
+#12 144.4   asn1crypto         pkgs/main/linux-64::asn1crypto-1.3.0-py27_0
+#12 144.4   ca-certificates    pkgs/main/linux-64::ca-certificates-2020.1.1-0
+#12 144.4   certifi            pkgs/main/linux-64::certifi-2019.11.28-py27_0
+#12 144.4   cffi               pkgs/main/linux-64::cffi-1.14.0-py27he30daa8_1
+#12 144.4   chardet            pkgs/main/linux-64::chardet-3.0.4-py27_1003
+#12 144.4   conda              pkgs/main/linux-64::conda-4.8.3-py27_0
+#12 144.4   conda-package-han~ pkgs/main/linux-64::conda-package-handling-1.6.0-py27h7b6447c_0
+#12 144.4   cryptography       pkgs/main/linux-64::cryptography-2.8-py27h1ba5d50_0
+#12 144.4   enum34             pkgs/main/linux-64::enum34-1.1.6-py27_1
+#12 144.4   futures            pkgs/main/linux-64::futures-3.3.0-py27_0
+#12 144.4   idna               pkgs/main/linux-64::idna-2.8-py27_0
+#12 144.4   ipaddress          pkgs/main/noarch::ipaddress-1.0.23-py_0
+#12 144.4   libedit            pkgs/main/linux-64::libedit-3.1.20181209-hc058e9b_0
+#12 144.4   libffi             pkgs/main/linux-64::libffi-3.3-he6710b0_1
+#12 144.4   libgcc-ng          pkgs/main/linux-64::libgcc-ng-9.1.0-hdf63c60_0
+#12 144.4   libstdcxx-ng       pkgs/main/linux-64::libstdcxx-ng-9.1.0-hdf63c60_0
+#12 144.4   ncurses            pkgs/main/linux-64::ncurses-6.2-he6710b0_1
+#12 144.4   openssl            pkgs/main/linux-64::openssl-1.1.1g-h7b6447c_0
+#12 144.4   pip                pkgs/main/linux-64::pip-19.3.1-py27_0
+#12 144.4   pycosat            pkgs/main/linux-64::pycosat-0.6.3-py27h7b6447c_0
+#12 144.4   pycparser          pkgs/main/noarch::pycparser-2.20-py_0
+#12 144.4   pyopenssl          pkgs/main/linux-64::pyopenssl-19.1.0-py27_0
+#12 144.4   pysocks            pkgs/main/linux-64::pysocks-1.7.1-py27_0
+#12 144.4   python             pkgs/main/linux-64::python-2.7.18-h15b4118_1
+#12 144.4   readline           pkgs/main/linux-64::readline-8.0-h7b6447c_0
+#12 144.4   requests           pkgs/main/linux-64::requests-2.22.0-py27_1
+#12 144.4   ruamel_yaml        pkgs/main/linux-64::ruamel_yaml-0.15.87-py27h7b6447c_0
+#12 144.4   setuptools         pkgs/main/linux-64::setuptools-44.0.0-py27_0
+#12 144.4   six                pkgs/main/linux-64::six-1.13.0-py27_0
+#12 144.4   sqlite             pkgs/main/linux-64::sqlite-3.31.1-h62c20be_1
+#12 144.4   tk                 pkgs/main/linux-64::tk-8.6.8-hbc83047_0
+#12 144.4   tqdm               pkgs/main/noarch::tqdm-4.46.0-py_0
+#12 144.4   urllib3            pkgs/main/linux-64::urllib3-1.25.7-py27_0
+#12 144.4   wheel              pkgs/main/linux-64::wheel-0.33.6-py27_0
+#12 144.4   yaml               pkgs/main/linux-64::yaml-0.1.7-had09818_2
+#12 144.4   zlib               pkgs/main/linux-64::zlib-1.2.11-h7b6447c_3
+#12 144.4 
+#12 144.4 
+#12 144.4 Preparing transaction: ...working... done
+#12 145.0 Executing transaction: ...working... done
+#12 147.2 installation finished.
+#12 147.7 DEPRECATION: Python 2.7 will reach the end of its life on January 1st, 2020. Please upgrade your Python as Python 2.7 won't be maintained after that date. A future version of pip will drop support for Python 2.7. More details about Python 2 support in pip, can be found at https://pip.pypa.io/en/latest/development/release-process/#python-2-support
+#12 147.8 Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple
+#12 148.3 Collecting pip==20.3.4
+#12 148.3   Downloading https://pypi.tuna.tsinghua.edu.cn/packages/27/79/8a850fe3496446ff0d584327ae44e7500daf6764ca1a382d2d02789accf7/pip-20.3.4-py2.py3-none-any.whl (1.5MB)
+#12 149.3 Installing collected packages: pip
+#12 149.3   Found existing installation: pip 19.3.1
+#12 149.3     Uninstalling pip-19.3.1:
+#12 149.3       Successfully uninstalled pip-19.3.1
+#12 150.7 Successfully installed pip-20.3.4
+#12 151.6 DEPRECATION: Python 2.7 reached the end of its life on January 1st, 2020. Please upgrade your Python as Python 2.7 is no longer maintained. pip 21.0 will drop support for Python 2.7 in January 2021. More details about Python 2 support in pip can be found at https://pip.pypa.io/en/latest/development/release-process/#python-2-support pip 21.0 will remove support for this functionality.
+#12 151.7 Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple
+#12 151.9 Collecting distorm3
+#12 152.0   Downloading https://pypi.tuna.tsinghua.edu.cn/packages/15/ed/b40fa28b20f165ceec32fac67991128a40a6f69162274941b6c6089f2f06/distorm3-3.5.2.tar.gz (138 kB)
+#12 153.5 Collecting pycryptodome==3.10.1
+#12 153.6   Downloading https://pypi.tuna.tsinghua.edu.cn/packages/41/6f/70d975f1da4b745a7d0d8d6683eeaff6c0a29aa8e36e11630200c7802859/pycryptodome-3.10.1-cp27-cp27mu-manylinux2010_x86_64.whl (1.9 MB)
+#12 156.4 Collecting ujson==1.35
+#12 157.1   Downloading https://pypi.tuna.tsinghua.edu.cn/packages/16/c4/79f3409bc710559015464e5f49b9879430d8f87498ecdc335899732e5377/ujson-1.35.tar.gz (192 kB)
+#12 158.6 Collecting openpyxl==2.6.4
+#12 158.9   Downloading https://pypi.tuna.tsinghua.edu.cn/packages/d6/26/eb28e975b7a37aad38d7ec4f7a0f652bdee6ecf36e6bd06f473c5af9b87b/openpyxl-2.6.4.tar.gz (173 kB)
+#12 160.9 Collecting pytz
+#12 162.0   Downloading https://pypi.tuna.tsinghua.edu.cn/packages/0f/7b/39c34ca613b0b198cb866466651b26b045e2009864c5183c979a3b83f383/pytz-2026.3.post1-py2.py3-none-any.whl (508 kB)
+#12 165.0 Collecting Pillow==6.2.2
+#12 165.1   Downloading https://pypi.tuna.tsinghua.edu.cn/packages/12/ad/61f8dfba88c4e56196bf6d056cdbba64dc9c5dfdfbc97d02e6472feed913/Pillow-6.2.2-cp27-cp27mu-manylinux1_x86_64.whl (2.1 MB)
+#12 166.2 Collecting jdcal
+#12 166.3   Downloading https://pypi.tuna.tsinghua.edu.cn/packages/f0/da/572cbc0bc582390480bbd7c4e93d14dc46079778ed915b505dc494b37c57/jdcal-1.4.1-py2.py3-none-any.whl (9.5 kB)
+#12 166.4 Collecting et_xmlfile
+#12 166.4   Downloading https://pypi.tuna.tsinghua.edu.cn/packages/22/28/a99c42aea746e18382ad9fb36f64c1c1f04216f41797f2f0fa567da11388/et_xmlfile-1.0.1.tar.gz (8.4 kB)
+#12 166.7 Building wheels for collected packages: distorm3, ujson, openpyxl, et-xmlfile
+#12 166.7   Building wheel for distorm3 (setup.py): started
+#12 169.2   Building wheel for distorm3 (setup.py): finished with status 'done'
+#12 169.2   Created wheel for distorm3: filename=distorm3-3.5.2-cp27-cp27mu-linux_x86_64.whl size=129562 sha256=9a0e512cd0b3f720aadac24f854fda8091e53d506fa15e6928d7972393aaafde
+#12 169.2   Stored in directory: /tmp/pip-ephem-wheel-cache-6VxkiE/wheels/61/61/fe/414dd5db855cead47c60412e951e765362085858b7131dedcd
+#12 169.3   Building wheel for ujson (setup.py): started
+#12 171.2   Building wheel for ujson (setup.py): finished with status 'done'
+#12 171.2   Created wheel for ujson: filename=ujson-1.35-cp27-cp27mu-linux_x86_64.whl size=67137 sha256=87a8f2a030e1d7442bd610388c389d5def0ee6b4a011a775a82506afa3e998c2
+#12 171.2   Stored in directory: /tmp/pip-ephem-wheel-cache-6VxkiE/wheels/64/50/5d/a826c29cd005e89f0d8c1309cad824b58a172188941b315ada
+#12 171.3   Building wheel for openpyxl (setup.py): started
+#12 171.8   Building wheel for openpyxl (setup.py): finished with status 'done'
+#12 171.8   Created wheel for openpyxl: filename=openpyxl-2.6.4-py2.py3-none-any.whl size=245680 sha256=95794a673305d538bee3914fb8a2dcf51ec114f66187d031e2b7847240b0bab3
+#12 171.8   Stored in directory: /tmp/pip-ephem-wheel-cache-6VxkiE/wheels/8e/2d/65/2cd3d52d90d3bd78fd9423eaaecd981107ce0bf6110cce1698
+#12 171.8   Building wheel for et-xmlfile (setup.py): started
+#12 172.1   Building wheel for et-xmlfile (setup.py): finished with status 'done'
+#12 172.1   Created wheel for et-xmlfile: filename=et_xmlfile-1.0.1-py2-none-any.whl size=8914 sha256=3096b46548117196b4efa6ef2d0bcd0827a2082204e42d9eda6c02052fe5f89b
+#12 172.1   Stored in directory: /tmp/pip-ephem-wheel-cache-6VxkiE/wheels/91/86/48/c41d657bc024363578b0913e69dc311a7819800a29224d1a4e
+#12 172.1 Successfully built distorm3 ujson openpyxl et-xmlfile
+#12 172.3 Installing collected packages: distorm3, pycryptodome, ujson, jdcal, et-xmlfile, openpyxl, pytz, Pillow
+#12 173.8 Successfully installed Pillow-6.2.2 distorm3-3.5.2 et-xmlfile-1.0.1 jdcal-1.4.1 openpyxl-2.6.4 pycryptodome-3.10.1 pytz-2026.3.post1 ujson-1.35
+#12 182.0 Volatility Foundation Volatility Framework 2.6.1
+#12 DONE 194.7s
+
+#13 [ 9/15] RUN curl -fsSL -o /tmp/checksec.deb         https://gh-proxy.org/https://github.com/slimm609/checksec/releases/download/3.2.0/checksec_3.2.0_amd64.deb &&     dpkg -i /tmp/checksec.deb &&     rm -f /tmp/checksec.deb
+#13 7.823 Selecting previously unselected package checksec.
+#13 8.077 (Reading database ... 276214 files and directories currently installed.)
+#13 8.097 Preparing to unpack /tmp/checksec.deb ...
+#13 8.100 Unpacking checksec (3.2.0) ...
+#13 8.185 Setting up checksec (3.2.0) ...
+#13 DONE 8.4s
+
+#14 [10/15] RUN git clone --depth 1 https://gh-proxy.org/https://github.com/pwndbg/pwndbg.git /root/.pwndbg &&     cd /root/.pwndbg &&     ./setup.sh &&     rm -rf /root/.pwndbg/.git
+#14 0.395 Cloning into '/root/.pwndbg'...
+#14 38.52 Error: 'uv' binary not found.
+#14 38.53 "kali" is not supported distro. Will search for 'apt', 'dnf' or 'pacman' package managers.
+#14 38.85 Hit:1 http://mirrors.ustc.edu.cn/kali kali-rolling InRelease
+#14 39.04 Reading package lists...
+#14 41.44 Reading package lists...
+#14 43.74 Building dependency tree...
+#14 44.22 Reading state information...
+#14 44.40 git is already the newest version (1:2.53.0-1).
+#14 44.40 gdb is already the newest version (17.2-1+b1).
+#14 44.40 gdbserver is already the newest version (17.2-1+b1).
+#14 44.40 python3-dev is already the newest version (3.14.6-1).
+#14 44.40 python3-venv is already the newest version (3.14.6-1).
+#14 44.40 python3-setuptools is already the newest version (78.1.1-0.1).
+#14 44.40 Solving dependencies...
+#14 45.32 0 upgraded, 0 newly installed, 0 to remove and 14 not upgraded.
+#14 45.35 Reading package lists...
+#14 47.66 Building dependency tree...
+#14 48.16 Reading state information...
+#14 48.34 libc6-dbg is already the newest version (2.42-17).
+#14 48.34 Solving dependencies...
+#14 49.25 0 upgraded, 0 newly installed, 0 to remove and 14 not upgraded.
+#14 49.81 Creating virtualenv in path: /root/.pwndbg/.venv
+#14 54.56 Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple
+#14 56.56 Collecting uv
+#14 56.63   Downloading uv-0.12.5-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (23.7 MB)
+#14 69.57      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 23.7/23.7 MB 1.8 MB/s  0:00:12
+#14 69.69 Installing collected packages: uv
+#14 70.16 Successfully installed uv-0.12.5
+#14 70.29 Installing dependencies..
+#14 72.53    Updating https://github.com/martinradev/gdb-pt-dump (50227bda0b6332e94027f811a15879588de6d5cb)
+#14 100.6     Updated https://github.com/martinradev/gdb-pt-dump (50227bda0b6332e94027f811a15879588de6d5cb)
+#14 128.8 Resolved 156 packages in 58.39s
+#14 128.9    Building pt @ git+https://github.com/martinradev/gdb-pt-dump@50227bda0b6332e94027f811a15879588de6d5cb
+#14 129.2 Downloading ziglang (79.3MiB)
+#14 129.2 Downloading uv (21.0MiB)
+#14 129.2 Downloading pwntools (12.3MiB)
+#14 129.2 Downloading unicorn (15.7MiB)
+#14 129.2 Downloading zstandard (5.3MiB)
+#14 129.2 Downloading cryptography (4.3MiB)
+#14 129.2 Downloading capstone6pwndbg (2.4MiB)
+#14 129.2 Downloading networkx (2.0MiB)
+#14 129.2 Downloading pip (1.7MiB)
+#14 129.2 Downloading jedi (1.5MiB)
+#14 129.2 Downloading capstone (1.4MiB)
+#14 129.2 Downloading pygments (1.2MiB)
+#14 129.2       Built pt @ git+https://github.com/martinradev/gdb-pt-dump@50227bda0b6332e94027f811a15879588de6d5cb
+#14 133.0    Building intervaltree==3.1.0
+#14 133.3       Built intervaltree==3.1.0
+#14 135.6    Building markupsafe==3.0.2
+#14 135.7  Downloaded pygments
+#14 137.3       Built markupsafe==3.0.2
+#14 147.0  Downloaded capstone6pwndbg
+#14 147.7  Downloaded networkx
+#14 148.0  Downloaded pip
+#14 148.2  Downloaded jedi
+#14 148.6  Downloaded capstone
+#14 154.4  Downloaded cryptography
+#14 159.0  Downloaded zstandard
+#14 175.1  Downloaded pwntools
+#14 179.0  Downloaded unicorn
+#14 184.6  Downloaded uv
+#14 217.2  Downloaded ziglang
+#14 217.2 Prepared 77 packages in 1m 28s
+#14 217.3 Uninstalled 2 packages in 46ms
+#14 218.0 Installed 77 packages in 716ms
+#14 218.0  + asttokens==3.0.0
+#14 218.0  + bcrypt==4.3.0
+#14 218.0  + capstone==5.0.6
+#14 218.0  + capstone6pwndbg==6.0.0a9
+#14 218.0  + certifi==2025.8.3
+#14 218.0  + cffi==2.0.0
+#14 218.0  + charset-normalizer==3.4.3
+#14 218.0  + colored-traceback==0.4.2
+#14 218.0  + cryptography==46.0.7
+#14 218.0  + decomp2dbg==3.14.1
+#14 218.0  + decorator==5.2.1
+#14 218.0  + editables==0.5
+#14 218.0  + executing==2.2.1
+#14 218.0  + filelock==3.20.3
+#14 218.0  + ghidra-bridge==1.0.0
+#14 218.0  + hatchling==1.29.0
+#14 218.0  + idna==3.10
+#14 218.0  + intervaltree==3.1.0
+#14 218.0  + invoke==2.2.0
+#14 218.0  + ipython==9.15.0
+#14 218.0  + ipython-pygments-lexers==1.1.1
+#14 218.0  + jedi==0.19.2
+#14 218.0  + jfx-bridge==1.0.0
+#14 218.0  + jpype1==1.7.1
+#14 218.0  + libbs==2.16.5
+#14 218.0  + mako==1.3.10
+#14 218.0  + markdown-it-py==4.0.0
+#14 218.0  + markupsafe==3.0.2
+#14 218.0  + matplotlib-inline==0.1.7
+#14 218.0  + mdurl==0.1.2
+#14 218.0  + networkx==3.6.1
+#14 218.0  + niche-elf==0.3.6
+#14 218.0  + packaging==25.0
+#14 218.0  + paramiko==4.0.0
+#14 218.0  + parso==0.8.5
+#14 218.0  + pathspec==0.12.1
+#14 218.0  + pexpect==4.9.0
+#14 218.0  - pip==26.1.2
+#14 218.0  + pip==26.2
+#14 218.0  + platformdirs==4.4.0
+#14 218.0  + pluggy==1.6.0
+#14 218.0  + plumbum==1.9.0
+#14 218.0  + ply==3.11
+#14 218.0  + prompt-toolkit==3.0.52
+#14 218.0  + psutil==7.2.2
+#14 218.0  + pt==1.0.0 (from git+https://github.com/martinradev/gdb-pt-dump@50227bda0b6332e94027f811a15879588de6d5cb)
+#14 218.0  + ptyprocess==0.7.0
+#14 218.0  + pure-eval==0.2.3
+#14 218.0  + pwntools==4.14.1
+#14 218.0  + pycparser==3.0
+#14 218.0  + pyelftools==0.33
+#14 218.0  + pygments==2.19.2
+#14 218.0  + pyhidra==1.3.0
+#14 218.0  + pynacl==1.5.0
+#14 218.0  + pyserial==3.5
+#14 218.0  + pysocks==1.7.1
+#14 218.0  + python-dateutil==2.9.0.post0
+#14 218.0  + requests==2.34.2
+#14 218.0  + rich==15.0.0
+#14 218.0  + ropgadget==7.6
+#14 218.0  + rpyc==6.0.2
+#14 218.0  + setuptools==83.0.0
+#14 218.0  + six==1.17.0
+#14 218.0  + sortedcontainers==2.4.0
+#14 218.0  + stack-data==0.6.3
+#14 218.0  + tabulate==0.10.0
+#14 218.0  + toml==0.10.2
+#14 218.0  + tqdm==4.67.1
+#14 218.0  + traitlets==5.14.3
+#14 218.0  + trove-classifiers==2026.1.14.14
+#14 218.0  + typing-extensions==4.16.0
+#14 218.0  + unicorn==2.1.4
+#14 218.0  + unix-ar==0.2.1
+#14 218.0  + urllib3==2.6.3
+#14 218.0  - uv==0.12.5
+#14 218.0  + uv==0.12.0
+#14 218.0  + wcwidth==0.2.13
+#14 218.0  + ziglang==0.14.1
+#14 218.0  + zstandard==0.24.0
+#14 218.2 Resolved 156 packages in 2ms
+#14 218.2    Building pwndbg @ file:///root/.pwndbg
+#14 218.7       Built pwndbg @ file:///root/.pwndbg
+#14 218.7 Prepared 1 package in 437ms
+#14 218.7 Uninstalled 5 packages in 8ms
+#14 218.7 Installed 1 package in 5ms
+#14 218.7  - editables==0.5
+#14 218.7  - hatchling==1.29.0
+#14 218.7  - pathspec==0.12.1
+#14 218.7  - pluggy==1.6.0
+#14 218.7  + pwndbg==2026.7.29 (from file:///root/.pwndbg)
+#14 218.7  - trove-classifiers==2026.1.14.14
+#14 218.7 [*] Added 'source /root/.pwndbg/gdbinit.py' to ~/.gdbinit so that Pwndbg will be loaded on every launch of GDB.
+#14 218.7 Set the PWNDBG_NO_AUTOUPDATE environment variable to any value
+#14 218.7 to disable the automatic updating of dependencies when Pwndbg is loaded.
+#14 DONE 219.7s
+
+#15 [11/15] COPY sage-env.tar.gz /tmp/sage-env.tar.gz
+#15 DONE 44.4s
+
+#16 [12/15] RUN mkdir -p /opt/sage &&     tar -xzf /tmp/sage-env.tar.gz -C /opt/sage &&     rm -f /tmp/sage-env.tar.gz &&     python3 /opt/sage/bin/conda-unpack >/dev/null 2>&1 || true &&     ln -sf /opt/sage/bin/sage /usr/local/bin/sage &&     ln -sf /opt/sage/bin/sage-py /usr/local/bin/sage-py
+#16 DONE 84.6s
+
+#17 [13/15] RUN apt-get update && rm -f /usr/local/bin/checksec
+#17 1.812 Hit:1 http://mirrors.ustc.edu.cn/kali kali-rolling InRelease
+#17 1.987 Reading package lists...
+#17 DONE 5.7s
+
+#18 [14/15] RUN mkdir -p /root/workspace
+#18 DONE 0.4s
+
+#19 [15/15] WORKDIR /root/workspace
+#19 DONE 0.1s
+
+#20 exporting to image
+#20 exporting layers
+#20 exporting layers 480.2s done
+#20 exporting manifest sha256:66b90c2fa996ec3115fbabd3718690a0e5674e997a9ad1347fd7264b89ce4ea3 0.0s done
+#20 exporting config sha256:d06509ff0d027d49013fa3dc30abd87fb832fdcee42247f46d8b2c6806abed37 0.0s done
+#20 exporting attestation manifest sha256:1e930f58a56b2d4e177c419183d729f19b6eb8a5204e6b5f9ee3a35306eb6e6e 0.0s done
+#20 exporting manifest list sha256:b86eb7b9137427ac8baf3b385ffabe873fd8b95def8a4b149a1c2985e779d956
+#20 exporting manifest list sha256:b86eb7b9137427ac8baf3b385ffabe873fd8b95def8a4b149a1c2985e779d956 0.0s done
+#20 naming to docker.io/library/kali-full:latest done
+#20 unpacking to docker.io/library/kali-full:latest
+#20 unpacking to docker.io/library/kali-full:latest 224.3s done
+#20 DONE 704.7s
