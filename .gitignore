@@ -27,3 +27,5 @@ reasonix.toml
 workbench_nss*
 reasonix.toml
 */__MACOSX/
+data/*.db
+data/users.db
