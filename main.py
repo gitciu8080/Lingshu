@@ -40,7 +40,11 @@ from agent.Analysis import create_analysis_agent  # 漏洞研判专家（纯推�
 from Tools.archive import safe_extract, SafeExtractError  # 安全解压（防路径穿越等）
 from agent.Attack import close_attack_agent, create_attack_agent  # 攻击手 Agent（分析 + 利用）
 from agent.Brain import create_brain_agent  # 战略规划 Agent
-from agent.categorize import classify  # 题型自动分类（CTF 题型识别）
+from agent.categorize import (  # 题型自动分类与 Recon 后二次分类
+    CategoryDecision,
+    classify,
+    evaluate_reclassification,
+)
 from agent.Orchestrator import create_orchestrator_agent  # 战术调度核心 Agent
 from agent.Recon import (
     create_artifact_triage_agent,  # 文件/归档目标的侦察（triage）Agent
@@ -74,11 +78,13 @@ from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     bind_agent_tasks,
     bind_expert_roster,
     bind_process_tracker,
+    bind_tool_budget_handler,
     bind_tool_json_failure_handler,
     cancel_agent_tasks,
     reset_agent_tasks,
     reset_expert_roster,
     reset_process_tracker,
+    reset_tool_budget_handler,
     reset_tool_json_failure_handler,
     run_interruptible_agent_reply,
     stream_agent_reply,
@@ -263,30 +269,119 @@ _ROLE_BASE_BUDGET = {
     "directory": {"recon": 22, "attack": 28, "reserve": 26, "brain": 16},
 }
 
-# 思考级别迭代加成：Max 深度推理多给，Low 快速收敛少给
-_THINK_BONUS = {"Low": -4, "Min": 8, "Max": 16}
 _ITER_BUDGET_MIN, _ITER_BUDGET_MAX = 12, 40
+
+_COMPLEXITY_LIMITS = {
+    "simple": {"actions": 8, "tools": 45},
+    "complex": {"actions": 18, "tools": 120},
+}
 
 
 def _iter_budget(
     kind: str,
     role: str,
-    model_ver: str = "Min",
+    complexity: str = "complex",
     plan_items: int = 0,
 ) -> int:
-    """按目标类型 + 思考级别 + 计划复杂度自适应计算 Agent 的 ReAct 迭代预算。
+    """按目标类型、任务复杂度和计划规模计算 ReAct 迭代预算。
 
-    Args:
-        kind: 目标类型（network/archive/single_file/directory）。
-        role: 角色（recon/attack/reserve/brain）。
-        model_ver: 思考级别（Low/Min/Max）。
-        plan_items: 已登记的结构化计划条目数（Brain 运行前为 0）。
+    模型 Low/Min/Max 只控制模型自身推理深度，不再改变行动或工具迭代预算。
     """
     base = _ROLE_BASE_BUDGET.get(kind, _ROLE_BASE_BUDGET["directory"])[role]
-    # 计划越复杂给越多迭代（每 2 条计划 +2 轮，封顶 +8）
-    plan_bonus = min(plan_items, 8) * 2
-    think = _THINK_BONUS.get(model_ver, 0)
-    return max(_ITER_BUDGET_MIN, min(_ITER_BUDGET_MAX, base + plan_bonus + think))
+    plan_bonus = min(plan_items, 4 if complexity == "simple" else 8)
+    if complexity == "simple":
+        base = max(_ITER_BUDGET_MIN, int(base * 0.65))
+        upper = 24
+    else:
+        upper = _ITER_BUDGET_MAX
+    return max(_ITER_BUDGET_MIN, min(upper, base + plan_bonus))
+
+
+def _mission_complexity(
+    target_spec: TargetSpec,
+    goal: str,
+    manifest: dict | None,
+    category_decision: CategoryDecision,
+) -> str:
+    """仅依据启动时可观察信号划分 simple/complex 两档。"""
+    file_count = int((manifest or {}).get("file_count", 0) or 0)
+    total_bytes = int((manifest or {}).get("total_bytes", 0) or 0)
+    complex_signals = (
+        target_spec.kind in {"archive", "directory"}
+        or file_count > 3
+        or total_bytes > 10 * 1024 * 1024
+        or len(category_decision.secondary) > 0
+        or category_decision.confidence < 0.55
+        or len(goal) > 300
+    )
+    return "complex" if complex_signals else "simple"
+
+
+def _category_dict(decision: CategoryDecision) -> dict[str, Any]:
+    return {
+        "primary": decision.primary,
+        "secondary": decision.secondary,
+        "confidence": decision.confidence,
+        "scores": decision.scores,
+        "evidence": decision.evidence,
+        "stage": decision.stage,
+    }
+
+
+def _commit_recon_reclassification(
+    mission: MissionState,
+    previous: CategoryDecision,
+    report: str,
+    source: str,
+):
+    """提交首轮 Recon Evidence/Facts，并返回系统接受后的正式分类。"""
+    evidence = mission.add_evidence(
+        source,
+        "recon_report",
+        report,
+        category=previous.primary,
+        confidence=previous.confidence,
+    )
+    result = evaluate_reclassification(
+        previous,
+        [report],
+        seen_evidence_fingerprints={
+            str(item.get("evidence_fingerprint") or "")
+            for item in mission.category_history
+        },
+    )
+    for signal in result.signals:
+        mission.add_fact(
+            signal.content,
+            source,
+            [evidence.id],
+            category=signal.category,
+            confidence=signal.confidence,
+        )
+    history_entry = {
+        "stage": "post_recon",
+        "previous": _category_dict(previous),
+        "candidate": _category_dict(result.candidate),
+        "accepted": result.accepted,
+        "reason": result.reason,
+        "evidence_id": evidence.id,
+        "evidence_fingerprint": result.evidence_fingerprint,
+        "created_at": evidence.created_at,
+    }
+    mission.category_history.append(history_entry)
+    final_decision = result.candidate if result.accepted else previous
+    mission.category_decision = _category_dict(final_decision)
+    mission.record(
+        "Orchestrator",
+        "category_reclassified" if result.accepted else "category_reclassification_rejected",
+        previous=previous.primary,
+        current=final_decision.primary,
+        candidate=result.candidate.primary,
+        evidence_id=evidence.id,
+        reason=result.reason,
+    )
+    mission.add_finding("Recon", report)  # 旧结构继续双写
+    return final_decision, result, evidence
 
 
 # ── Summary 报告（任务收尾阶段）──
@@ -1089,6 +1184,26 @@ async def run_mission(
             )
         store.save(mission)
 
+    # ── v0.4.0：复杂度与执行预算（与模型推理强度完全分离）──
+    complexity = _mission_complexity(target_spec, goal_text, manifest, category_decision)
+    limits = _COMPLEXITY_LIMITS[complexity]
+    if mission.action_budget.limit <= 0 or mission.tool_budget.limit <= 0:
+        mission.configure_budgets(
+            complexity,
+            action_limit=limits["actions"],
+            tool_limit=limits["tools"],
+            preserve_usage=resume,
+        )
+        store.save(mission)
+    else:
+        # v4 会话恢复时以已持久化预算为准，不能因模型 Ver 改变而重置额度。
+        complexity = mission.complexity
+    print(
+        f"[系统] 任务复杂度: {complexity}，"
+        f"行动预算={mission.action_budget.limit}，"
+        f"工具预算={mission.tool_budget.limit}"
+    )
+
     # ── 动态授权范围注册表 ──
     scope_registry = ScopeRegistry()
     # 从持久化恢复（崩溃恢复场景）
@@ -1195,6 +1310,7 @@ async def run_mission(
     agent_tasks_token = bind_agent_tasks(active_agent_tasks)
     expert_roster_token = None
     tool_json_token = None
+    tool_budget_token = None
     attack = None
     reserve = None
     workspace = None  # 异常路径兜底 summary 需要；try 内正常赋值
@@ -1210,6 +1326,34 @@ async def run_mission(
                 )
 
         tool_json_token = bind_tool_json_failure_handler(_record_tool_json_failure)
+
+        # 控制/收尾工具在预算耗尽后仍必须可用，否则无法安全进入终态；其余
+        # Function/MCP 工具统一消耗 tool_budget。
+        budget_exempt_tools = {
+            "complete_mission", "view_mission_state", "ListPlan",
+            "request_exploitation_approval", "request_scope_expansion",
+        }
+
+        def _consume_tool_budget(tool_name: str) -> tuple[bool, str]:
+            if tool_name in budget_exempt_tools:
+                return True, ""
+            if mission.tool_budget.consume():
+                return True, ""
+            mission.record(
+                "system",
+                "tool_budget_exhausted",
+                tool_name=tool_name,
+                used=mission.tool_budget.used,
+                limit=mission.tool_budget.limit,
+            )
+            store.save(mission)
+            return (
+                False,
+                "[预算拒绝] 本任务工具预算已经耗尽。禁止继续调用执行工具；"
+                "请基于已有 Facts/Evidence 调用 complete_mission 如实收尾。",
+            )
+
+        tool_budget_token = bind_tool_budget_handler(_consume_tool_budget)
 
         # ── v0.3.0：获取会话 Workspace（LocalWorkspace + 业务目录）──
         # 同一会话所有内部 Agent 共享同一 Workspace：
@@ -1303,7 +1447,7 @@ async def run_mission(
             tools=brain_tools,
             # Qwen 的逐条 AddPlan 通常需要 4~8 次登记加一次正文输出。
             max_iters=(15 if qwen_flat_plan_tools else _iter_budget(
-                target_spec.kind, "brain", model_ver,
+                target_spec.kind, "brain", complexity,
             )),
             rag_middleware=rag_service.middleware(),
             plan_tool_mode="item" if qwen_flat_plan_tools else "batch",
@@ -1326,7 +1470,7 @@ async def run_mission(
             recon = create_network_recon_agent(
                 model, target_str, project_dir, runtime.command_timeout,
                 scope_registry=scope_registry,
-                max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
+                max_iters=_iter_budget(target_spec.kind, "recon", complexity),
                 offloader=workspace,
                 context_config=context_config,
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
@@ -1337,7 +1481,7 @@ async def run_mission(
         else:
             recon = create_artifact_triage_agent(
                 model, workdir, project_dir, runtime.command_timeout,
-                max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
+                max_iters=_iter_budget(target_spec.kind, "recon", complexity),
                 offloader=workspace,
                 context_config=context_config,
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
@@ -1346,18 +1490,90 @@ async def run_mission(
                 vision_roots=vision_roots,
             )
 
-        # ── 7. Brain 战略规划（包含分类结果）──
+        # ── 6b. 首轮 Recon/Triage 与二次分类 ──
+        # 在 Attack/Reserve 创建前完成一次真实侦察，使接受后的分类能够直接
+        # 决定后续专家名称、Skill 与类别工具。恢复任务不重复执行该动作。
+        if not resume:
+            bootstrap_attempt = mission.begin_attempt(
+                "recon",
+                recon.name,
+                mission.target,
+                {"focus": "首轮最小化侦察与题型确认"},
+            )
+            if bootstrap_attempt is None:
+                raise RuntimeError("首轮 Recon 无可用行动预算")
+            try:
+                bootstrap_result = await run_interruptible_agent_reply(
+                    recon,
+                    UserMsg(
+                        name="Orchestrator",
+                        content=(
+                            f"授权目标：{mission.target}\n"
+                            "本轮重点：执行首轮最小化侦察，确认协议、文件魔法或题型强信号。\n"
+                            "只收集决定题型和下一步所需的最少证据；取得明确证据后立即输出报告。"
+                        ),
+                    ),
+                    prefix="[Recon] ",
+                    on_event=event_callback,
+                )
+                bootstrap_report = (
+                    bootstrap_result.get_text_content() or "[Recon] 未返回文本结果"
+                )
+            except AgentMaxIterationsError as exc:
+                mission.finish_attempt(
+                    bootstrap_attempt,
+                    "failure",
+                    str(exc),
+                    information_gain="none",
+                )
+                store.checkpoint(mission, "bootstrap_recon_max_iters")
+                raise
+            except asyncio.CancelledError:
+                mission.finish_attempt(
+                    bootstrap_attempt,
+                    "interrupted",
+                    "首轮 Recon 被用户指令或停止请求中断",
+                )
+                store.checkpoint(mission, "bootstrap_recon_interrupted")
+                raise
+
+            category_decision, reclassification, evidence = _commit_recon_reclassification(
+                mission,
+                category_decision,
+                bootstrap_report,
+                recon.name,
+            )
+            information_gain = (
+                "high" if reclassification.accepted
+                else "medium" if reclassification.signals
+                else "low"
+            )
+            mission.finish_attempt(
+                bootstrap_attempt,
+                "success",
+                bootstrap_report,
+                [evidence.id],
+                information_gain,
+            )
+            store.checkpoint(mission, "bootstrap_recon_classified")
+            print(
+                f"[系统] Recon 后分类: primary={category_decision.primary} "
+                f"accepted={reclassification.accepted}；{reclassification.reason}"
+            )
+
+        # ── 7. Brain 战略规划（使用 Recon 后最终分类）──
         # 把授权目标、任务目标与初始分类打包成提示词，交给 Brain 制定阶段计划。
         # 设计要点：Brain 只能「建议」修正题型（proposed_category + reason），
         # 最终修正需由 Orchestrator 审批，防止单一 Agent 越权篡改任务类型。
         plan_prompt = (
             f"授权目标：{mission.target}\n"
             f"任务目标：{mission.goal}\n\n"
-            f"## 题型分析（系统初步分类）\n"
+            f"## 题型分析（系统最终分类）\n"
             f"目标类型：{target_spec.kind}\n"
-            f"初步题型：{category_decision.primary}\n"
+            f"当前题型：{category_decision.primary}\n"
             f"置信度：{category_decision.confidence:.0%}\n"
             f"证据：{'; '.join(category_decision.evidence)}\n"
+            f"结构化 Facts：{'; '.join(item.content for item in mission.facts[-8:]) or '暂无'}\n"
         )
         if declared_network_targets:
             plan_prompt += (
@@ -1457,8 +1673,11 @@ async def run_mission(
             push_plan_update(mission, event_callback)
         # Brain 完成作战计划后再启用专家名册；后续角色首次调用时加入专家团。
         expert_roster_token = bind_expert_roster()
-        # 状态机：PLANNING → RECON（非法转型会被状态机拒绝）
+        # 状态机保持合法迁移；首轮 Recon 已在规划前完成，因此随即进入 ANALYSIS，
+        # Orchestrator 只有在信息不足时才再次派遣 Recon。
         mission.transition(Phase.RECON, "战略计划已制定")
+        if mission.findings:
+            mission.transition(Phase.ANALYSIS, "首轮 Recon 证据与二次分类已完成")
         store.save(mission)  # 每步都持久化，保证崩溃可恢复
         _push_target_info()   # 首次推送靶机信息
         print(f"[Brain] 作战计划\n{mission.plan}\n")
@@ -1474,7 +1693,7 @@ async def run_mission(
             runtime.command_timeout,
             category_decision=mission.category_decision,
             scope_registry=scope_registry,
-            max_iters=_iter_budget(target_spec.kind, "attack", model_ver, len(mission.plan_items)),
+            max_iters=_iter_budget(target_spec.kind, "attack", complexity, len(mission.plan_items)),
             rag_middleware=rag_service.middleware(),
             expert_context=mission.plan,
             event_callback=event_callback,
@@ -1496,7 +1715,7 @@ async def run_mission(
             runtime.command_timeout,
             category_decision=mission.category_decision,
             scope_registry=scope_registry,
-            max_iters=_iter_budget(target_spec.kind, "reserve", model_ver, len(mission.plan_items)),
+            max_iters=_iter_budget(target_spec.kind, "reserve", complexity, len(mission.plan_items)),
             event_callback=event_callback,
             offloader=workspace,
             context_config=context_config,
@@ -1525,6 +1744,7 @@ async def run_mission(
             steering_state=steering,
             nss_context=nss_context,
             slab_context=slab_context,
+            max_iters=20 if complexity == "simple" else 30,
             offloader=workspace,
             context_config=context_config,
             state=build_role_agent_state(mission_id, "orchestrator") if use_v2_workspace else None,
@@ -1548,7 +1768,11 @@ async def run_mission(
             f"执行以下已授权任务。\n目标：{mission.target}\n目标要求：{mission.goal}\n\n"
             f"Brain 计划：\n{mission.plan}\n\n"
             f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
-            "从侦察开始，以工具证据推进；结束时必须调用 complete_mission。"
+            f"当前 Facts：{'; '.join(item.content for item in mission.facts[-10:]) or '暂无'}\n"
+            f"行动预算：{mission.action_budget.used}/{mission.action_budget.limit}；"
+            f"工具预算：{mission.tool_budget.used}/{mission.tool_budget.limit}\n"
+            "首轮 Recon 与题型确认已经完成；只有存在明确证据缺口时才补充侦察，"
+            "否则直接基于 Facts/Evidence 推进。结束时必须调用 complete_mission。"
             f"{orch_context}"
         )
         # P5 熔断重试预算：Orchestrator 输出残缺 <tool_call>/空回答时重新注入
@@ -1752,6 +1976,8 @@ async def run_mission(
             reset_expert_roster(expert_roster_token)
         if tool_json_token is not None:
             reset_tool_json_failure_handler(tool_json_token)
+        if tool_budget_token is not None:
+            reset_tool_budget_handler(tool_budget_token)
         # 停止本任务启动的所有命令及后台子进程，避免取消后继续运行。
         await process_tracker.terminate_all()
         reset_process_tracker(process_tracker_token)

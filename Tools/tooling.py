@@ -57,6 +57,10 @@ _TOOL_JSON_FAILURE_HANDLER: ContextVar[
     Callable[[dict[str, Any]], None] | None
 ] = ContextVar("lingshu_tool_json_failure_handler", default=None)
 
+_TOOL_BUDGET_HANDLER: ContextVar[
+    Callable[[str], tuple[bool, str]] | None
+] = ContextVar("lingshu_tool_budget_handler", default=None)
+
 
 def bind_tool_json_failure_handler(
     handler: Callable[[dict[str, Any]], None],
@@ -67,6 +71,17 @@ def bind_tool_json_failure_handler(
 
 def reset_tool_json_failure_handler(token: Token) -> None:
     _TOOL_JSON_FAILURE_HANDLER.reset(token)
+
+
+def bind_tool_budget_handler(
+    handler: Callable[[str], tuple[bool, str]],
+) -> Token:
+    """绑定当前任务的确定性工具预算检查器。"""
+    return _TOOL_BUDGET_HANDLER.set(handler)
+
+
+def reset_tool_budget_handler(token: Token) -> None:
+    _TOOL_BUDGET_HANDLER.reset(token)
 
 
 class StrictJSONToolkit(Toolkit):
@@ -85,6 +100,19 @@ class StrictJSONToolkit(Toolkit):
         tool_call: ToolCallBlock,
         state: AgentState,
     ):
+        budget_handler = _TOOL_BUDGET_HANDLER.get()
+        if budget_handler is not None:
+            allowed, message = budget_handler(tool_call.name)
+            if not allowed:
+                response = ToolResponse(id=tool_call.id)
+                chunk = ToolChunk(
+                    content=[TextBlock(text=message)],
+                    state=ToolResultState.ERROR,
+                )
+                yield chunk
+                yield response.append_chunk(chunk)
+                return
+
         validation_error: Exception | None = None
         try:
             def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

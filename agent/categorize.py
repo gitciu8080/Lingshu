@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -157,6 +158,27 @@ class CategoryDecision:
             if cat not in result:
                 result.append(cat)
         return result
+
+
+@dataclass(frozen=True)
+class ReconSignal:
+    """从 Recon 原文中确定性提取、可写入 Fact 的结构化信号。"""
+
+    category: CategoryName
+    content: str
+    score: float
+    confidence: float
+
+
+@dataclass
+class ReclassificationResult:
+    """二次分类提案及系统接受/拒绝结果。"""
+
+    candidate: CategoryDecision
+    accepted: bool
+    reason: str
+    signals: list[ReconSignal] = field(default_factory=list)
+    evidence_fingerprint: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -341,4 +363,115 @@ def reclassify(
         scores={k: v for k, v in scores.items() if v > 0},
         evidence=evidence,
         stage="post_recon",
+    )
+
+
+def extract_recon_signals(recon_evidence: list[str]) -> list[ReconSignal]:
+    """从本轮 Recon 报告提取少量可验证强信号，不做开放式语义推断。"""
+    text = "\n".join(str(item) for item in recon_evidence if str(item).strip())
+    lowered = text.lower()
+    signals: list[ReconSignal] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(category: CategoryName, content: str, score: float, confidence: float) -> None:
+        key = (category, content)
+        if key not in seen:
+            seen.add(key)
+            signals.append(ReconSignal(category, content, score, confidence))
+
+    for category, patterns in _FILE_TYPE_SIGNALS.items():
+        for pattern in patterns:
+            if pattern.lower() in lowered:
+                add(
+                    category,  # type: ignore[arg-type]
+                    f"Recon 工具输出确认文件类型信号：{pattern}",
+                    float(_FILE_SIGNAL_WEIGHT),
+                    0.95,
+                )
+                break
+
+    # HTTP 状态行和响应头属于协议级证据，比题面中的普通“web/http”关键词可靠。
+    http_match = re.search(r"\bHTTP/[12](?:\.\d)?\s+\d{3}\b", text, re.IGNORECASE)
+    if http_match or re.search(r"\b(?:server|content-type):\s*[^\r\n]+", text, re.IGNORECASE):
+        value = http_match.group(0) if http_match else "HTTP 响应头"
+        add("web", f"Recon 工具输出确认 Web 协议响应：{value}", 8.0, 0.9)
+
+    # 密码材料和抓包/内存格式补充信号；仅匹配明确格式名，不把泛化词当事实。
+    for token in ("RSA PUBLIC KEY", "BEGIN PUBLIC KEY", "BEGIN RSA PRIVATE KEY"):
+        if token.lower() in lowered:
+            add("crypto", f"Recon 工具输出确认密码材料：{token}", 8.0, 0.9)
+            break
+    for token in ("pcapng", "tcpdump capture file", "crash dump", "memory dump"):
+        if token in lowered:
+            add("forensics", f"Recon 工具输出确认取证格式：{token}", 10.0, 0.95)
+            break
+    return signals
+
+
+def evaluate_reclassification(
+    previous: CategoryDecision,
+    recon_evidence: list[str],
+    *,
+    seen_evidence_fingerprints: set[str] | None = None,
+) -> ReclassificationResult:
+    """对一批全新 Recon 证据执行一次可审计的分类接受判定。
+
+    初始分类是已知题型时，新题型必须至少领先旧题型 5 分；初始 unknown
+    则只需出现置信度不低于 0.55 的明确新类别。相同证据批不会重复计分。
+    """
+    normalized = "\n".join(str(item).strip() for item in recon_evidence if str(item).strip())
+    fingerprint = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    if seen_evidence_fingerprints and fingerprint in seen_evidence_fingerprints:
+        return ReclassificationResult(
+            candidate=previous,
+            accepted=False,
+            reason="本批 Recon 证据已评估，拒绝重复计分",
+            evidence_fingerprint=fingerprint,
+        )
+
+    signals = extract_recon_signals(recon_evidence)
+    structured_scores: dict[str, float] = {}
+    for signal in signals:
+        structured_scores[signal.category] = (
+            structured_scores.get(signal.category, 0.0) + signal.score
+        )
+    candidate = reclassify(previous, recon_evidence, structured_scores)
+
+    if candidate.primary == previous.primary:
+        return ReclassificationResult(
+            candidate=candidate,
+            accepted=False,
+            reason="新增证据未改变主题型",
+            signals=signals,
+            evidence_fingerprint=fingerprint,
+        )
+    candidate_score = float(candidate.scores.get(candidate.primary, 0.0))
+    previous_score = float(candidate.scores.get(previous.primary, 0.0))
+    strong_new_signal = any(
+        signal.category == candidate.primary and signal.confidence >= 0.9
+        for signal in signals
+    )
+    if previous.primary == "unknown":
+        accepted = candidate.primary != "unknown" and (
+            candidate.confidence >= 0.55 or strong_new_signal
+        )
+    else:
+        accepted = (
+            candidate.confidence >= 0.55
+            and candidate_score >= previous_score + 5.0
+            and strong_new_signal
+        )
+    reason = (
+        f"接受新分类 {previous.primary} → {candidate.primary}："
+        f"confidence={candidate.confidence:.2f}, score={candidate_score:.1f}"
+        if accepted else
+        f"拒绝分类变化 {previous.primary} → {candidate.primary}："
+        "新分类未同时满足置信度、领先分差和强证据要求"
+    )
+    return ReclassificationResult(
+        candidate=candidate,
+        accepted=accepted,
+        reason=reason,
+        signals=signals,
+        evidence_fingerprint=fingerprint,
     )

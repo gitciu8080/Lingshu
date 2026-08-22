@@ -120,6 +120,76 @@ class AuditEvent:
 
 
 @dataclass
+class EvidenceRecord:
+    """一次可追溯的原始证据或 Agent 报告引用。"""
+
+    id: str
+    source: str
+    kind: str
+    summary: str
+    artifact: str = ""
+    category: str = ""
+    confidence: float = 0.0
+    fingerprint: str = ""
+    created_at: str = field(default_factory=_now)
+
+
+@dataclass
+class FactRecord:
+    """由证据支持、可供后续决策直接引用的已验证事实。"""
+
+    id: str
+    content: str
+    source: str
+    evidence_ids: list[str] = field(default_factory=list)
+    category: str = ""
+    confidence: float = 0.0
+    created_at: str = field(default_factory=_now)
+
+
+@dataclass
+class AttemptRecord:
+    """一次高层行动（Recon/Attack/Reverse）的结构化执行记录。"""
+
+    id: str
+    action_type: str
+    agent: str
+    target: str
+    normalized_parameters: dict[str, Any] = field(default_factory=dict)
+    status: str = "running"
+    result_summary: str = ""
+    evidence_ids: list[str] = field(default_factory=list)
+    information_gain: str = "none"
+    started_at: str = field(default_factory=_now)
+    completed_at: str = ""
+
+
+@dataclass
+class BudgetState:
+    """独立于模型 reasoning intensity 的运行预算。"""
+
+    limit: int = 0
+    used: int = 0
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.limit - self.used)
+
+    def consume(self, amount: int = 1) -> bool:
+        if amount < 0:
+            raise ValueError("预算消耗不能为负数")
+        # limit=0 表示旧会话/独立单元测试尚未配置预算，保持历史无限制行为；
+        # run_mission 会在任何 Agent 启动前设置正数限制。
+        if self.limit <= 0:
+            self.used += amount
+            return True
+        if self.used + amount > self.limit:
+            return False
+        self.used += amount
+        return True
+
+
+@dataclass
 class MissionState:
     target: str
     goal: str
@@ -188,6 +258,16 @@ class MissionState:
     # 各内部 Agent 的上下文卸载引用（{role: workspace 相对引用}）
     agent_context_refs: dict[str, str] = field(default_factory=dict)
 
+    # ── v0.4.0 最小优化闭环 ──
+    # 新旧结构暂时并存：findings/attack_chain 继续供现有 UI、报告和长期记忆使用，
+    # 下列结构用于 Orchestrator 的预算、证据和行动决策。
+    facts: list[FactRecord] = field(default_factory=list)
+    evidence_records: list[EvidenceRecord] = field(default_factory=list)
+    attempts: list[AttemptRecord] = field(default_factory=list)
+    complexity: str = "complex"
+    action_budget: BudgetState = field(default_factory=BudgetState)
+    tool_budget: BudgetState = field(default_factory=BudgetState)
+
     def record(self, actor: str, action: str, **details: Any) -> None:
         self.updated_at = _now()
         # 深拷贝 details：防止调用方后续修改污染已写入审计链的事件
@@ -254,6 +334,188 @@ class MissionState:
         self.attack_chain.append(step)
         self.record("Orchestrator", "attack_step_added", objective=objective)
 
+    def configure_budgets(
+        self,
+        complexity: str,
+        action_limit: int,
+        tool_limit: int,
+        *,
+        preserve_usage: bool = False,
+    ) -> None:
+        """设置 simple/complex 预算；恢复任务时可保留已用额度。"""
+        if complexity not in {"simple", "complex"}:
+            raise ValueError(f"不支持的复杂度: {complexity}")
+        if action_limit <= 0 or tool_limit <= 0:
+            raise ValueError("行动预算和工具预算必须大于 0")
+        action_used = self.action_budget.used if preserve_usage else 0
+        tool_used = self.tool_budget.used if preserve_usage else 0
+        self.complexity = complexity
+        self.action_budget = BudgetState(action_limit, min(action_used, action_limit))
+        self.tool_budget = BudgetState(tool_limit, min(tool_used, tool_limit))
+        self.record(
+            "system",
+            "budgets_configured",
+            complexity=complexity,
+            action_limit=action_limit,
+            tool_limit=tool_limit,
+            preserve_usage=preserve_usage,
+        )
+
+    def begin_attempt(
+        self,
+        action_type: str,
+        agent: str,
+        target: str,
+        parameters: dict[str, Any] | None = None,
+    ) -> AttemptRecord | None:
+        """消耗一个行动额度并创建 running Attempt；额度不足返回 None。"""
+        if not self.action_budget.consume():
+            self.record(
+                "Orchestrator",
+                "action_budget_exhausted",
+                action_type=action_type,
+                used=self.action_budget.used,
+                limit=self.action_budget.limit,
+            )
+            return None
+        attempt = AttemptRecord(
+            id=f"a{len(self.attempts) + 1}",
+            action_type=action_type,
+            agent=agent,
+            target=target,
+            normalized_parameters=copy.deepcopy(parameters or {}),
+        )
+        self.attempts.append(attempt)
+        self.record(
+            "Orchestrator",
+            "attempt_started",
+            attempt_id=attempt.id,
+            action_type=action_type,
+            action_budget_used=self.action_budget.used,
+        )
+        return attempt
+
+    def finish_attempt(
+        self,
+        attempt: AttemptRecord,
+        status: str,
+        result_summary: str,
+        evidence_ids: list[str] | None = None,
+        information_gain: str = "none",
+    ) -> None:
+        """确定性收敛 Attempt，并记录本轮信息增益。"""
+        if status not in {"success", "failure", "interrupted", "blocked"}:
+            raise ValueError(f"非法 Attempt 状态: {status}")
+        if information_gain not in {"none", "low", "medium", "high"}:
+            raise ValueError(f"非法 information_gain: {information_gain}")
+        attempt.status = status
+        attempt.result_summary = result_summary[:2000]
+        attempt.evidence_ids = list(dict.fromkeys(evidence_ids or []))
+        attempt.information_gain = information_gain
+        attempt.completed_at = _now()
+        self.record(
+            "Orchestrator",
+            "attempt_finished",
+            attempt_id=attempt.id,
+            status=status,
+            information_gain=information_gain,
+            evidence_ids=attempt.evidence_ids,
+        )
+
+    def add_evidence(
+        self,
+        source: str,
+        kind: str,
+        summary: str,
+        *,
+        artifact: str = "",
+        category: str = "",
+        confidence: float = 0.0,
+    ) -> EvidenceRecord:
+        """写入精确去重的证据；不执行语义级相似度去重。"""
+        normalized = summary.strip()
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "source": source,
+                    "kind": kind,
+                    "summary": normalized,
+                    "artifact": artifact,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+        existing = next(
+            (item for item in self.evidence_records if item.fingerprint == fingerprint),
+            None,
+        )
+        if existing is not None:
+            return existing
+        evidence = EvidenceRecord(
+            id=f"e{len(self.evidence_records) + 1}",
+            source=source,
+            kind=kind,
+            summary=normalized[:4000],
+            artifact=artifact,
+            category=category,
+            confidence=max(0.0, min(float(confidence), 1.0)),
+            fingerprint=fingerprint,
+        )
+        self.evidence_records.append(evidence)
+        self.record(
+            "Orchestrator",
+            "evidence_added",
+            evidence_id=evidence.id,
+            source=source,
+            kind=kind,
+            category=category,
+        )
+        return evidence
+
+    def add_fact(
+        self,
+        content: str,
+        source: str,
+        evidence_ids: list[str],
+        *,
+        category: str = "",
+        confidence: float = 0.0,
+    ) -> FactRecord:
+        """写入带有效 Evidence 引用的事实；相同内容与引用精确去重。"""
+        valid_evidence = {item.id for item in self.evidence_records}
+        refs = [item for item in dict.fromkeys(evidence_ids) if item in valid_evidence]
+        if not refs:
+            raise ValueError("Fact 必须至少引用一条有效 Evidence")
+        normalized = content.strip()
+        existing = next(
+            (
+                item for item in self.facts
+                if item.content == normalized and item.evidence_ids == refs
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        fact = FactRecord(
+            id=f"f{len(self.facts) + 1}",
+            content=normalized[:2000],
+            source=source,
+            evidence_ids=refs,
+            category=category,
+            confidence=max(0.0, min(float(confidence), 1.0)),
+        )
+        self.facts.append(fact)
+        self.record(
+            "Orchestrator",
+            "fact_added",
+            fact_id=fact.id,
+            evidence_ids=refs,
+            category=category,
+        )
+        return fact
+
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["phase"] = self.phase.value
@@ -262,7 +524,7 @@ class MissionState:
 
 # MissionStore 持久化 schema 版本。旧文件缺字段时由 load() 自动迁移，
 # 不回写（保持旧任务只读兼容）。
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # v1: 初始字段（target/goal/phase/plan/findings/attack_chain/flag/...）
 # v2: v0.2.0 新增 target_spec/category_decision/category_history/
@@ -271,6 +533,8 @@ SCHEMA_VERSION = 3
 # v3: v0.3.0 Workspace v2 新增 workspace_id/checkpoint_seq/resume_status/
 #     active_plan_item/pending_action/last_action_fingerprint/
 #     retry_counters/agent_context_refs
+# v4: v0.4.0 最小优化闭环新增 facts/evidence_records/attempts/
+#     complexity/action_budget/tool_budget
 
 
 class MissionStoreCorruptedError(OSError):
@@ -367,6 +631,22 @@ class MissionStore:
             ev if isinstance(ev, AuditEvent) else AuditEvent(**ev)
             for ev in merged.get("events") or []
         ]
+        merged["facts"] = [
+            item if isinstance(item, FactRecord) else FactRecord(**item)
+            for item in merged.get("facts") or []
+        ]
+        merged["evidence_records"] = [
+            item if isinstance(item, EvidenceRecord) else EvidenceRecord(**item)
+            for item in merged.get("evidence_records") or []
+        ]
+        merged["attempts"] = [
+            item if isinstance(item, AttemptRecord) else AttemptRecord(**item)
+            for item in merged.get("attempts") or []
+        ]
+        for budget_name in ("action_budget", "tool_budget"):
+            budget = merged.get(budget_name)
+            if not isinstance(budget, BudgetState):
+                merged[budget_name] = BudgetState(**(budget or {}))
 
         try:
             return MissionState(**merged)

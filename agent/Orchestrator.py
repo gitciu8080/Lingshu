@@ -31,6 +31,7 @@ from Tools.tooling import (
     run_interruptible_agent_reply,
 )
 from agent.experts import ORCHESTRATOR_EXPERT
+from agent.categorize import extract_recon_signals
 
 
 ORCHESTRATOR_SYS_PROMPT = """# 网络安全行动总指挥（Orchestrator）
@@ -115,6 +116,7 @@ def create_orchestrator_agent(
     steering_state: dict[str, Any] | None = None,
     nss_context: dict[str, Any] | None = None,
     slab_context: dict[str, Any] | None = None,
+    max_iters: int = 30,
     *,
     offloader=None,
     context_config=None,
@@ -147,6 +149,18 @@ def create_orchestrator_agent(
             return msg
         if mission.phase not in {Phase.RECON, Phase.ANALYSIS, Phase.EXPLOITATION}:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Recon"
+        attempt = mission.begin_attempt(
+            "recon",
+            recon_agent.name,
+            mission.target,
+            {"focus": focus},
+        )
+        if attempt is None:
+            store.save(mission)
+            return (
+                "[预算拒绝] 行动预算已经耗尽，不能再次派遣 Recon。"
+                "请基于现有 Facts/Evidence 调用 complete_mission 如实收尾。"
+            )
         if mission.phase != Phase.RECON:
             mission.transition(Phase.RECON, f"需要补充侦察: {focus}")
         mission.record("Orchestrator", "dispatch_recon", focus=focus)
@@ -163,6 +177,7 @@ def create_orchestrator_agent(
             )
             report = result.get_text_content() or "[Recon] 未返回文本结果"
         except AgentMaxIterationsError as exc:
+            mission.finish_attempt(attempt, "failure", str(exc), information_gain="none")
             mission.record("Orchestrator", "recon_max_iters_exceeded", error=str(exc))
             store.save(mission)
             return (
@@ -172,8 +187,38 @@ def create_orchestrator_agent(
         except asyncio.CancelledError:
             # 不在此处消费 steering：统一由主循环捕获 CancelledError 后注入，
             # 避免指令被消费但 Orchestrator reply 又被取消导致指令丢失。
+            mission.finish_attempt(
+                attempt, "interrupted", "Recon 被用户指令或停止请求中断",
+            )
+            store.checkpoint(mission, "recon_interrupted")
             raise
+        before_evidence = len(mission.evidence_records)
+        evidence = mission.add_evidence(
+            recon_agent.name,
+            "recon_report",
+            report,
+            category=str((mission.category_decision or {}).get("primary") or ""),
+            confidence=float((mission.category_decision or {}).get("confidence") or 0.0),
+        )
+        fact_count = len(mission.facts)
+        for signal in extract_recon_signals([report]):
+            mission.add_fact(
+                signal.content,
+                recon_agent.name,
+                [evidence.id],
+                category=signal.category,
+                confidence=signal.confidence,
+            )
         mission.add_finding("Recon", report)
+        mission.finish_attempt(
+            attempt,
+            "success",
+            report,
+            [evidence.id],
+            "medium" if len(mission.facts) > fact_count else (
+                "low" if len(mission.evidence_records) > before_evidence else "none"
+            ),
+        )
         mission.transition(Phase.ANALYSIS, "收到新的侦察证据")
         store.checkpoint(mission, "recon_report_received")
         return f"[Recon 侦察报告]\n{report}"
@@ -249,6 +294,23 @@ def create_orchestrator_agent(
                 "[拒绝] 该动作将进入攻击阶段（EXPLOITATION），但尚未获得人工批准。"
                 "请先调用 request_exploitation_approval 说明行动计划与依据，等待人工批准。"
             )
+        attempt = mission.begin_attempt(
+            "attack",
+            attack_agent.name,
+            mission.target,
+            {
+                "target_info": target_info,
+                "objective": objective,
+                "service": service,
+                "cve": cve,
+            },
+        )
+        if attempt is None:
+            store.save(mission)
+            return (
+                "[预算拒绝] 行动预算已经耗尽，不能再次派遣 Attack。"
+                "请基于现有 Facts/Evidence 调用 complete_mission 如实收尾。"
+            )
         if exploitation and mission.phase == Phase.ANALYSIS:
             mission.transition(Phase.EXPLOITATION, f"开始执行: {objective}")
         if any(word in lower or word in objective for word in ("flag", "post", "提权")):
@@ -275,6 +337,7 @@ def create_orchestrator_agent(
         except AgentMaxIterationsError as exc:
             # 超迭代：写入失败步骤（保审计 + 供 P3 去重），返回明确结果
             mission.add_attack_step(objective, f"[Attack 超迭代] {exc}，本轮未产出有效结果")
+            mission.finish_attempt(attempt, "failure", str(exc), information_gain="none")
             store.save(mission)
             return (
                 f"[Attack 超迭代] {exc}。"
@@ -282,8 +345,39 @@ def create_orchestrator_agent(
             )
         except asyncio.CancelledError:
             # 不在此处消费 steering：统一由主循环捕获 CancelledError 后注入。
+            mission.finish_attempt(
+                attempt, "interrupted", "Attack 被用户指令或停止请求中断",
+            )
+            store.checkpoint(mission, "attack_interrupted")
             raise
+        before_evidence = len(mission.evidence_records)
+        evidence = mission.add_evidence(
+            attack_agent.name,
+            "attack_report",
+            report,
+            category=str((mission.category_decision or {}).get("primary") or ""),
+            confidence=0.8,
+        )
+        fact_ids_before = len(mission.facts)
+        flag_match = re.search(r"(?:[A-Za-z0-9_]+)?flag\{[^{}\r\n]+\}|[A-Za-z0-9_]+\{[^{}\r\n]+\}", report, re.IGNORECASE)
+        if flag_match:
+            mission.add_fact(
+                f"Attack 报告中发现待验证 Flag 候选：{flag_match.group(0)}",
+                attack_agent.name,
+                [evidence.id],
+                category=str((mission.category_decision or {}).get("primary") or ""),
+                confidence=0.85,
+            )
         mission.add_attack_step(objective, report, service, cve)
+        mission.finish_attempt(
+            attempt,
+            "success",
+            report,
+            [evidence.id],
+            "high" if len(mission.facts) > fact_ids_before else (
+                "low" if len(mission.evidence_records) > before_evidence else "none"
+            ),
+        )
         # 循环收敛：记录指纹与错误类型计数（确定性错误按类型累计；
         # 无确定性错误或结果含成功信号时不再累加，避免误熔断）
         mission.last_action_fingerprint = fingerprint
@@ -313,7 +407,19 @@ def create_orchestrator_agent(
         if mission.phase not in {Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION}:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Reserve"
         lower = objective.lower()
-        if any(word in lower or word in objective for word in ("exploit", "利用", "patch", "patch")):
+        attempt = mission.begin_attempt(
+            "reverse",
+            reserve_agent.name,
+            mission.target,
+            {"binary_path": binary_path, "objective": objective},
+        )
+        if attempt is None:
+            store.save(mission)
+            return (
+                "[预算拒绝] 行动预算已经耗尽，不能再次派遣 Reserve。"
+                "请基于现有 Facts/Evidence 调用 complete_mission 如实收尾。"
+            )
+        if any(word in lower or word in objective for word in ("exploit", "利用", "patch")):
             if mission.phase == Phase.ANALYSIS:
                 mission.transition(Phase.EXPLOITATION, f"逆向进入利用阶段: {objective}")
         mission.record("Orchestrator", "dispatch_reverse", binary_path=binary_path, objective=objective)
@@ -338,6 +444,7 @@ def create_orchestrator_agent(
             )
             report = result.get_text_content() or "[Reserve] 未返回文本结果"
         except AgentMaxIterationsError as exc:
+            mission.finish_attempt(attempt, "failure", str(exc), information_gain="none")
             mission.record("Orchestrator", "reverse_max_iters_exceeded", error=str(exc))
             store.save(mission)
             return (
@@ -345,11 +452,39 @@ def create_orchestrator_agent(
                 f"请缩小分析目标后重新调度，或改用其他路径。"
             )
         except asyncio.CancelledError:
-            msg = _check_steering()
-            if msg is not None:
-                return msg
+            mission.finish_attempt(
+                attempt, "interrupted", "Reserve 被用户指令或停止请求中断",
+            )
+            store.checkpoint(mission, "reverse_interrupted")
             raise
+        before_evidence = len(mission.evidence_records)
+        evidence = mission.add_evidence(
+            reserve_agent.name,
+            "reverse_report",
+            report,
+            artifact=binary_path,
+            category=str((mission.category_decision or {}).get("primary") or ""),
+            confidence=0.85,
+        )
+        fact_count = len(mission.facts)
+        for signal in extract_recon_signals([report]):
+            mission.add_fact(
+                signal.content,
+                reserve_agent.name,
+                [evidence.id],
+                category=signal.category,
+                confidence=signal.confidence,
+            )
         mission.add_finding("Reserve", report)
+        mission.finish_attempt(
+            attempt,
+            "success",
+            report,
+            [evidence.id],
+            "medium" if len(mission.facts) > fact_count else (
+                "low" if len(mission.evidence_records) > before_evidence else "none"
+            ),
+        )
         store.save(mission)
         return f"[Reserve 逆向报告]\n{report}"
 
@@ -788,7 +923,7 @@ def create_orchestrator_agent(
         system_prompt=ORCHESTRATOR_SYS_PROMPT,
         model=model,
         toolkit=StrictJSONToolkit(tools=tools),
-        react_config=ReActConfig(max_iters=30, interruption_raise_cancelled_error=True),
+        react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
         offloader=offloader,
         context_config=context_config,
         state=state,
