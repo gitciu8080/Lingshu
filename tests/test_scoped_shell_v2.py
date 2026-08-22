@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from Tools.tooling import create_scoped_shell_tool
+from Tools.tooling import create_scoped_shell_tool, _validate_scoped_command
 
 
 def _text(result) -> str:
@@ -103,6 +103,23 @@ class ScopedShellArtifactTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<returncode>0</returncode>", result)
         self.assertIn("legacy-ok", result)
         self.assertFalse((root / "artifacts").exists())
+
+
+class ScopedShellNetworkDetectionTest(unittest.TestCase):
+    def test_new_network_tool_requires_authorized_target(self) -> None:
+        with self.assertRaises(PermissionError):
+            _validate_scoped_command("subfinder -d unrelated.example", "target.example")
+
+    def test_absolute_path_network_tool_is_detected(self) -> None:
+        with self.assertRaises(PermissionError):
+            _validate_scoped_command("/usr/bin/nmap -Pn unrelated.example", "target.example")
+
+    def test_wrapped_network_tool_with_target_is_allowed(self) -> None:
+        _validate_scoped_command("timeout 5 nmap -Pn target.example", "target.example")
+
+    def test_sudo_options_cannot_hide_network_tool(self) -> None:
+        with self.assertRaises(PermissionError):
+            _validate_scoped_command("sudo -u kali /usr/bin/nmap unrelated.example", "target.example")
 
 
 if __name__ == "__main__":

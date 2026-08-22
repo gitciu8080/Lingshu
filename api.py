@@ -62,6 +62,7 @@ from integrations.agentscope_service import (
 from integrations.agentscope_service.account_events import publish_account_event
 from integrations.antsword_service import get_antsword_service
 from Tools.KnowledgeBase import get_rag_service
+from Tools.tool_catalog import get_tool_catalog
 from Tools.target import normalize_target
 from model_registry import (
     ModelRegistryError,
@@ -939,6 +940,27 @@ async def antsword_status(current_user: dict = Depends(get_current_user)):
     del current_user
     return await get_antsword_service().status()
 
+
+@app.get("/api/tooling/catalog")
+async def tooling_catalog(current_user: dict = Depends(get_current_user)):
+    """返回已登录用户可查看的可用能力，不暴露宿主机绝对路径。"""
+    del current_user
+    items = await asyncio.to_thread(get_tool_catalog().snapshot)
+    return {
+        "tools": [
+            {
+                key: item[key]
+                for key in (
+                    "id", "category", "kind", "status", "command", "roles",
+                    "risk", "approval_required", "description", "usage_hint",
+                    "alternatives",
+                )
+            }
+            for item in items
+            if item["status"] == "available"
+        ],
+    }
+
 # ── JWT 认证中间件 ──
 _AUTH_SKIP_PATHS = (
     "/",
@@ -1254,6 +1276,24 @@ def _require_superadmin(current_user: dict) -> dict:
 async def superadmin_users(current_user: dict = Depends(get_current_user)):
     _require_superadmin(current_user)
     return {"users": await asyncio.to_thread(list_users)}
+
+
+@app.get("/api/superadmin/tooling/status")
+async def superadmin_tooling_status(
+    refresh: bool = False,
+    current_user: dict = Depends(get_current_user),
+):
+    """返回完整工具健康状态；refresh=true 时重新探测版本与路径。"""
+    _require_superadmin(current_user)
+    items = await asyncio.to_thread(
+        get_tool_catalog().snapshot,
+        refresh=refresh,
+        include_version=True,
+    )
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item["status"]] = counts.get(item["status"], 0) + 1
+    return {"tools": items, "counts": counts, "manifest_schema_version": 1}
 
 
 @app.put("/api/superadmin/users/{user_id}/password")

@@ -16,6 +16,7 @@ from Tools.TonyDec import create_tonydec_tool
 from Tools.Vision import create_vision_analysis_tool
 from Tools.Volatility import create_volatility_tools
 from Tools.tooling import StrictJSONToolkit, create_scoped_shell_tool
+from Tools.tool_catalog import append_capability_summary, create_tool_catalog_tools
 from agent.experts import ARTIFACT_TRIAGE_EXPERT, NETWORK_RECON_EXPERT
 
 # ---------------------------------------------------------------------------
@@ -67,13 +68,14 @@ def create_network_recon_agent(
     tools = [
         create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root),
         create_cve_search_tool(),
+        *create_tool_catalog_tools("recon"),
     ]
     if vision_model is not None and vision_roots:
         tools.append(create_vision_analysis_tool(vision_model, vision_roots))
     toolkit = StrictJSONToolkit(tools=tools)
     return Agent(
         name=NETWORK_RECON_EXPERT,
-        system_prompt=NETWORK_RECON_SYS_PROMPT,
+        system_prompt=append_capability_summary(NETWORK_RECON_SYS_PROMPT, "recon"),
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
@@ -135,13 +137,14 @@ def create_artifact_triage_agent(
             create_tesseract_ocr_tool(workdir, timeout=min(timeout, 90)),
             create_tonydec_tool(workdir),
             *create_volatility_tools((workdir,), timeout=max(timeout, 300)),
+            *create_tool_catalog_tools("triage"),
         ]
     if vision_model is not None:
         tools.append(create_vision_analysis_tool(vision_model, vision_roots or (workdir,)))
     toolkit = StrictJSONToolkit(tools=tools)
     return Agent(
         name=ARTIFACT_TRIAGE_EXPERT,
-        system_prompt=ARTIFACT_TRIAGE_SYS_PROMPT,
+        system_prompt=append_capability_summary(ARTIFACT_TRIAGE_SYS_PROMPT, "triage"),
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),

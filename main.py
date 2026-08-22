@@ -61,6 +61,7 @@ from Tools.Report import (  # 任务总结 Markdown 规范化与 PDF 报告生�
 )
 from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
 from Tools.KnowledgeBase import get_rag_service
+from Tools.tool_catalog import get_tool_catalog
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
 from agent.context import (  # 内部 Agent 的统一 Offloader/ContextConfig/角色状态
     build_agent_context_config,
@@ -1061,6 +1062,20 @@ async def run_mission(
         mission.record(
             "system", "mission_created", model=f"{provider}/{model_ver}",
             qwen_tool_call_mode=(runtime.qwen_tool_call_mode if provider == "qwen" else None),
+        )
+        available_commands = [
+            {
+                key: item[key]
+                for key in ("id", "command", "category", "roles", "risk", "approval_required")
+            }
+            for item in get_tool_catalog().snapshot()
+            if item["status"] == "available"
+        ]
+        mission.record(
+            "system",
+            "tool_capability_snapshot",
+            manifest_schema_version=1,
+            available_commands=available_commands,
         )
         if event_callback is not None:
             mission.bind_phase_callback(

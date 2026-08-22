@@ -9,6 +9,7 @@ import json
 import os
 import re
 import signal
+import shlex
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
@@ -525,11 +526,15 @@ def _clean_thinking_delta(delta: str) -> str:
     if _EMPTY_TAG.fullmatch(delta) or not delta.strip():
         return ""
     return delta
-_NETWORK_TOOLS = re.compile(
-    r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:nmap|curl|wget|whatweb|nikto|gobuster|dirb|"
-    r"ffuf|sqlmap|hydra|nc|netcat|ssh|scp|msfconsole)\b",
-    re.IGNORECASE,
-)
+_NETWORK_TOOL_NAMES = frozenset({
+    "nmap", "masscan", "amass", "subfinder", "theharvester", "dnsrecon",
+    "feroxbuster", "curl", "wget", "whatweb", "nikto", "gobuster", "dirb",
+    "ffuf", "wfuzz", "wpscan", "joomscan", "sqlmap", "commix", "hydra",
+    "medusa", "netexec", "crackmapexec", "evil-winrm", "certipy",
+    "certipy-ad", "bloodhound-python", "responder", "tcpdump", "tshark",
+    "bettercap", "aircrack-ng", "nc", "netcat", "ssh", "scp", "socat",
+    "msfconsole",
+})
 _DENIED = [
     re.compile(r"\brm\s+-[^\n]*r[^\n]*f\s+/(?:\s|$)"),
     re.compile(r"\b(?:reboot|shutdown|poweroff|halt)\b", re.IGNORECASE),
@@ -561,6 +566,30 @@ def _parse_target(target: str) -> tuple[str | None, str | None]:
             pass
     # hostname 或无端口的目标
     return None, target
+
+
+def _command_invokes_network_tool(command: str) -> bool:
+    """按 shell 词法识别每个命令段的网络工具，支持绝对路径和 sudo/env。
+
+    这里只负责识别是否应触发目标存在性检查；实际执行仍由 scoped_shell，
+    IP/域名范围继续交给 ScopeRegistry 判断。
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        # 引号不闭合最终也无法由 shell 正常、安全执行，提前拒绝。
+        raise ValueError("命令包含不完整的 shell 引号") from None
+
+    for token in tokens:
+        if token and all(char in ";&|" for char in token):
+            continue
+        # 扫描整个命令段而非只看第一个 token，可覆盖 sudo -u、env -i、
+        # timeout --signal 等包装形式。少量保守误报优于范围校验绕过。
+        if Path(token).name.lower() in _NETWORK_TOOL_NAMES:
+            return True
+    return False
 
 
 def _validate_scoped_command(
@@ -608,7 +637,7 @@ def _validate_scoped_command(
             raise PermissionError(f"命令包含授权范围外 IP: {', '.join(sorted(foreign_ips))}")
 
     # ── 网络工具目标检查 ──
-    if _NETWORK_TOOLS.search(command):
+    if _command_invokes_network_tool(command):
         if target_id in command or target in command:
             return
         if registry is not None and registry.is_any_target_in_command(command):

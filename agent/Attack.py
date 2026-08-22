@@ -24,6 +24,7 @@ from Tools.TonyDec import create_tonydec_tool
 from Tools.Vision import create_vision_analysis_tool
 from Tools.Volatility import create_volatility_tools
 from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool, run_interruptible_agent_reply
+from Tools.tool_catalog import append_capability_summary, create_tool_catalog_tools
 from agent.experts import attack_expert_name
 
 logger = logging.getLogger(__name__)
@@ -307,6 +308,7 @@ async def create_attack_agent(
             create_tesseract_ocr_tool(project_dir, timeout=min(timeout, 90)),
             create_tonydec_tool(project_dir),
             *antsword_tools,
+            *create_tool_catalog_tools("attack"),
         ]
     if vision_model is not None and vision_roots:
         tools.append(create_vision_analysis_tool(vision_model, vision_roots))
@@ -326,7 +328,7 @@ async def create_attack_agent(
             str((category_decision or {}).get("target_kind") or ""),
             expert_context,
         ),
-        system_prompt=ATTACK_SYS_PROMPT,
+        system_prompt=append_capability_summary(ATTACK_SYS_PROMPT, "attack"),
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
@@ -344,7 +346,11 @@ async def close_attack_agent(agent: Agent | None) -> None:
     if agent is None:
         return
     client = getattr(agent, "_antsword_mcp_client", None)
-    if client is not None and client.is_stateful and client.is_connected:
+    if (
+        client is not None
+        and getattr(client, "is_stateful", True)
+        and getattr(client, "is_connected", True)
+    ):
         try:
             await client.close()
         except RuntimeError:

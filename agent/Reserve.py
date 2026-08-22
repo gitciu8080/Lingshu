@@ -21,6 +21,7 @@ from agent.Attack import _build_skill_list
 from Tools.IntelPwn import create_intelpwn_tool
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool, run_interruptible_agent_reply
+from Tools.tool_catalog import append_capability_summary, create_tool_catalog_tools
 from Tools.Vision import create_vision_analysis_tool
 from agent.experts import REVERSE_EXPERT
 
@@ -382,6 +383,7 @@ async def create_reverse_agent(
             AllowedFunctionTool(gdb_load_core, is_read_only=True),
             *exposed_ida_tools,
             *exposed_gdb_tools,
+            *create_tool_catalog_tools("reserve"),
         ]
     if vision_model is not None and vision_roots:
         tools.append(create_vision_analysis_tool(vision_model, vision_roots))
@@ -391,7 +393,7 @@ async def create_reverse_agent(
     )
     agent = Agent(
         name=REVERSE_EXPERT,
-        system_prompt=RESERVE_SYS_PROMPT,
+        system_prompt=append_capability_summary(RESERVE_SYS_PROMPT, "reserve"),
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
