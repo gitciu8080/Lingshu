@@ -1470,6 +1470,7 @@ async def run_mission(
             exploitation_approved=lambda: mission.exploitation_approved,
             vision_model=vision_model,
             vision_roots=vision_roots,
+            forensic_roots=vision_roots,
         )
 
         reserve = await create_reverse_agent(

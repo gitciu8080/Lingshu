@@ -14,6 +14,7 @@ from Tools.OCR import create_tesseract_ocr_tool
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.TonyDec import create_tonydec_tool
 from Tools.Vision import create_vision_analysis_tool
+from Tools.Volatility import create_volatility_tools
 from Tools.tooling import StrictJSONToolkit, create_scoped_shell_tool
 from agent.experts import ARTIFACT_TRIAGE_EXPERT, NETWORK_RECON_EXPERT
 
@@ -96,6 +97,9 @@ ARTIFACT_TRIAGE_SYS_PROMPT = """你是 CTF 文件分析专家（ArtifactTriage�
 - 对图片、截图或扫描文档可调用 ocr_image，使用 Tesseract 提取文本。
 - 发现图片、截图、图表、二维码、界面或视觉型题目时，主动调用 analyze_image
   理解画面语义和安全线索；需要逐字提取时再用 ocr_image 交叉验证。
+- 发现 .raw/.mem/.vmem/.dmp 等内存镜像时，使用 volatility_analyze：先运行
+  imageinfo 或 kdbgscan 确认 profile，再运行 pslist/psscan、netscan、cmdline、
+  consoles、filescan、malfind 等取证插件。不得凭文件扩展名猜测 profile。
 - 若文件头完整匹配 6688ff4f6886005611611618，调用 tonydec 解码到新的输出路径，
   再用 file/xxd/strings 确认真实格式；未匹配时不得猜测为 TonyEnc。
 - 绝不直接执行二进制文件（./chall 等）— 这属于 Attack 阶段的职责。
@@ -130,6 +134,7 @@ def create_artifact_triage_agent(
             create_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root),
             create_tesseract_ocr_tool(workdir, timeout=min(timeout, 90)),
             create_tonydec_tool(workdir),
+            *create_volatility_tools((workdir,), timeout=max(timeout, 300)),
         ]
     if vision_model is not None:
         tools.append(create_vision_analysis_tool(vision_model, vision_roots or (workdir,)))

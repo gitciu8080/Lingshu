@@ -22,6 +22,7 @@ from Tools.SageMath import execute_sagemath
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.TonyDec import create_tonydec_tool
 from Tools.Vision import create_vision_analysis_tool
+from Tools.Volatility import create_volatility_tools
 from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool, run_interruptible_agent_reply
 from agent.experts import attack_expert_name
 
@@ -68,6 +69,9 @@ ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
    每次调用为全新会话，变量不持久化，必须用 print() 输出结果。
 9. analyze_image：理解授权工作区内的图片、网页截图、图表、二维码和视觉题目；
    发现相关图片时应主动调用，精确文字再用 ocr_image 复核。
+10. volatility_analyze：使用 Python 2 的 Volatility 2.6 分析授权内存镜像；
+    先 imageinfo/kdbgscan 确定 profile，再按证据调用进程、网络、命令历史、
+    文件扫描和恶意注入检测插件。仅数字取证/恶意代码任务会挂载该工具。
 
 工作原则：
 - 先调用 analysis 获取独立研判；候选 CVE 应再用 cve_search 核验。
@@ -253,6 +257,7 @@ async def create_attack_agent(
     exploitation_approved: Callable[[], bool] | None = None,
     vision_model=None,
     vision_roots: tuple[str | Path, ...] = (),
+    forensic_roots: tuple[str | Path, ...] = (),
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -305,6 +310,12 @@ async def create_attack_agent(
         ]
     if vision_model is not None and vision_roots:
         tools.append(create_vision_analysis_tool(vision_model, vision_roots))
+    categories = {
+        str((category_decision or {}).get("primary") or ""),
+        *[str(item) for item in (category_decision or {}).get("secondary", [])],
+    }
+    if categories.intersection({"forensics", "malware"}) and forensic_roots:
+        tools.extend(create_volatility_tools(forensic_roots, timeout=max(timeout, 300)))
     toolkit = StrictJSONToolkit(
         tools=tools,
         skills_or_loaders=skill_list,

@@ -104,7 +104,10 @@ _FILE_SIGNAL_WEIGHT = 10
 _EXTENSION_SIGNALS: dict[str, list[str]] = {
     "pwn": [".elf"],
     "reverse": [".exe", ".dll", ".apk", ".dex", ".class", ".wasm", ".so", ".ko"],
-    "forensics": [".pcap", ".pcapng", ".raw", ".img", ".dd", ".mem", ".vmem"],
+    "forensics": [
+        ".pcap", ".pcapng", ".raw", ".img", ".dd", ".mem", ".vmem",
+        ".dmp", ".lime", ".hiber", ".hpak", ".vmss", ".vmsn",
+    ],
     "crypto": [".pem", ".key", ".cer", ".crt", ".asc", ".gpg"],
     "misc": [".py", ".js", ".sh", ".jar", ".tar", ".zip", ".gz"],
 }

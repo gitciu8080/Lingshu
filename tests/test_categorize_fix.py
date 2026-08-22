@@ -103,6 +103,17 @@ class ClassifyRoutingTest(unittest.TestCase):
         decision = classify(spec, "分析网络流量", manifest)
         self.assertEqual(decision.primary, "forensics")
 
+    def test_memory_dump_routes_to_forensics(self) -> None:
+        path = _zip_file("memory_task.zip")
+        spec = normalize_target(str(path))
+        manifest = {
+            "file_count": 2,
+            "total_bytes": 4096,
+            "files": ["host-memory.dmp", "notes.txt"],
+        }
+        decision = classify(spec, "分析附件并恢复取证证据", manifest)
+        self.assertEqual(decision.primary, "forensics")
+
     def test_web_goal_routes_to_web(self) -> None:
         spec = normalize_target("http://10.0.0.1:8080")
         decision = classify(spec, "枚举 HTTP 路由并验证 Web 漏洞")
