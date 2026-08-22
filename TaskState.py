@@ -358,6 +358,10 @@ class MissionState:
     action_budget: BudgetState = field(default_factory=BudgetState)
     tool_budget: BudgetState = field(default_factory=BudgetState)
 
+    # RAG 是参考知识而非当前任务事实。保存最近一次有界检索结果及其状态指纹，
+    # 供 Brain/Orchestrator/Attack 共享；不得自动并入 facts/evidence_records。
+    knowledge_context: dict[str, Any] = field(default_factory=dict)
+
     def record(self, actor: str, action: str, **details: Any) -> None:
         self.updated_at = _now()
         # 深拷贝 details：防止调用方后续修改污染已写入审计链的事件
@@ -825,6 +829,14 @@ class MissionState:
                 ],
             },
             "working_context": {
+                "knowledge_reference": {
+                    "label": "仅供参考，不能作为已验证 Facts/Evidence",
+                    "query": str(self.knowledge_context.get("query") or "")[:1200],
+                    "reason": str(self.knowledge_context.get("reason") or "")[:500],
+                    "phase": str(self.knowledge_context.get("phase") or ""),
+                    "context": str(self.knowledge_context.get("context") or "")[:3600],
+                    "sources": list(self.knowledge_context.get("sources") or [])[:4],
+                } if self.knowledge_context.get("context") else {},
                 "plan_items": _bounded_data(current_plans),
                 "evidence": [
                     {
@@ -875,7 +887,7 @@ class MissionState:
 
 # MissionStore 持久化 schema 版本。旧文件缺字段时由 load() 自动迁移，
 # 不回写（保持旧任务只读兼容）。
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # v1: 初始字段（target/goal/phase/plan/findings/attack_chain/flag/...）
 # v2: v0.2.0 新增 target_spec/category_decision/category_history/
@@ -887,6 +899,7 @@ SCHEMA_VERSION = 5
 # v4: v0.4.0 最小优化闭环新增 facts/evidence_records/attempts/
 #     complexity/action_budget/tool_budget
 # v5: 第二批执行闭环新增 hypotheses/action_history/failed_paths 及序列号
+# v6: RAG 有界 Knowledge Context、查询指纹与共享缓存状态
 
 
 class MissionStoreCorruptedError(OSError):

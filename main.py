@@ -70,7 +70,7 @@ from Tools.Report import (  # 任务总结 Markdown 规范化与 PDF 报告生�
     prepare_mission_report_markdown,
 )
 from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
-from Tools.KnowledgeBase import get_rag_service
+from Tools.KnowledgeBase import build_retrieval_request, get_rag_service
 from Tools.tool_catalog import get_tool_catalog
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
 from agent.context import (  # 内部 Agent 的统一 Offloader/ContextConfig/角色状态
@@ -1694,18 +1694,107 @@ async def run_mission(
         # Brain 通过 SubmitPlan 一次原子提交完整计划，避免 Qwen 长工具参数
         # 被拆成多次 AddPlan 后留下半份持久化状态。
         rag_service = get_rag_service(project_dir)
-        # Brain 只有在初始分类不确定且任务复杂时才需要历史知识辅助；正式分类
-        # 清晰时仅使用首轮 Recon Facts，避免每个任务都启动向量库/Embedding。
-        brain_needs_rag = (
-            complexity == "complex"
-            and (
-                category_decision.primary == "unknown"
-                or category_decision.confidence < 0.55
+
+        async def _ensure_knowledge_context(consumer: str, focus: str = "") -> str:
+            """按当前状态检索/复用知识，并持久化有界参考 Context。"""
+            request = build_retrieval_request(
+                mission, consumer=consumer, focus=focus,
             )
-        )
-        if brain_needs_rag:
-            await rag_service.start()
-        brain_rag_middleware = rag_service.middleware() if brain_needs_rag else None
+            if not request["needed"]:
+                print(
+                    f"[RAG] 是否触发=否，注入目标={consumer}，"
+                    f"原因={request['reason']}"
+                )
+                # 当前状态已无知识缺口时让旧 Context 失效，防止 context_layers
+                # 继续注入上一阶段的参考内容。审计事件仍保留历史可追溯性。
+                mission.knowledge_context = {
+                    **request, "status": "skipped", "context": "",
+                    "result_count": 0, "filtered_count": 0, "sources": [],
+                }
+                mission.record(
+                    "system", "rag_skipped", consumer=consumer,
+                    reason=request["reason"],
+                )
+                store.save(mission)
+                return ""
+
+            cached = mission.knowledge_context
+            if (
+                cached.get("cache_key") == request["cache_key"]
+                and cached.get("status") in {"ready", "empty", "error"}
+            ):
+                context = str(cached.get("context") or "")
+                print(
+                    "[RAG] 是否缓存命中=是，是否复用已有 Knowledge Context=是，"
+                    f"注入目标={consumer}，"
+                    f"过滤后数量={int(cached.get('filtered_count') or 0)}"
+                )
+                mission.record(
+                    "system", "rag_cache_hit", consumer=consumer,
+                    cache_key=request["cache_key"],
+                    filtered_count=int(cached.get("filtered_count") or 0),
+                )
+                if context:
+                    print(f"[RAG] 是否进入 Context=是，注入到={consumer}")
+                    mission.record(
+                        "system", "rag_context_injected", consumer=consumer,
+                        cache_hit=True,
+                    )
+                store.save(mission)
+                return context
+
+            print(
+                f"[RAG] 是否触发=是，注入目标={consumer}，"
+                f"原因={request['reason']}"
+            )
+            print(f"[RAG] Query={request['query'].replace(chr(10), ' | ')}")
+            try:
+                if not rag_service.started:
+                    await rag_service.start()
+                if not rag_service.available:
+                    raise RuntimeError(rag_service.error or "知识库不可用")
+                retrieved = await rag_service.retrieve_context(request["query"])
+                context = str(retrieved.get("context") or "")
+                mission.knowledge_context = {
+                    **request,
+                    **retrieved,
+                    "status": "ready" if context else "empty",
+                }
+                mission.record(
+                    "system", "rag_retrieved", consumer=consumer,
+                    reason=request["reason"], query=request["query"],
+                    result_count=int(retrieved.get("result_count") or 0),
+                    filtered_count=int(retrieved.get("filtered_count") or 0),
+                    cache_key=request["cache_key"],
+                )
+                print(
+                    f"[RAG] 检索结果数量={int(retrieved.get('result_count') or 0)}，"
+                    f"过滤后数量={int(retrieved.get('filtered_count') or 0)}，"
+                    "是否缓存命中=否"
+                )
+                if context:
+                    print(f"[RAG] 是否进入 Context=是，注入到={consumer}")
+                    mission.record(
+                        "system", "rag_context_injected", consumer=consumer,
+                        cache_hit=False,
+                    )
+                else:
+                    print("[RAG] 是否进入 Context=否，原因=过滤后无结果")
+                store.save(mission)
+                return context
+            except Exception as exc:  # RAG 是可选参考层，失败不阻断主任务
+                mission.knowledge_context = {
+                    **request, "status": "error", "context": "",
+                    "result_count": 0, "filtered_count": 0, "sources": [],
+                    "error": str(exc)[:500],
+                }
+                mission.record(
+                    "system", "rag_retrieval_failed", consumer=consumer,
+                    reason=request["reason"], error=str(exc)[:500],
+                )
+                store.save(mission)
+                logger.warning("[RAG] 检索失败，已安全降级: %s", exc)
+                return ""
         # AgentWorld 等本地 Qwen 对扁平参数工具更可靠；标准模式用于验证
         # 嵌套批量工具协议。DeepSeek 始终保持原子 SubmitPlan。
         qwen_flat_plan_tools = (
@@ -1723,7 +1812,9 @@ async def run_mission(
             max_iters=(15 if qwen_flat_plan_tools else _iter_budget(
                 target_spec.kind, "brain", complexity,
             )),
-            rag_middleware=brain_rag_middleware,
+            # 检索由 run_mission 在首轮 Recon 后确定性执行并显式注入，避免
+            # agentic middleware 是否被模型调用不可观测及 Brain/Attack 重复检索。
+            rag_middleware=None,
             plan_tool_mode="item" if qwen_flat_plan_tools else "batch",
             offloader=workspace,
             context_config=_role_context("brain"),
@@ -1846,6 +1937,13 @@ async def run_mission(
                 f"accepted={reclassification.accepted}；{reclassification.reason}"
             )
 
+        # 首轮 Recon 后再判断知识缺口，保证 Query 使用最终分类与真实 Facts。
+        # 该 Context 是参考知识，不写入 Facts/Evidence。
+        brain_knowledge_context = await _ensure_knowledge_context(
+            "Brain",
+            "基于首轮 Recon 的最终分类与信息缺口制定下一步分析、验证和回退计划",
+        )
+
         # ── 7. Brain 战略规划（使用 Recon 后最终分类）──
         # 把授权目标、任务目标与初始分类打包成提示词，交给 Brain 制定阶段计划。
         # 设计要点：Brain 只能「建议」修正题型（proposed_category + reason），
@@ -1871,6 +1969,13 @@ async def run_mission(
             plan_prompt += (
                 f"\n## 前次任务上下文（同一目标重跑，供参考以避开失败路径）\n"
                 f"{initial_context}\n"
+            )
+        if brain_knowledge_context:
+            plan_prompt += (
+                "\n## Knowledge Context（本地知识库参考，不是当前目标事实/证据）\n"
+                f"{brain_knowledge_context}\n"
+                "只能把以上内容作为候选方法和检查清单；所有判断仍需由当前任务的 "
+                "Facts/Evidence 验证。\n"
             )
         plan_prompt += (
             "\n你的任务：\n"
@@ -1977,9 +2082,6 @@ async def run_mission(
         ])
 
         async def _load_attack_agent():
-            # RAG 只属于实际进入 Attack 的任务；Brain 未使用时在这里惰性启动。
-            if not rag_service.started:
-                await rag_service.start()
             mission.record(
                 "system", "agent_capability_loaded",
                 role="attack", category=(mission.category_decision or {}).get("primary"),
@@ -1996,7 +2098,9 @@ async def run_mission(
                 max_iters=_iter_budget(
                     target_spec.kind, "attack", complexity, len(mission.plan_items),
                 ),
-                rag_middleware=rag_service.middleware(),
+                # Attack 使用 MissionState 中共享的有界 Knowledge Context；
+                # 新知识缺口由 Orchestrator 调度前的 provider 按状态指纹刷新。
+                rag_middleware=None,
                 expert_context=mission.plan[:2000],
                 event_callback=event_callback,
                 offloader=workspace,
@@ -2080,6 +2184,7 @@ async def run_mission(
             steering_state=steering,
             nss_context=nss_context,
             slab_context=slab_context,
+            knowledge_context_provider=_ensure_knowledge_context,
             max_iters=20 if complexity == "simple" else 30,
             offloader=workspace,
             context_config=_role_context("orchestrator"),
@@ -2099,6 +2204,16 @@ async def run_mission(
                 f"避免重复完整攻击链。"
             )
             mission.record("system", "context_injected", source="rerun")
+        if mission.knowledge_context.get("context"):
+            print(
+                "[RAG] 是否复用已有 Knowledge Context=是，"
+                "是否进入 Context=是，注入到=Orchestrator"
+            )
+            mission.record(
+                "system", "rag_context_injected",
+                consumer="Orchestrator", cache_hit=True,
+            )
+            store.save(mission)
         # ── Orchestrator 主循环（steering 由 dispatcher 层 + 此处兜底处理） ──
         orch_content = (
             f"执行以下已授权任务。\n目标：{mission.target}\n目标要求：{mission.goal}\n\n"

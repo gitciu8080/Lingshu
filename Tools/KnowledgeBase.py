@@ -8,10 +8,106 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import re
 from pathlib import Path
 from typing import Any
 
 from config import RuntimeConfig
+
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_FETCH_K = 8
+_DEFAULT_CONTEXT_K = 4
+_DEFAULT_SCORE_THRESHOLD = 0.25
+_DEFAULT_ITEM_CHARS = 800
+_DEFAULT_CONTEXT_CHARS = 3600
+
+
+def build_retrieval_request(
+    mission: Any,
+    *,
+    consumer: str,
+    focus: str = "",
+) -> dict[str, Any]:
+    """基于当前知识缺口构造确定性的检索请求，不额外调用 LLM。
+
+    返回 ``needed/reason/query/cache_key``。Query 只包含当前任务、阶段、题型、
+    有界 Facts/Hypotheses 和本轮问题，不携带完整对话或工具历史。
+    """
+    category = dict(getattr(mission, "category_decision", None) or {})
+    primary = str(category.get("primary") or "unknown")
+    secondary = [str(item) for item in category.get("secondary") or []][:3]
+    confidence = float(category.get("confidence") or 0.0)
+    complexity = str(getattr(mission, "complexity", "complex") or "complex")
+    phase_obj = getattr(mission, "phase", "planning")
+    phase = str(getattr(phase_obj, "value", phase_obj))
+    facts = [str(getattr(item, "content", ""))[:300] for item in getattr(mission, "facts", [])[-5:]]
+    hypotheses = [
+        str(getattr(item, "statement", ""))[:300]
+        for item in getattr(mission, "hypotheses", [])[-3:]
+        if str(getattr(item, "status", "")) not in {"rejected", "confirmed"}
+    ]
+    bounded_focus = " ".join(str(focus).split())[:600]
+
+    reasons: list[str] = []
+    if primary == "unknown" or confidence < 0.70:
+        reasons.append("题型或技术路线仍不确定")
+    if secondary:
+        reasons.append("存在多个候选题型")
+    if complexity == "complex" and len(facts) < 2:
+        reasons.append("复杂任务的已验证 Facts 仍稀疏")
+    if hypotheses:
+        reasons.append("存在待验证 Hypothesis 的方法知识缺口")
+    if bounded_focus and re.search(
+        r"CVE-\d{4}-\d+|SQLi?|SSTI|SSRF|XXE|JWT|RCE|ROP|ret2\w+|"
+        r"反序列化|目录穿越|文件包含|缓冲区溢出|格式化字符串|栈迁移|"
+        r"特定协议|特定算法|认证绕过|权限绕过|payload",
+        bounded_focus,
+        re.IGNORECASE,
+    ):
+        reasons.append("当前问题需要具体方法或机制参考")
+
+    # 清晰、简单且已有足够证据的任务不启动 RAG。
+    needed = bool(reasons)
+    gap = "；".join(dict.fromkeys(reasons))
+    parts = [
+        f"任务目标：{str(getattr(mission, 'goal', ''))[:700]}",
+        f"当前阶段：{phase}",
+        f"当前题型：{primary}",
+    ]
+    if secondary:
+        parts.append(f"候选题型：{', '.join(secondary)}")
+    if facts:
+        parts.append("当前已验证 Facts：" + "；".join(facts))
+    if hypotheses:
+        parts.append("待验证 Hypothesis：" + "；".join(hypotheses))
+    if bounded_focus:
+        parts.append(f"当前问题：{bounded_focus}")
+    if gap:
+        parts.append(f"知识缺口：{gap}")
+    query = "\n".join(parts)
+    fingerprint_payload = {
+        "phase": phase,
+        "primary": primary,
+        "secondary": secondary,
+        "facts": facts,
+        "hypotheses": hypotheses,
+        "focus": bounded_focus,
+        "goal": str(getattr(mission, "goal", ""))[:700],
+    }
+    cache_key = hashlib.sha256(
+        json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+    ).hexdigest()
+    return {
+        "needed": needed,
+        "reason": gap or "当前信息足够，无需知识检索",
+        "query": query,
+        "cache_key": cache_key,
+        "phase": phase,
+        "consumer": consumer.lower(),
+    }
 
 
 class RAGService:
@@ -372,6 +468,75 @@ class RAGService:
                 "snippet": text[:1200],
             })
         return output
+
+    async def retrieve_context(
+        self,
+        query: str,
+        *,
+        fetch_k: int = _DEFAULT_FETCH_K,
+        context_k: int = _DEFAULT_CONTEXT_K,
+        score_threshold: float = _DEFAULT_SCORE_THRESHOLD,
+        max_item_chars: int = _DEFAULT_ITEM_CHARS,
+        max_context_chars: int = _DEFAULT_CONTEXT_CHARS,
+    ) -> dict[str, Any]:
+        """检索并生成有界 Knowledge Context。
+
+        处理顺序为 Top-K 获取、相似度过滤、内容去重、单条截断、总量截断。
+        返回内容始终标记为参考知识，调用方不得将其写成 Facts/Evidence。
+        """
+        raw = await self.search(query, top_k=max(1, min(fetch_k, 10)))
+        filtered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw:
+            snippet = " ".join(str(item.get("snippet") or "").split())
+            score = float(item.get("score") or 0.0)
+            if not snippet or score < score_threshold:
+                continue
+            dedup_key = hashlib.sha256(snippet.lower().encode("utf-8")).hexdigest()
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            filtered.append({
+                "score": score,
+                "source": str(item.get("source") or "未知来源")[:300],
+                "snippet": snippet[:max_item_chars],
+            })
+            if len(filtered) >= max(1, context_k):
+                break
+
+        blocks: list[str] = []
+        used = 0
+        kept: list[dict[str, Any]] = []
+        for index, item in enumerate(filtered, 1):
+            block = (
+                f"[K{index}] 来源：{item['source']}；相关度：{item['score']:.3f}\n"
+                f"{item['snippet']}"
+            )
+            remaining = max_context_chars - used
+            if remaining <= 0:
+                break
+            if len(block) > remaining:
+                block = block[:remaining].rstrip()
+            if not block:
+                break
+            blocks.append(block)
+            kept.append(item)
+            used += len(block) + 2
+
+        context = "\n\n".join(blocks)
+        logger.info(
+            "[RAG] 检索结果数量=%d，过滤后数量=%d，Context字符数=%d",
+            len(raw), len(kept), len(context),
+        )
+        return {
+            "context": context,
+            "result_count": len(raw),
+            "filtered_count": len(kept),
+            "sources": [item["source"] for item in kept],
+            "score_threshold": score_threshold,
+            "fetch_k": max(1, min(fetch_k, 10)),
+            "context_k": max(1, context_k),
+        }
 
 
 _service: RAGService | None = None

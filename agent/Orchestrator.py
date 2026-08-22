@@ -68,6 +68,7 @@ def create_orchestrator_agent(
     slab_context: dict[str, Any] | None = None,
     max_iters: int = 30,
     *,
+    knowledge_context_provider: Callable[[str, str], Awaitable[str]] | None = None,
     offloader=None,
     context_config=None,
     state=None,
@@ -178,7 +179,18 @@ def create_orchestrator_agent(
         )
         mission.transition(Phase.ANALYSIS, "收到新的侦察证据")
         store.checkpoint(mission, "recon_report_received")
-        return f"[Recon 侦察报告]\n{report}"
+        knowledge_note = ""
+        if knowledge_context_provider is not None:
+            knowledge = await knowledge_context_provider(
+                "Orchestrator",
+                f"Recon 新证据后的知识缺口：{focus[:1000]}",
+            )
+            if knowledge:
+                knowledge_note = (
+                    "\n\n[Knowledge Context 更新（仅供参考，不是事实/证据）]\n"
+                    f"{knowledge}"
+                )
+        return f"[Recon 侦察报告]\n{report}{knowledge_note}"
 
     async def dispatch_attack(
         target_info: str,
@@ -280,6 +292,18 @@ def create_orchestrator_agent(
         mission.record("Orchestrator", "dispatch_attack", objective=objective)
         store.checkpoint(mission, "attack_dispatch_before")
         store.save(mission)
+        attack_knowledge = ""
+        if knowledge_context_provider is not None:
+            attack_knowledge = await knowledge_context_provider(
+                "Attack",
+                f"本轮目标：{objective[:700]}；服务：{service[:300]}；CVE：{cve[:80]}",
+            )
+        knowledge_section = (
+            "\n\nKnowledge Context（本地知识库参考，不是当前目标事实/证据）：\n"
+            f"{attack_knowledge}\n"
+            "必须用真实目标信息核验，不能把该参考直接写成已验证结论。"
+            if attack_knowledge else ""
+        )
         try:
             result = await run_interruptible_agent_reply(
                 attack_agent,
@@ -288,6 +312,7 @@ def create_orchestrator_agent(
                     content=(
                         f"授权目标：{mission.target}\n本轮目标：{objective[:1500]}\n\n"
                         f"真实目标信息（当前相关证据）：\n{target_info[:8000]}\n\n"
+                        f"{knowledge_section}\n\n"
                         "完成分析/验证后立即输出最终报告，禁止继续调用工具。"
                     ),
                 ),
