@@ -97,6 +97,12 @@ ORCHESTRATOR_SYS_PROMPT = """# 网络安全行动总指挥（Orchestrator）
 - 作战计划需通过AddPlan/UpdatePlan维护，禁止无证据标记完成
 - 禁止伪造任务结果，未完成任务需明确标注失败状态
 
+## Hypothesis / Failed Path 执行纪律
+- 对需要验证的判断先调用 manage_hypothesis(propose)，后续 dispatch_* 传入 hypothesis_id。
+- 每轮先读取当前有效 Hypothesis 与近期 Failed Paths；rejected 假设必须停止原路径。
+- transient 才允许原参数 Retry；parameter 必须改参数；tool/environment/method 必须 Fallback。
+- 工具返回的 Action Dedup/Failed Path 提示是确定性约束，不得仅改写自然语言绕过。
+
 （注：所有计算型任务的输出参数必须由智能体返回，总指挥仅负责指令触发与流程控制）
 
 """
@@ -137,11 +143,15 @@ def create_orchestrator_agent(
             raise asyncio.CancelledError()
         return None
 
-    async def dispatch_recon(focus: str = "全面但低影响的信息收集") -> str:
+    async def dispatch_recon(
+        focus: str = "全面但低影响的信息收集",
+        hypothesis_id: str = "",
+    ) -> str:
         """派遣 Recon 对本次授权目标进行信息收集。
 
         Args:
             focus: 本轮需要补齐的具体信息或扫描重点。
+            hypothesis_id: 本动作要验证的结构化假设 ID；纯探索可留空。
         """
         # 入口检查：是否有待处理的用户指令（无需等待子 Agent 取消）
         msg = _check_steering()
@@ -153,7 +163,7 @@ def create_orchestrator_agent(
             "recon",
             recon_agent.name,
             mission.target,
-            {"focus": focus},
+            {"focus": focus, "hypothesis_id": hypothesis_id},
         )
         if attempt is None:
             store.save(mission)
@@ -228,6 +238,7 @@ def create_orchestrator_agent(
         objective: str = "漏洞分析",
         service: str = "",
         cve: str = "",
+        hypothesis_id: str = "",
     ) -> str:
         """派遣 Attack 分析或验证当前授权目标。
 
@@ -236,6 +247,7 @@ def create_orchestrator_agent(
             objective: 本轮目标，如漏洞分析、漏洞验证、获取初始访问或寻找 Flag。
             service: 侦察已确认的服务名（如 "Apache 2.4.49"），供长期记忆登记；未知留空。
             cve: 已确认的 CVE 编号（如 "CVE-2021-41773"），未确认不得填写。
+            hypothesis_id: 本动作要验证的结构化假设 ID。
         """
         msg = _check_steering()
         if msg is not None:
@@ -248,7 +260,8 @@ def create_orchestrator_agent(
         evidence_version = len(mission.findings) + len(mission.attack_chain)
         fingerprint = compute_action_fingerprint(
             "dispatch_attack", mission.target,
-            {"target_info": target_info, "objective": objective, "service": service, "cve": cve},
+            {"target_info": target_info, "objective": objective, "service": service, "cve": cve,
+             "hypothesis_id": hypothesis_id},
             objective, evidence_version,
         )
         if should_meltdown(mission.retry_counters, fingerprint):
@@ -303,6 +316,7 @@ def create_orchestrator_agent(
                 "objective": objective,
                 "service": service,
                 "cve": cve,
+                "hypothesis_id": hypothesis_id,
             },
         )
         if attempt is None:
@@ -394,12 +408,17 @@ def create_orchestrator_agent(
         store.checkpoint(mission, "attack_report_received")
         return f"[Attack 报告]\n{report}"
 
-    async def dispatch_reverse(binary_path: str, objective: str = "二进制逆向分析") -> str:
+    async def dispatch_reverse(
+        binary_path: str,
+        objective: str = "二进制逆向分析",
+        hypothesis_id: str = "",
+    ) -> str:
         """派遣 Reserve 对指定二进制文件执行逆向分析。
 
         Args:
             binary_path: 待分析二进制文件的绝对路径（如 /WorkDir/uploads/target.exe）。
             objective: 本轮分析目标，如反编译提取算法、寻找 Flag、分析恶意行为。
+            hypothesis_id: 本动作要验证的结构化假设 ID。
         """
         msg = _check_steering()
         if msg is not None:
@@ -411,7 +430,8 @@ def create_orchestrator_agent(
             "reverse",
             reserve_agent.name,
             mission.target,
-            {"binary_path": binary_path, "objective": objective},
+            {"binary_path": binary_path, "objective": objective,
+             "hypothesis_id": hypothesis_id},
         )
         if attempt is None:
             store.save(mission)
@@ -686,9 +706,76 @@ def create_orchestrator_agent(
             store.save(mission)
             return f"[拒绝] ScopeAuditor 拒绝了扩容请求。\n意见：{verdict}"
 
+    def manage_hypothesis(
+        operation: str,
+        hypothesis_id: str = "",
+        statement: str = "",
+        status: str = "",
+        confidence: float = -1.0,
+        supporting_evidence: list[str] | None = None,
+        opposing_evidence: list[str] | None = None,
+        next_validation: str = "",
+    ) -> dict:
+        """新增或更新结构化 Hypothesis。
+
+        Args:
+            operation: propose 或 update。
+            hypothesis_id: update 时必填，如 h1。
+            statement: propose 时的假设正文。
+            status: proposed/testing/supported/weakened/rejected/confirmed。
+            confidence: 0~1；不修改时传 -1。
+            supporting_evidence: 支持证据 ID 列表。
+            opposing_evidence: 反对证据 ID 列表。
+            next_validation: 下一步验证方向。
+        """
+        try:
+            if operation == "propose":
+                item = mission.add_hypothesis(
+                    statement, confidence=0.5 if confidence < 0 else confidence,
+                    next_validation=next_validation,
+                )
+            elif operation == "update":
+                item = mission.update_hypothesis(
+                    hypothesis_id,
+                    status=status or None,
+                    supporting_evidence=supporting_evidence,
+                    opposing_evidence=opposing_evidence,
+                    confidence=None if confidence < 0 else confidence,
+                    next_validation=next_validation if next_validation else None,
+                )
+            else:
+                return {"ok": False, "error": "operation 仅支持 propose/update"}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        store.save(mission)
+        return {"ok": True, "hypothesis": {
+            "id": item.id, "statement": item.statement, "status": item.status,
+            "confidence": item.confidence,
+            "supporting_evidence": item.supporting_evidence,
+            "opposing_evidence": item.opposing_evidence,
+            "related_actions": item.related_actions,
+            "next_validation": item.next_validation,
+        }}
+
     def view_mission_state() -> dict:
-        """查看当前结构化任务状态。"""
-        return mission.to_dict()
+        """查看有界决策状态；完整状态仍持久化，但不灌入 Agent Prompt。"""
+        return {
+            "target": mission.target, "goal": mission.goal,
+            "phase": mission.phase.value, "success": mission.success,
+            "active_plan_item": mission.active_plan_item,
+            "plan_items": mission.plan_items,
+            "facts": [item.content for item in mission.facts[-12:]],
+            "execution": mission.execution_context(limit=8),
+            "budgets": {
+                "action": {"used": mission.action_budget.used, "limit": mission.action_budget.limit},
+                "tool": {"used": mission.tool_budget.used, "limit": mission.tool_budget.limit},
+            },
+            "counts": {
+                "evidence": len(mission.evidence_records),
+                "actions": len(mission.action_history),
+                "failed_paths": len(mission.failed_paths),
+            },
+        }
 
     def complete_mission(success: bool, summary: str, flag: str = "") -> str:
         """结束任务并保存长期经验。
@@ -906,6 +993,7 @@ def create_orchestrator_agent(
         AllowedFunctionTool(dispatch_recon, is_concurrency_safe=False),
         AllowedFunctionTool(dispatch_attack, is_concurrency_safe=False),
         AllowedFunctionTool(dispatch_reverse, is_concurrency_safe=False),
+        AllowedFunctionTool(manage_hypothesis, is_concurrency_safe=False),
         AllowedFunctionTool(view_mission_state, is_read_only=True),
         create_add_plan_tool(mission, store, event_callback, default_origin="orchestrator"),
         create_update_plan_tool(mission, store, event_callback),

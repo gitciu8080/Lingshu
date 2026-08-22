@@ -61,6 +61,10 @@ _TOOL_BUDGET_HANDLER: ContextVar[
     Callable[[str], tuple[bool, str]] | None
 ] = ContextVar("lingshu_tool_budget_handler", default=None)
 
+_ACTION_LIFECYCLE_HANDLER: ContextVar[
+    Callable[[str, dict[str, Any]], dict[str, Any]] | None
+] = ContextVar("lingshu_action_lifecycle_handler", default=None)
+
 
 def bind_tool_json_failure_handler(
     handler: Callable[[dict[str, Any]], None],
@@ -84,6 +88,17 @@ def reset_tool_budget_handler(token: Token) -> None:
     _TOOL_BUDGET_HANDLER.reset(token)
 
 
+def bind_action_lifecycle_handler(
+    handler: Callable[[str, dict[str, Any]], dict[str, Any]],
+) -> Token:
+    """绑定统一工具/MCP 的 action 去重与结果闭环处理器。"""
+    return _ACTION_LIFECYCLE_HANDLER.set(handler)
+
+
+def reset_action_lifecycle_handler(token: Token) -> None:
+    _ACTION_LIFECYCLE_HANDLER.reset(token)
+
+
 class StrictJSONToolkit(Toolkit):
     """在 AgentScope 的宽松 JSON 修复器之前执行严格工具参数闸门。
 
@@ -100,20 +115,8 @@ class StrictJSONToolkit(Toolkit):
         tool_call: ToolCallBlock,
         state: AgentState,
     ):
-        budget_handler = _TOOL_BUDGET_HANDLER.get()
-        if budget_handler is not None:
-            allowed, message = budget_handler(tool_call.name)
-            if not allowed:
-                response = ToolResponse(id=tool_call.id)
-                chunk = ToolChunk(
-                    content=[TextBlock(text=message)],
-                    state=ToolResultState.ERROR,
-                )
-                yield chunk
-                yield response.append_chunk(chunk)
-                return
-
         validation_error: Exception | None = None
+        parsed: dict[str, Any] = {}
         try:
             def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
                 result: dict[str, Any] = {}
@@ -146,8 +149,84 @@ class StrictJSONToolkit(Toolkit):
 
         if validation_error is None:
             self._consecutive_json_failures = 0
-            async for chunk in super().call_tool(tool_call, state):
-                yield chunk
+            lifecycle_handler = _ACTION_LIFECYCLE_HANDLER.get()
+            lifecycle: dict[str, Any] = {}
+            if lifecycle_handler is not None:
+                lifecycle = lifecycle_handler(
+                    "before", {"tool_name": tool_call.name, "parameters": parsed},
+                ) or {}
+                decision = lifecycle.get("decision", "execute")
+                if decision in {"cached", "blocked"}:
+                    message = str(lifecycle.get("message") or "工具调用已被执行闭环拦截")
+                    response = ToolResponse(id=tool_call.id)
+                    chunk = ToolChunk(
+                        content=[TextBlock(text=message)],
+                        state=(
+                            ToolResultState.SUCCESS
+                            if decision == "cached" else ToolResultState.ERROR
+                        ),
+                    )
+                    yield chunk
+                    yield response.append_chunk(chunk)
+                    return
+
+            # 缓存命中/重复拦截不消耗预算；只有真正执行才计数。
+            budget_handler = _TOOL_BUDGET_HANDLER.get()
+            if budget_handler is not None:
+                allowed, message = budget_handler(tool_call.name)
+                if not allowed:
+                    if lifecycle_handler is not None and lifecycle.get("action_id"):
+                        lifecycle_handler("after", {
+                            "action_id": lifecycle["action_id"], "result": message,
+                            "raised": True, "tool_error": True,
+                        })
+                    response = ToolResponse(id=tool_call.id)
+                    chunk = ToolChunk(
+                        content=[TextBlock(text=message)],
+                        state=ToolResultState.ERROR,
+                    )
+                    yield chunk
+                    yield response.append_chunk(chunk)
+                    return
+
+            result_parts: list[str] = []
+            tool_error = False
+            try:
+                async for chunk in super().call_tool(tool_call, state):
+                    chunk_state = getattr(chunk, "state", None)
+                    if chunk_state == ToolResultState.ERROR:
+                        tool_error = True
+                    # AgentScope 随后还会产出包含累计内容的 ToolResponse；只从
+                    # 增量 ToolChunk 收集，避免结果在 Action/缓存中重复一遍。
+                    if isinstance(chunk, ToolChunk):
+                        for block in getattr(chunk, "content", None) or []:
+                            text_value = getattr(block, "text", None)
+                            if text_value and sum(map(len, result_parts)) < 8000:
+                                result_parts.append(str(text_value))
+                    yield chunk
+            except asyncio.CancelledError:
+                if lifecycle_handler is not None and lifecycle.get("action_id"):
+                    lifecycle_handler("after", {
+                        "action_id": lifecycle["action_id"],
+                        "result": "工具调用被用户指令或停止请求中断",
+                        "cancelled": True,
+                    })
+                raise
+            except BaseException as exc:
+                if lifecycle_handler is not None and lifecycle.get("action_id"):
+                    lifecycle_handler("after", {
+                        "action_id": lifecycle["action_id"],
+                        "result": f"{type(exc).__name__}: {exc}",
+                        "raised": True, "tool_error": True,
+                    })
+                raise
+            else:
+                if lifecycle_handler is not None and lifecycle.get("action_id"):
+                    lifecycle_handler("after", {
+                        "action_id": lifecycle["action_id"],
+                        "result": "".join(result_parts)[:8000],
+                        "raised": False, "tool_error": tool_error,
+                    })
             return
 
         self._consecutive_json_failures += 1

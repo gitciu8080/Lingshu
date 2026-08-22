@@ -63,6 +63,22 @@ def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat()
 
 
+def _bounded_data(value: Any, *, depth: int = 0) -> Any:
+    """限制执行历史中的参数体积，原始产物仍由现有 artifact 机制保存。"""
+    if depth >= 4:
+        return str(value)[:500]
+    if isinstance(value, dict):
+        return {
+            str(key)[:200]: _bounded_data(item, depth=depth + 1)
+            for key, item in list(value.items())[:40]
+        }
+    if isinstance(value, (list, tuple)):
+        return [_bounded_data(item, depth=depth + 1) for item in value[:40]]
+    if isinstance(value, str):
+        return value[:4000]
+    return copy.deepcopy(value)
+
+
 class Phase(str, Enum):
     PLANNING = "planning"
     RECON = "recon"
@@ -162,6 +178,74 @@ class AttemptRecord:
     information_gain: str = "none"
     started_at: str = field(default_factory=_now)
     completed_at: str = ""
+
+
+_HYPOTHESIS_STATUSES = {
+    "proposed", "testing", "supported", "weakened", "rejected", "confirmed",
+}
+_FAILURE_TYPES = {
+    "transient", "parameter", "tool", "environment", "method", "hypothesis_rejected",
+}
+
+
+@dataclass
+class HypothesisRecord:
+    """可随证据演进的行动假设。终态假设不会再驱动相同路径。"""
+
+    id: str
+    statement: str
+    status: str = "proposed"
+    supporting_evidence: list[str] = field(default_factory=list)
+    opposing_evidence: list[str] = field(default_factory=list)
+    confidence: float = 0.5
+    related_actions: list[str] = field(default_factory=list)
+    next_validation: str = ""
+    created_at: str = field(default_factory=_now)
+    updated_at: str = field(default_factory=_now)
+
+
+@dataclass
+class ActionRecord:
+    """统一 Function/MCP 调用记录；signature 不依赖 LLM。"""
+
+    id: str
+    signature: str
+    tool: str
+    target: str
+    context: str = ""
+    endpoint: str = ""
+    method: str = ""
+    parameters: dict[str, Any] = field(default_factory=dict)
+    payload: str = ""
+    command: str = ""
+    hypothesis_id: str = ""
+    status: str = "running"
+    result_summary: str = ""
+    result_valid: bool = False
+    retry_count: int = 0
+    decision: str = "execute"
+    created_at: str = field(default_factory=_now)
+    completed_at: str = ""
+
+
+@dataclass
+class FailedPathRecord:
+    """一次失败的结构化记忆，用于 Retry/Fallback/停止路径决策。"""
+
+    id: str
+    action_id: str
+    action: str
+    tool: str
+    context: str
+    parameters: dict[str, Any]
+    failure_type: str
+    failure_reason: str
+    result: str
+    related_hypothesis: str = ""
+    retry_count: int = 0
+    resolution: str = "fallback"
+    signature: str = ""
+    created_at: str = field(default_factory=_now)
 
 
 @dataclass
@@ -264,6 +348,12 @@ class MissionState:
     facts: list[FactRecord] = field(default_factory=list)
     evidence_records: list[EvidenceRecord] = field(default_factory=list)
     attempts: list[AttemptRecord] = field(default_factory=list)
+    hypotheses: list[HypothesisRecord] = field(default_factory=list)
+    action_history: list[ActionRecord] = field(default_factory=list)
+    failed_paths: list[FailedPathRecord] = field(default_factory=list)
+    action_sequence: int = 0
+    hypothesis_sequence: int = 0
+    failed_path_sequence: int = 0
     complexity: str = "complex"
     action_budget: BudgetState = field(default_factory=BudgetState)
     tool_budget: BudgetState = field(default_factory=BudgetState)
@@ -516,6 +606,179 @@ class MissionState:
         )
         return fact
 
+    def add_hypothesis(
+        self,
+        statement: str,
+        *,
+        confidence: float = 0.5,
+        next_validation: str = "",
+    ) -> HypothesisRecord:
+        """登记假设；完全相同的未终止假设直接复用。"""
+        normalized = " ".join(statement.split())
+        if not normalized:
+            raise ValueError("Hypothesis 内容不能为空")
+        existing = next((
+            item for item in self.hypotheses
+            if item.statement == normalized and item.status not in {"rejected", "confirmed"}
+        ), None)
+        if existing is not None:
+            return existing
+        self.hypothesis_sequence += 1
+        item = HypothesisRecord(
+            id=f"h{self.hypothesis_sequence}",
+            statement=normalized[:2000],
+            confidence=max(0.0, min(float(confidence), 1.0)),
+            next_validation=next_validation.strip()[:1000],
+        )
+        self.hypotheses.append(item)
+        # 限制状态增长；优先保留所有当前有效假设和最近的终态假设。
+        if len(self.hypotheses) > 60:
+            active = [h for h in self.hypotheses if h.status not in {"rejected", "confirmed"}]
+            terminal = [h for h in self.hypotheses if h.status in {"rejected", "confirmed"}]
+            active = active[-60:]
+            slots = max(0, 60 - len(active))
+            kept_terminal = terminal[-slots:] if slots else []
+            self.hypotheses = active + kept_terminal
+        self.record("Orchestrator", "hypothesis_added", hypothesis_id=item.id)
+        return item
+
+    def update_hypothesis(
+        self,
+        hypothesis_id: str,
+        *,
+        status: str | None = None,
+        supporting_evidence: list[str] | None = None,
+        opposing_evidence: list[str] | None = None,
+        confidence: float | None = None,
+        action_id: str = "",
+        next_validation: str | None = None,
+    ) -> HypothesisRecord:
+        item = next((h for h in self.hypotheses if h.id == hypothesis_id), None)
+        if item is None:
+            raise ValueError(f"Hypothesis 不存在: {hypothesis_id}")
+        if status is not None:
+            if status not in _HYPOTHESIS_STATUSES:
+                raise ValueError(f"非法 Hypothesis 状态: {status}")
+            item.status = status
+        valid_evidence = {e.id for e in self.evidence_records}
+        if supporting_evidence:
+            item.supporting_evidence = list(dict.fromkeys([
+                *item.supporting_evidence,
+                *[e for e in supporting_evidence if e in valid_evidence],
+            ]))[-20:]
+        if opposing_evidence:
+            item.opposing_evidence = list(dict.fromkeys([
+                *item.opposing_evidence,
+                *[e for e in opposing_evidence if e in valid_evidence],
+            ]))[-20:]
+        if confidence is not None:
+            item.confidence = max(0.0, min(float(confidence), 1.0))
+        if action_id and action_id not in item.related_actions:
+            item.related_actions.append(action_id)
+            item.related_actions = item.related_actions[-30:]
+        if next_validation is not None:
+            item.next_validation = next_validation.strip()[:1000]
+        item.updated_at = _now()
+        self.record(
+            "Orchestrator", "hypothesis_updated",
+            hypothesis_id=item.id, status=item.status, confidence=item.confidence,
+        )
+        return item
+
+    def begin_action(
+        self,
+        signature: str,
+        tool: str,
+        target: str,
+        parameters: dict[str, Any],
+        *,
+        context: str = "",
+        endpoint: str = "",
+        method: str = "",
+        payload: str = "",
+        command: str = "",
+        hypothesis_id: str = "",
+        retry_count: int = 0,
+        decision: str = "execute",
+    ) -> ActionRecord:
+        self.action_sequence += 1
+        action = ActionRecord(
+            id=f"x{self.action_sequence}", signature=signature, tool=tool,
+            target=target, context=context[:1000], endpoint=endpoint[:1000],
+            method=method[:40], parameters=_bounded_data(parameters),
+            payload=payload[:2000], command=command[:4000],
+            hypothesis_id=hypothesis_id, retry_count=retry_count, decision=decision,
+        )
+        self.action_history.append(action)
+        self.action_history = self.action_history[-200:]
+        if hypothesis_id:
+            try:
+                self.update_hypothesis(hypothesis_id, status="testing", action_id=action.id)
+            except ValueError:
+                action.hypothesis_id = ""
+        self.record("system", "action_started", action_id=action.id, tool=tool, signature=signature)
+        return action
+
+    def finish_action(
+        self,
+        action: ActionRecord,
+        *,
+        status: str,
+        result: str,
+        result_valid: bool,
+        failure_type: str = "",
+        failure_reason: str = "",
+        resolution: str = "",
+    ) -> FailedPathRecord | None:
+        action.status = status
+        action.result_summary = result[:4000]
+        action.result_valid = bool(result_valid)
+        action.completed_at = _now()
+        failed: FailedPathRecord | None = None
+        if status == "failure":
+            if failure_type not in _FAILURE_TYPES:
+                failure_type = "method"
+            self.failed_path_sequence += 1
+            failed = FailedPathRecord(
+                id=f"fp{self.failed_path_sequence}", action_id=action.id,
+                action=action.context or action.command or action.endpoint or action.tool,
+                tool=action.tool, context=action.context,
+                parameters=_bounded_data(action.parameters), failure_type=failure_type,
+                failure_reason=failure_reason[:1000], result=result[:4000],
+                related_hypothesis=action.hypothesis_id,
+                retry_count=action.retry_count, resolution=resolution or "fallback",
+                signature=action.signature,
+            )
+            self.failed_paths.append(failed)
+            self.failed_paths = self.failed_paths[-120:]
+            if action.hypothesis_id:
+                try:
+                    next_status = "rejected" if failure_type == "hypothesis_rejected" else "weakened"
+                    next_confidence = 0.0 if next_status == "rejected" else None
+                    self.update_hypothesis(
+                        action.hypothesis_id, status=next_status,
+                        confidence=next_confidence, action_id=action.id,
+                    )
+                except ValueError:
+                    pass
+            self.record(
+                "system", "failed_path_added", failed_path_id=failed.id,
+                failure_type=failure_type, resolution=failed.resolution,
+            )
+        self.record(
+            "system", "action_finished", action_id=action.id,
+            status=status, result_valid=result_valid,
+        )
+        return failed
+
+    def execution_context(self, *, limit: int = 8) -> dict[str, Any]:
+        """供决策 Prompt 使用的有界摘要，避免注入完整历史。"""
+        active = [h for h in self.hypotheses if h.status not in {"rejected", "confirmed"}]
+        return {
+            "hypotheses": [asdict(h) for h in active[-limit:]],
+            "failed_paths": [asdict(item) for item in self.failed_paths[-limit:]],
+        }
+
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["phase"] = self.phase.value
@@ -524,7 +787,7 @@ class MissionState:
 
 # MissionStore 持久化 schema 版本。旧文件缺字段时由 load() 自动迁移，
 # 不回写（保持旧任务只读兼容）。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # v1: 初始字段（target/goal/phase/plan/findings/attack_chain/flag/...）
 # v2: v0.2.0 新增 target_spec/category_decision/category_history/
@@ -535,6 +798,7 @@ SCHEMA_VERSION = 4
 #     retry_counters/agent_context_refs
 # v4: v0.4.0 最小优化闭环新增 facts/evidence_records/attempts/
 #     complexity/action_budget/tool_budget
+# v5: 第二批执行闭环新增 hypotheses/action_history/failed_paths 及序列号
 
 
 class MissionStoreCorruptedError(OSError):
@@ -643,6 +907,39 @@ class MissionStore:
             item if isinstance(item, AttemptRecord) else AttemptRecord(**item)
             for item in merged.get("attempts") or []
         ]
+        merged["hypotheses"] = [
+            item if isinstance(item, HypothesisRecord) else HypothesisRecord(**item)
+            for item in merged.get("hypotheses") or []
+        ]
+        merged["action_history"] = [
+            item if isinstance(item, ActionRecord) else ActionRecord(**item)
+            for item in merged.get("action_history") or []
+        ]
+        merged["failed_paths"] = [
+            item if isinstance(item, FailedPathRecord) else FailedPathRecord(**item)
+            for item in merged.get("failed_paths") or []
+        ]
+        # 防御早期 v5 快照缺少/丢失序列号，避免裁剪后生成重复 ID。
+        def _max_numeric_id(items: list[Any], prefix: str) -> int:
+            values = []
+            for item in items:
+                value = str(getattr(item, "id", ""))
+                if value.startswith(prefix) and value[len(prefix):].isdigit():
+                    values.append(int(value[len(prefix):]))
+            return max(values, default=0)
+
+        merged["hypothesis_sequence"] = max(
+            int(merged.get("hypothesis_sequence") or 0),
+            _max_numeric_id(merged["hypotheses"], "h"),
+        )
+        merged["action_sequence"] = max(
+            int(merged.get("action_sequence") or 0),
+            _max_numeric_id(merged["action_history"], "x"),
+        )
+        merged["failed_path_sequence"] = max(
+            int(merged.get("failed_path_sequence") or 0),
+            _max_numeric_id(merged["failed_paths"], "fp"),
+        )
         for budget_name in ("action_budget", "tool_budget"):
             budget = merged.get(budget_name)
             if not isinstance(budget, BudgetState):

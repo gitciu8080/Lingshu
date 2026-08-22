@@ -75,6 +75,7 @@ from workspace_service import get_workspace_service  # Workspace v2 生命周期
 from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     AgentMaxIterationsError,
     ToolJSONValidationError,
+    bind_action_lifecycle_handler,
     bind_agent_tasks,
     bind_expert_roster,
     bind_process_tracker,
@@ -82,12 +83,19 @@ from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     bind_tool_json_failure_handler,
     cancel_agent_tasks,
     reset_agent_tasks,
+    reset_action_lifecycle_handler,
     reset_expert_roster,
     reset_process_tracker,
     reset_tool_budget_handler,
     reset_tool_json_failure_handler,
     run_interruptible_agent_reply,
     stream_agent_reply,
+)
+from Tools.fingerprint import (
+    MAX_ACTION_RETRIES,
+    classify_failure,
+    compute_tool_signature,
+    has_success_signal,
 )
 
 
@@ -1311,12 +1319,30 @@ async def run_mission(
     expert_roster_token = None
     tool_json_token = None
     tool_budget_token = None
+    action_lifecycle_token = None
     attack = None
     reserve = None
     workspace = None  # 异常路径兜底 summary 需要；try 内正常赋值
     try:
         def _record_tool_json_failure(evidence: dict[str, Any]) -> None:
             mission.record("system", "tool_json_validation_failed", **evidence)
+            tool_name = str(evidence.get("tool_name") or "unknown")
+            signature, _ = compute_tool_signature(
+                tool_name, mission.target,
+                {"arguments_sha256": str(evidence.get("arguments_sha256") or "")},
+            )
+            action = mission.begin_action(
+                signature, tool_name, mission.target,
+                {"arguments_preview": str(evidence.get("arguments_preview") or "")},
+                context="严格 JSON/schema 参数校验", retry_count=1,
+            )
+            mission.finish_action(
+                action, status="failure",
+                result=str(evidence.get("error") or "工具参数校验失败"),
+                result_valid=False, failure_type="parameter",
+                failure_reason=str(evidence.get("error") or "工具参数校验失败"),
+                resolution="modify_parameters",
+            )
             store.save(mission)
             if event_callback is not None:
                 event_callback(
@@ -1326,6 +1352,213 @@ async def run_mission(
                 )
 
         tool_json_token = bind_tool_json_failure_handler(_record_tool_json_failure)
+
+        # 第二批统一执行闭环：StrictJSONToolkit 是 Function Tool 与 MCP 的共同
+        # 入口。在这里做程序级签名、缓存命中、失败路径与有限 Retry 决策，
+        # 不增加 LLM 调用，也不向 Prompt 注入完整历史。
+        lifecycle_exempt_tools = {
+            "complete_mission", "view_mission_state", "ListPlan", "AddPlan",
+            "UpdatePlan", "DeletePlan", "SubmitPlan",
+            "request_exploitation_approval", "request_scope_expansion",
+            "manage_hypothesis",
+        }
+
+        def _action_lifecycle(stage: str, payload: dict[str, Any]) -> dict[str, Any]:
+            if stage == "before":
+                tool_name = str(payload.get("tool_name") or "")
+                parameters = dict(payload.get("parameters") or {})
+                if tool_name in lifecycle_exempt_tools:
+                    return {"decision": "execute"}
+                signature, fields = compute_tool_signature(
+                    tool_name, mission.target, parameters,
+                )
+                previous = next((
+                    item for item in reversed(mission.action_history)
+                    if item.signature == signature
+                ), None)
+                hypothesis_id = str(parameters.get("hypothesis_id") or "")
+                hypothesis = next((
+                    item for item in mission.hypotheses if item.id == hypothesis_id
+                ), None) if hypothesis_id else None
+                if hypothesis is not None and hypothesis.status == "rejected":
+                    mission.record(
+                        "system", "action_path_stopped", tool=tool_name,
+                        signature=signature, hypothesis_id=hypothesis.id,
+                    )
+                    store.save(mission)
+                    return {
+                        "decision": "blocked",
+                        "message": (
+                            f"[停止路径] Hypothesis {hypothesis.id} 已被 rejected，"
+                            "禁止继续执行关联动作。请切换到其他有效 Hypothesis。"
+                        ),
+                    }
+                if previous is not None and previous.status in {"success", "cached"} \
+                        and previous.result_valid:
+                    cached = mission.begin_action(
+                        signature, tool_name, fields["target"], parameters,
+                        context=fields["context"], endpoint=fields["endpoint"],
+                        method=fields["method"], payload=fields["payload"],
+                        command=fields["command"], hypothesis_id=hypothesis_id,
+                        decision="cached",
+                    )
+                    mission.finish_action(
+                        cached, status="cached", result=previous.result_summary,
+                        result_valid=True,
+                    )
+                    if cached.hypothesis_id and previous.result_summary:
+                        evidence = mission.add_evidence(
+                            previous.tool, "cached_tool_result",
+                            previous.result_summary, confidence=0.7,
+                        )
+                        current_hypothesis = next((
+                            item for item in mission.hypotheses
+                            if item.id == cached.hypothesis_id
+                        ), None)
+                        if current_hypothesis is not None:
+                            mission.update_hypothesis(
+                                current_hypothesis.id,
+                                status=(
+                                    "supported" if has_success_signal(previous.result_summary)
+                                    else "testing"
+                                ),
+                                supporting_evidence=[evidence.id],
+                                action_id=cached.id,
+                            )
+                    store.save(mission)
+                    return {
+                        "decision": "cached",
+                        "message": (
+                            f"[Action Dedup] 相同动作已成功执行，复用 {previous.id} 的有效结果：\n"
+                            f"{previous.result_summary[:4000]}"
+                        ),
+                    }
+                if previous is not None and previous.status == "running":
+                    mission.record(
+                        "system", "action_duplicate_blocked", tool=tool_name,
+                        signature=signature, previous_action_id=previous.id,
+                        reason="already_running",
+                    )
+                    store.save(mission)
+                    return {
+                        "decision": "blocked",
+                        "message": f"[Action Dedup] 相同动作 {previous.id} 仍在执行，禁止并发重放。",
+                    }
+
+                matching_failures = [
+                    item for item in mission.failed_paths if item.signature == signature
+                ]
+                retry_count = max(
+                    (item.retry_count for item in matching_failures), default=-1,
+                ) + 1 if matching_failures else 0
+                if matching_failures:
+                    last_failure = matching_failures[-1]
+                    retry_allowed = (
+                        last_failure.failure_type == "transient"
+                        and retry_count <= MAX_ACTION_RETRIES
+                    )
+                    if not retry_allowed:
+                        resolution = last_failure.resolution
+                        if hypothesis is not None:
+                            mission.update_hypothesis(
+                                hypothesis.id,
+                                status=(
+                                    "rejected"
+                                    if last_failure.failure_type == "hypothesis_rejected"
+                                    else "weakened"
+                                ),
+                                next_validation=(
+                                    "切换 Hypothesis"
+                                    if resolution in {"fallback", "stop_path"}
+                                    else hypothesis.next_validation
+                                ),
+                            )
+                        mission.record(
+                            "system", "action_duplicate_blocked", tool=tool_name,
+                            signature=signature, failed_path_id=last_failure.id,
+                            failure_type=last_failure.failure_type,
+                            resolution=resolution,
+                        )
+                        store.save(mission)
+                        return {
+                            "decision": "blocked",
+                            "message": (
+                                f"[Action Dedup] 相同动作曾失败（{last_failure.failure_type}: "
+                                f"{last_failure.failure_reason}），策略={resolution}。"
+                                "请修改参数/前置条件，或切换 Tool、方法或 Hypothesis；禁止原样重放。"
+                            ),
+                        }
+                action = mission.begin_action(
+                    signature, tool_name, fields["target"], parameters,
+                    context=fields["context"], endpoint=fields["endpoint"],
+                    method=fields["method"], payload=fields["payload"],
+                    command=fields["command"], hypothesis_id=hypothesis_id,
+                    retry_count=retry_count,
+                    decision="retry" if matching_failures else "execute",
+                )
+                return {"decision": "execute", "action_id": action.id}
+
+            action_id = str(payload.get("action_id") or "")
+            action = next((
+                item for item in reversed(mission.action_history) if item.id == action_id
+            ), None)
+            if action is None:
+                return {}
+            result = str(payload.get("result") or "")
+            if payload.get("cancelled"):
+                mission.finish_action(
+                    action, status="interrupted", result=result,
+                    result_valid=False,
+                )
+                store.save(mission)
+                return {}
+            raised = bool(payload.get("raised") or payload.get("tool_error"))
+            failure_type, reason, resolution = classify_failure(result, raised=raised)
+            if failure_type is None and result.strip():
+                mission.finish_action(
+                    action, status="success", result=result, result_valid=True,
+                )
+                if action.hypothesis_id:
+                    evidence = mission.add_evidence(
+                        action.tool, "tool_result", result[:4000], confidence=0.7,
+                    )
+                    hypothesis = next((
+                        h for h in mission.hypotheses if h.id == action.hypothesis_id
+                    ), None)
+                    if hypothesis is not None:
+                        mission.update_hypothesis(
+                            hypothesis.id,
+                            status="supported" if has_success_signal(result) else "testing",
+                            supporting_evidence=[evidence.id],
+                            confidence=(
+                                min(1.0, hypothesis.confidence + 0.15)
+                                if has_success_signal(result) else hypothesis.confidence
+                            ),
+                            action_id=action.id,
+                        )
+            else:
+                failure_type = failure_type or "method"
+                if action.hypothesis_id and result.strip():
+                    evidence = mission.add_evidence(
+                        action.tool, "tool_failure", result[:4000], confidence=0.7,
+                    )
+                    try:
+                        mission.update_hypothesis(
+                            action.hypothesis_id,
+                            opposing_evidence=[evidence.id], action_id=action.id,
+                        )
+                    except ValueError:
+                        pass
+                mission.finish_action(
+                    action, status="failure", result=result or "工具未返回有效结果",
+                    result_valid=False, failure_type=failure_type,
+                    failure_reason=reason or "工具未返回有效结果",
+                    resolution=resolution or "fallback",
+                )
+            store.save(mission)
+            return {}
+
+        action_lifecycle_token = bind_action_lifecycle_handler(_action_lifecycle)
 
         # 控制/收尾工具在预算耗尽后仍必须可用，否则无法安全进入终态；其余
         # Function/MCP 工具统一消耗 tool_budget。
@@ -1769,10 +2002,14 @@ async def run_mission(
             f"Brain 计划：\n{mission.plan}\n\n"
             f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
             f"当前 Facts：{'; '.join(item.content for item in mission.facts[-10:]) or '暂无'}\n"
+            f"当前 Hypotheses / Failed Paths（有界结构化摘要）：\n"
+            f"{json.dumps(mission.execution_context(limit=8), ensure_ascii=False)}\n"
             f"行动预算：{mission.action_budget.used}/{mission.action_budget.limit}；"
             f"工具预算：{mission.tool_budget.used}/{mission.tool_budget.limit}\n"
             "首轮 Recon 与题型确认已经完成；只有存在明确证据缺口时才补充侦察，"
-            "否则直接基于 Facts/Evidence 推进。结束时必须调用 complete_mission。"
+            "否则直接基于 Facts/Evidence 推进。对待验证判断先登记 Hypothesis 并在"
+            "dispatch 时关联其 ID；遇到 Failed Path 按 resolution 执行 Retry/Fallback/停止路径。"
+            "结束时必须调用 complete_mission。"
             f"{orch_context}"
         )
         # P5 熔断重试预算：Orchestrator 输出残缺 <tool_call>/空回答时重新注入
@@ -1976,6 +2213,8 @@ async def run_mission(
             reset_expert_roster(expert_roster_token)
         if tool_json_token is not None:
             reset_tool_json_failure_handler(tool_json_token)
+        if action_lifecycle_token is not None:
+            reset_action_lifecycle_handler(action_lifecycle_token)
         if tool_budget_token is not None:
             reset_tool_budget_handler(tool_budget_token)
         # 停止本任务启动的所有命令及后台子进程，避免取消后继续运行。
