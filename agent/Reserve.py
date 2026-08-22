@@ -16,6 +16,7 @@ from pathlib import Path
 from agentscope.agent import Agent, ReActConfig
 from agentscope.mcp import MCPClient, StdioMCPConfig
 from agentscope.message import UserMsg
+from agentscope.tool import ToolGroup
 
 from agent.Attack import _build_skill_list
 from Tools.IntelPwn import create_intelpwn_tool
@@ -32,8 +33,7 @@ RESERVE_SYS_PROMPT = """你是二进制逆向与动态调试专家（Reserve）�
 1. scoped_shell: 受限的本地命令执行工具。
 2. ida_open_binary: 为原始二进制生成 IDA 数据库并打开，返回 database 会话 ID。
 3. IDA_Tool: IDA 逆向工具集（survey_binary / decompile / list_funcs / xrefs_to 等）。
-4. gdb_create_session / gdb_load_core: 在授权工作区内创建 GDB 动态调试或核心转储会话。
-5. GDB_Tool: 多会话 GDB/MI 工具集（断点、运行、上下文、寄存器、内存、反汇编等）。
+4. GDB 动态调试能力仅在计划或目标明确需要运行时验证时挂载；以 Toolkit 实际工具为准。
 6. analysis: 委托 Analysis 专家独立研判。
 7. intelpwn_analyze: IntelPwn 二进制静态漏洞分析工具。
 8. analyze_image: 理解授权工作区内的程序截图、流程图、二维码、图形资源和视觉线索。
@@ -46,13 +46,15 @@ RESERVE_SYS_PROMPT = """你是二进制逆向与动态调试专家（Reserve）�
 4. 先调用 survey_binary 获取概览，再按需调用 decompile / analyze_function / xrefs_to。
    idb_open 之外的每个 IDA 分析工具都必须传入同一个 database。
 5. 分析结束后调用 idb_close(database=..., save=false) 释放会话。
-6. 需要动态验证时先调用 gdb_create_session，保存 session_id；先设置断点再运行，
+6. Toolkit 提供 GDB 工具且需要动态验证时，先调用 gdb_create_session，保存 session_id；先设置断点再运行，
    每个 GDB 工具都传入同一个 session_id，结束后必须调用 close_session。
 7. GDB 工具返回结构化 JSON，必须检查 ok 字段；执行超时后先调用 interrupt，
    不得把超时误判为程序退出。
 8. 只有证据充分时才用 scoped_shell 做验证。
 9. 禁止拒绝服务、破坏数据、植入持久化、清除日志或扩大目标范围。
 10. 你只返回结果，不改变任务状态，也不宣布整个任务完成。
+11. 逆向 Skill 位于 task_skills 工具组；只有需要具体方法时才用 reset_tools 激活，
+    查询完成后可切回 basic，避免 Skill 元数据长期占用后续上下文。
 
 **关键：分析完成后必须立即输出结构化报告并停止。严禁反复验证或继续调用工具。**
 
@@ -79,6 +81,31 @@ _IDA_READ_ONLY_TOOLS = [
     "make_signature", "make_signature_for_function", "make_signature_for_range",
     "find_xref_signatures", "idb_open", "idb_list", "idb_close",
 ]
+
+_IDA_CORE_TOOLS = (
+    "server_health", "list_funcs", "imports", "find_regex", "search_text",
+    "decompile", "disasm", "func_profile", "xrefs_to", "callees",
+    "basic_blocks", "get_bytes", "get_string", "survey_binary",
+    "analyze_function", "idb_open", "idb_list", "idb_close",
+)
+_IDA_PROFILE_EXTRAS: dict[str, tuple[str, ...]] = {
+    "pwn": (
+        "find_bytes", "get_int", "stack_frame", "trace_data_flow",
+        "make_signature_for_function", "find_xref_signatures",
+    ),
+    "malware": (
+        "list_globals", "get_global_value", "callgraph", "analyze_component",
+        "search_structs", "type_inspect", "read_struct",
+    ),
+    "reverse": ("entity_query", "func_query", "xref_query", "analyze_batch"),
+}
+
+_GDB_CORE_TOOLS = (
+    "create_session", "load_core", "close_session", "list_sessions",
+    "set_breakpoint", "delete_breakpoint", "run", "continue", "step",
+    "next", "finish", "interrupt", "registers", "read_memory",
+    "disassemble", "backtrace", "threads", "context",
+)
 
 # 这些入口可以越过灵枢的文件/网络范围控制，因此不直接暴露。受支持的本地
 # 会话入口由下方 gdb_create_session / gdb_load_core 包装并执行路径校验。
@@ -138,6 +165,7 @@ async def create_reverse_agent(
     artifact_root: str | Path | None = None,
     vision_model=None,
     vision_roots: tuple[str | Path, ...] = (),
+    enable_gdb: bool = True,
 ) -> Agent:
     async def analysis(service_info: str) -> str:
         """委托 Analysis 专家研判真实证据。
@@ -153,7 +181,18 @@ async def create_reverse_agent(
         )
         return result.get_text_content() or "[Analysis] 未返回文本结果"
 
-    skill_list = _build_skill_list(category_decision, project_dir)
+    primary = str((category_decision or {}).get("primary") or "reverse")
+    skill_list = _build_skill_list(
+        category_decision,
+        project_dir,
+        include_secondary=False,
+        include_writeup=False,
+        include_attack_chain=primary == "pwn",
+    )
+    ida_enabled_tools = tuple(dict.fromkeys([
+        *_IDA_CORE_TOOLS,
+        *_IDA_PROFILE_EXTRAS.get(primary, _IDA_PROFILE_EXTRAS["reverse"]),
+    ]))
 
     if not _IDALIB_MCP.is_file():
         raise RuntimeError(f"IDA MCP 启动器不存在: {_IDALIB_MCP}")
@@ -169,7 +208,7 @@ async def create_reverse_agent(
             cwd=project_dir,
             env={**os.environ, "IDADIR": str(_IDA_DIR)},
         ),
-        enable_tools=_IDA_READ_ONLY_TOOLS,
+        enable_tools=list(ida_enabled_tools),
         execution_timeout=max(float(timeout), 120.0),
     )
     try:
@@ -191,7 +230,12 @@ async def create_reverse_agent(
         tool for tool in ida_tools if not tool.name.endswith("__idb_open")
     ]
 
-    gdb_mcp_command = _resolve_gdb_mcp_command()
+    gdb_mcp: MCPClient | None = None
+    gdb_tools: list = []
+    gdb_create_session_tool = None
+    gdb_load_core_tool = None
+    exposed_gdb_tools: list = []
+    gdb_mcp_command = _resolve_gdb_mcp_command() if enable_gdb else ""
     gdb_mcp_args = [
         "--transport", "stdio",
         "--exec-timeout", str(max(1, int(timeout))),
@@ -204,34 +248,34 @@ async def create_reverse_agent(
             *gdb_mcp_args,
         ]
 
-    gdb_mcp = MCPClient(
-        name="GDB_Tool",
-        is_stateful=True,
-        mcp_config=StdioMCPConfig(
-            command=gdb_mcp_command,
-            args=gdb_mcp_args,
-            cwd=project_dir,
-            env={
-                **os.environ,
-                # FastMCP 的版本检查会在离线环境拖慢初始化；MCP 服务运行
-                # 不需要它，也不需要在 stdio 日志中输出大幅 Banner。
-                "FASTMCP_CHECK_FOR_UPDATES": "off",
-                "FASTMCP_SHOW_SERVER_BANNER": "false",
-            },
-        ),
-        execution_timeout=max(float(timeout), 120.0),
-    )
-    try:
-        async with asyncio.timeout(45.0):
-            await gdb_mcp.connect()
-        gdb_tools = await gdb_mcp.list_tools()
-    except Exception as exc:
+    if enable_gdb:
+        gdb_mcp = MCPClient(
+            name="GDB_Tool",
+            is_stateful=True,
+            mcp_config=StdioMCPConfig(
+                command=gdb_mcp_command,
+                args=gdb_mcp_args,
+                cwd=project_dir,
+                env={
+                    **os.environ,
+                    "FASTMCP_CHECK_FOR_UPDATES": "off",
+                    "FASTMCP_SHOW_SERVER_BANNER": "false",
+                },
+            ),
+            enable_tools=list(_GDB_CORE_TOOLS),
+            execution_timeout=max(float(timeout), 120.0),
+        )
         try:
-            await gdb_mcp.close()
-        except RuntimeError:
-            pass
-        await ida_mcp.close()
-        raise RuntimeError(f"GDB MCP 连接失败: {exc}") from exc
+            async with asyncio.timeout(45.0):
+                await gdb_mcp.connect()
+            gdb_tools = await gdb_mcp.list_tools()
+        except Exception as exc:
+            try:
+                await gdb_mcp.close()
+            except RuntimeError:
+                pass
+            await ida_mcp.close()
+            raise RuntimeError(f"GDB MCP 连接失败: {exc}") from exc
 
     def _gdb_tool(short_name: str):
         tool = next(
@@ -245,12 +289,13 @@ async def create_reverse_agent(
             raise RuntimeError(f"GDB MCP 缺少必要工具: {short_name}")
         return tool
 
-    gdb_create_session_tool = _gdb_tool("create_session")
-    gdb_load_core_tool = _gdb_tool("load_core")
-    exposed_gdb_tools = [
-        tool for tool in gdb_tools
-        if tool.name.rsplit("__", 1)[-1] not in _GDB_RESTRICTED_ENTRY_TOOLS
-    ]
+    if enable_gdb:
+        gdb_create_session_tool = _gdb_tool("create_session")
+        gdb_load_core_tool = _gdb_tool("load_core")
+        exposed_gdb_tools = [
+            tool for tool in gdb_tools
+            if tool.name.rsplit("__", 1)[-1] not in _GDB_RESTRICTED_ENTRY_TOOLS
+        ]
     # gdb-multi-mcp 未启用 --unsafe，且会话只能由下面经过授权路径校验的
     # 包装器创建。这里放行已建立会话上的 MCP 操作，避免 AgentScope 再触发
     # 一套与灵枢人工审批闸门不相通的 ASK 流程。
@@ -293,6 +338,8 @@ async def create_reverse_agent(
             args: 传给目标程序的参数列表。
             architecture: 可选 GDB 架构名，如 i386:x86-64。
         """
+        if gdb_create_session_tool is None:
+            return '{"error":"本轮未加载 GDB MCP；请改用静态分析路径"}'
         source = _authorized_file(program, "待调试文件")
         result = await gdb_create_session_tool.call(
             program=str(source),
@@ -309,6 +356,8 @@ async def create_reverse_agent(
             executable: 与核心转储匹配的二进制绝对路径。
             core: 核心转储文件绝对路径。
         """
+        if gdb_load_core_tool is None:
+            return '{"error":"本轮未加载 GDB MCP；请改用静态分析路径"}'
         executable_path = _authorized_file(executable, "可执行文件")
         core_path = _authorized_file(core, "核心转储")
         result = await gdb_load_core_tool.call(
@@ -379,21 +428,37 @@ async def create_reverse_agent(
             create_intelpwn_tool(timeout),
             create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="reserve", artifact_root=artifact_root),
             AllowedFunctionTool(ida_open_binary, is_read_only=True),
-            AllowedFunctionTool(gdb_create_session, is_read_only=False),
-            AllowedFunctionTool(gdb_load_core, is_read_only=True),
             *exposed_ida_tools,
             *exposed_gdb_tools,
-            *create_tool_catalog_tools("reserve"),
+            *create_tool_catalog_tools(
+                "reserve", categories={"reverse", "mobile", "forensics"},
+            ),
         ]
+    if enable_gdb:
+        tools.extend([
+            AllowedFunctionTool(gdb_create_session, is_read_only=False),
+            AllowedFunctionTool(gdb_load_core, is_read_only=True),
+        ])
     if vision_model is not None and vision_roots:
         tools.append(create_vision_analysis_tool(vision_model, vision_roots))
-    toolkit = StrictJSONToolkit(
-        tools=tools,
-        skills_or_loaders=skill_list,
-    )
+    skill_groups = []
+    if skill_list:
+        skill_groups.append(ToolGroup(
+            name="task_skills",
+            description=(
+                "当前二进制题型的按需逆向方法库；仅在需要具体方法或检查清单时激活，"
+                "不用于基础 IDA/GDB 调用。"
+            ),
+            skills_or_loaders=skill_list,
+        ))
+    toolkit = StrictJSONToolkit(tools=tools, tool_groups=skill_groups)
     agent = Agent(
         name=REVERSE_EXPERT,
-        system_prompt=append_capability_summary(RESERVE_SYS_PROMPT, "reserve"),
+        system_prompt=append_capability_summary(
+            RESERVE_SYS_PROMPT,
+            "reserve",
+            categories={"reverse", "mobile", "forensics"},
+        ),
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
@@ -410,6 +475,10 @@ async def close_reverse_agent(agent: Agent | None) -> None:
     """关闭任务持有的 IDA 与 GDB MCP 进程。"""
     if agent is None:
         return
+    if hasattr(agent, "get_if_loaded"):
+        agent = agent.get_if_loaded()
+        if agent is None:
+            return
     for attr in ("_gdb_mcp_client", "_ida_mcp_client"):
         client = getattr(agent, attr, None)
         if client is not None:

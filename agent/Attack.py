@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from types import MethodType
@@ -15,6 +16,7 @@ from agentscope.agent import Agent, ReActConfig
 from agentscope.mcp import HttpMCPConfig, MCPClient
 from agentscope.message import UserMsg
 from agentscope.permission import PermissionBehavior, PermissionDecision
+from agentscope.tool import ToolGroup
 
 from Tools.CVE_Search import cve_search
 from Tools.OCR import create_tesseract_ocr_tool
@@ -54,37 +56,17 @@ _ANTSWORD_READ_ONLY_TOOLS = frozenset({
 
 
 ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
-你只能处理 Orchestrator 给出的单一授权目标，并且只使用提供的工具。
-
-你可以使用的工具：
-1. analysis:扫描智能体，用于独立研判。
-2. cve_search:cve漏洞网上查询工具。
-3. create_scoped_shell_tool:本地命令运行工具。
-4. dispatch_reverse：派遣 Reserve 对二进制文件执行 IDA 逆向分析（反编译、字符串提取等）
-5. ocr_image：使用 Tesseract 对授权工作区内的图片执行文字识别。
-6. tonydec：当文件头完整匹配 6688ff4f6886005611611618 时解码 TonyEnc 文件或目录。
-7. AntSword_Tool：对已在 AntSword 登记的授权 WebShell 执行信息、命令、
-   文件和数据库操作。工具名以 mcp__AntSword_Tool__ 开头。
-8. execute_sagemath：在隔离 SageMath 环境中执行数学/密码学计算代码。     # ← 新增
-   适用于 RSA/ECC/离散对数/大数运算/符号求解/数论/矩阵等 CTF 题目。
-   每次调用为全新会话，变量不持久化，必须用 print() 输出结果。
-9. analyze_image：理解授权工作区内的图片、网页截图、图表、二维码和视觉题目；
-   发现相关图片时应主动调用，精确文字再用 ocr_image 复核。
-10. volatility_analyze：使用 Python 2 的 Volatility 2.6 分析授权内存镜像；
-    先 imageinfo/kdbgscan 确定 profile，再按证据调用进程、网络、命令历史、
-    文件扫描和恶意注入检测插件。仅数字取证/恶意代码任务会挂载该工具。
+你只能处理 Orchestrator 给出的单一授权目标，并且只使用本轮 Toolkit 实际提供的能力。
 
 工作原则：
-- 先调用 analysis 获取独立研判；候选 CVE 应再用 cve_search 核验。
+- 先调用 analysis 获取独立研判；只有 Toolkit 提供 cve_search 时才查询候选 CVE。
 - 只有证据和利用条件匹配时才使用 scoped_shell 验证或利用。
-- 对于需要反编译的，可以使用 ida 的 mcp 工具。
-- 遇到 TonyEnc 固定头时调用 tonydec 写入新输出路径，随后用 file/哈希/strings 复核产物。
-- 密码学/数论/符号计算问题优先使用 execute_sagemath，不要手写 Python 大数库。  # ← 新增
-- 使用 AntSword 时必须严格按 shell_list → shell_capabilities → base_info →
-  cmd_exec / file_dir / db_query 的顺序；只能选择 URL 与当前授权目标一致的 shell_id。
-- 不得读取其他目标的 Shell 密码，不得删除 Shell 记录或修改 MCP 服务配置。
-  shell_add/shell_edit/shell_del/mcp_config_set 仅在 Orchestrator 明确要求时才可使用。
-- raw_request 只能在 shell_capabilities 确认能力且无专用工具时使用。
+- 可选能力（密码学、OCR、视觉、取证、TonyDec、AntSword）仅在当前题型需要时挂载；
+  未出现在 Toolkit 中即表示本轮不需要，禁止臆造调用。
+- 题型 Skill 位于 task_skills 工具组。只有确需读取题型方法时才调用 reset_tools
+  激活该组；完成技能查询后可再次调用 reset_tools 回到 basic，避免无关 Skill 长驻上下文。
+- 使用 AntSword 时严格按 shell_list → shell_capabilities → base_info → 后续操作，
+  且只能选择 URL 与当前授权目标一致的 shell_id。
 - 所有网络命令必须显式包含授权目标，不得访问其他地址或网段。
 - 禁止拒绝服务、破坏数据、植入持久化、清除日志或扩大目标范围。
 - 不得把 HTTP 200、命令无报错或模型推测当作利用成功；成功必须有可复核证据。
@@ -123,12 +105,74 @@ _CYBERPENDA_SKILL_MAP: dict[str, list[str]] = {
 }
 _CYBERPENDA_ROOT = "Skills/cyberpenda-bundles"
 
+_ANTSWORD_PROFILE_TOOLS: dict[str, tuple[str, ...]] = {
+    "info": (
+        "shell_list", "shell_get", "shell_capabilities", "base_info",
+        "base_probedb", "mcp_status",
+    ),
+    "command": ("cmd_exec", "cmd_list", "cmd_quote"),
+    "files": (
+        "file_dir", "file_read", "file_write", "file_hash", "file_upload",
+        "file_download", "file_copy", "file_rename", "file_chmod", "file_mkdir",
+    ),
+    "database": (
+        "db_list_confs", "db_get_conf", "db_show_databases", "db_show_tables",
+        "db_show_columns", "db_query",
+    ),
+    "raw": ("raw_request",),
+}
+
+_ATTACK_CATALOG_CATEGORIES: dict[str, set[str]] = {
+    "web": {"recon", "web"},
+    "pwn": {"reverse"},
+    "reverse": {"reverse"},
+    "crypto": {"crypto"},
+    "forensics": {"forensics"},
+    "malware": {"forensics", "reverse"},
+    "misc": {"forensics", "crypto", "reverse"},
+    "osint": {"recon"},
+    "ai-ml": set(),
+}
+
+
+def select_antsword_tools(context: str) -> tuple[str, ...]:
+    """按任务目标/证据选择 AntSword schema 子集；无 WebShell 信号则不连接。"""
+    lowered = context.lower()
+    # Recon/计划经常包含“未发现 WebShell”这类否定结论；先剔除否定片段，
+    # 避免仅因出现关键词就初始化整个外部 MCP。
+    lowered = re.sub(
+        r"(?:未发现|未检测到|没有|不存在|缺少|无|no|not found)"
+        r"[^\n。；;]{0,24}(?:web\s*shell|webshell|antsword|蚁剑|shell_id)",
+        "",
+        lowered,
+    )
+    if not any(term in lowered for term in (
+        "webshell", "web shell", "antsword", "蚁剑", "shell_id", "shell 密码",
+    )):
+        return ()
+    profiles = {"info"}
+    if any(term in lowered for term in ("命令", "command", "cmd", "shell", "flag")):
+        profiles.add("command")
+    if any(term in lowered for term in ("文件", "file", "upload", "download", "目录")):
+        profiles.add("files")
+    if any(term in lowered for term in ("数据库", "database", "sql", "db_")):
+        profiles.add("database")
+    if "raw_request" in lowered or "原始请求" in lowered:
+        profiles.add("raw")
+    selected: list[str] = []
+    for profile in ("info", "command", "files", "database", "raw"):
+        if profile in profiles:
+            selected.extend(_ANTSWORD_PROFILE_TOOLS[profile])
+    return tuple(dict.fromkeys(selected))
+
 
 async def _connect_antsword_mcp(
     timeout: int,
     exploitation_approved: Callable[[], bool] | None = None,
+    enabled_tools: tuple[str, ...] | None = None,
 ) -> tuple[MCPClient, list]:
-    """连接 API 托管的 AntSword SSE MCP，并校验 37 个工具契约。"""
+    """连接 API 托管的 AntSword SSE MCP，并只查询本轮需要的 schema。"""
+    selected_tools = tuple(enabled_tools) if enabled_tools is not None else _ANTSWORD_TOOLS
     url = os.getenv("LINGSHU_ANTSWORD_MCP_URL", _ANTSWORD_MCP_URL).strip()
     client = MCPClient(
         name="AntSword_Tool",
@@ -136,13 +180,13 @@ async def _connect_antsword_mcp(
         # 任务取消/收尾时跨 asyncio task 关闭 anyio cancel scope。
         is_stateful=False,
         mcp_config=HttpMCPConfig(url=url, timeout=15.0),
-        enable_tools=list(_ANTSWORD_TOOLS),
+        enable_tools=list(selected_tools),
         execution_timeout=max(float(timeout), 120.0),
     )
     try:
         tools = await client.list_tools()
         available = {tool.name.rsplit("__", 1)[-1] for tool in tools}
-        missing = set(_ANTSWORD_TOOLS) - available
+        missing = set(selected_tools) - available
         if missing:
             raise RuntimeError(
                 f"AntSword MCP 缺少工具: {', '.join(sorted(missing))}",
@@ -185,6 +229,10 @@ async def _connect_antsword_mcp(
 def _build_skill_list(
     category_decision: dict | None,
     project_dir: str | Path = "",
+    *,
+    include_secondary: bool = True,
+    include_writeup: bool = True,
+    include_attack_chain: bool = True,
 ) -> list[str]:
     """根据题型分类决策构建 Skill 加载路径。
 
@@ -212,22 +260,24 @@ def _build_skill_list(
                 )
             skill_paths.append(path)
 
-        # secondary
-        for cat in category_decision.get("secondary", []):
+        # secondary 仅供兼容/低置信分类使用；正式执行默认只加载 primary。
+        for cat in category_decision.get("secondary", []) if include_secondary else []:
             if cat in _SKILL_PATH_MAP and cat != primary:
                 p = _SKILL_PATH_MAP[cat]
                 if project_path and not (project_path / p).is_dir():
                     continue  # 次要 Skill 缺失不阻塞
                 skill_paths.append(p)
 
-    # writeup 始终加载
-    skill_paths.append(_SKILL_PATH_MAP["writeup"])
+    if include_writeup:
+        skill_paths.append(_SKILL_PATH_MAP["writeup"])
     # CyberPenda bundles 完整保存在仓库中，但运行时只加载与当前分类相关的目录。
     categories: list[str] = []
     if category_decision:
         primary = str(category_decision.get("primary") or "")
-        categories = [primary, *[str(value) for value in category_decision.get("secondary", [])]]
-    cyberpenda_names = ["attack-chain"]
+        categories = [primary]
+        if include_secondary:
+            categories.extend(str(value) for value in category_decision.get("secondary", []))
+    cyberpenda_names = ["attack-chain"] if include_attack_chain else []
     for category in categories:
         cyberpenda_names.extend(_CYBERPENDA_SKILL_MAP.get(category, []))
     for name in dict.fromkeys(cyberpenda_names):
@@ -259,6 +309,8 @@ async def create_attack_agent(
     vision_model=None,
     vision_roots: tuple[str | Path, ...] = (),
     forensic_roots: tuple[str | Path, ...] = (),
+    target_kind: str = "",
+    capability_context: str = "",
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -288,47 +340,91 @@ async def create_attack_agent(
 
 
 
-    skill_list = _build_skill_list(category_decision, project_dir)
+    primary = str((category_decision or {}).get("primary") or "unknown")
+    confidence = float((category_decision or {}).get("confidence") or 0.0)
+    # 首轮 Recon 已完成正式分类：高置信时只加载 primary；仅 unknown/低置信
+    # 才保留一个 secondary，避免多套完整 Skill 同时进入每轮上下文。
+    skill_decision = dict(category_decision or {})
+    if confidence < 0.55 and skill_decision.get("secondary"):
+        skill_decision["secondary"] = list(skill_decision["secondary"][:1])
+    skill_list = _build_skill_list(
+        skill_decision,
+        project_dir,
+        include_secondary=confidence < 0.55,
+        include_writeup=False,
+        include_attack_chain=primary in {"web", "pwn"},
+    )
+
+    categories = {
+        primary,
+        *(
+            [str(item) for item in skill_decision.get("secondary", [])[:1]]
+            if confidence < 0.55 else []
+        ),
+    }
+    catalog_categories = set().union(*(
+        _ATTACK_CATALOG_CATEGORIES.get(category, set()) for category in categories
+    ))
+    if primary == "unknown":
+        catalog_categories = {"recon", "web", "forensics", "reverse"}
 
     antsword_mcp: MCPClient | None = None
     antsword_tools: list = []
-    try:
-        antsword_mcp, antsword_tools = await _connect_antsword_mcp(
-            timeout,
-            exploitation_approved,
-        )
-    except Exception as exc:  # AntSword 不可用不应让非 WebShell 任务整体失败
-        logger.warning("Attack 未能接入 AntSword MCP: %s", exc)
+    selected_antsword_tools = (
+        select_antsword_tools(capability_context) if primary in {"web", "unknown"} else ()
+    )
+    if selected_antsword_tools:
+        try:
+            antsword_mcp, antsword_tools = await _connect_antsword_mcp(
+                timeout,
+                exploitation_approved,
+                selected_antsword_tools,
+            )
+        except Exception as exc:  # AntSword 不可用不应让非 WebShell 任务整体失败
+            logger.warning("Attack 未能接入 AntSword MCP: %s", exc)
 
     tools = [
             AllowedFunctionTool(analysis, is_read_only=True),
-            AllowedFunctionTool(cve_search, is_read_only=True),
-            AllowedFunctionTool(execute_sagemath, is_read_only=True), 
             create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="attack", artifact_root=artifact_root),
-            create_tesseract_ocr_tool(project_dir, timeout=min(timeout, 90)),
-            create_tonydec_tool(project_dir),
             *antsword_tools,
-            *create_tool_catalog_tools("attack"),
+            *create_tool_catalog_tools("attack", categories=catalog_categories),
         ]
-    if vision_model is not None and vision_roots:
+    if target_kind == "network" or categories.intersection({"web", "malware", "unknown"}):
+        tools.append(AllowedFunctionTool(cve_search, is_read_only=True))
+    if categories.intersection({"crypto", "misc"}):
+        tools.append(AllowedFunctionTool(execute_sagemath, is_read_only=True))
+    if categories.intersection({"forensics", "malware", "misc", "osint", "ai-ml"}):
+        tools.append(create_tesseract_ocr_tool(project_dir, timeout=min(timeout, 90)))
+    if categories.intersection({"forensics", "malware", "misc"}):
+        tools.append(create_tonydec_tool(project_dir))
+    if vision_model is not None and vision_roots and categories.intersection({
+        "web", "forensics", "malware", "misc", "osint", "ai-ml",
+    }):
         tools.append(create_vision_analysis_tool(vision_model, vision_roots))
-    categories = {
-        str((category_decision or {}).get("primary") or ""),
-        *[str(item) for item in (category_decision or {}).get("secondary", [])],
-    }
     if categories.intersection({"forensics", "malware"}) and forensic_roots:
         tools.extend(create_volatility_tools(forensic_roots, timeout=max(timeout, 300)))
-    toolkit = StrictJSONToolkit(
-        tools=tools,
-        skills_or_loaders=skill_list,
-    )
+    skill_groups = []
+    if skill_list:
+        skill_groups.append(ToolGroup(
+            name="task_skills",
+            description=(
+                f"当前 {primary} 题型的按需方法库；仅在需要具体方法或检查清单时激活，"
+                "不用于一般工具调用。"
+            ),
+            skills_or_loaders=skill_list,
+        ))
+    toolkit = StrictJSONToolkit(tools=tools, tool_groups=skill_groups)
     agent = Agent(
         name=attack_expert_name(
             str((category_decision or {}).get("primary") or "unknown"),
             str((category_decision or {}).get("target_kind") or ""),
             expert_context,
         ),
-        system_prompt=append_capability_summary(ATTACK_SYS_PROMPT, "attack"),
+        system_prompt=append_capability_summary(
+            ATTACK_SYS_PROMPT,
+            "attack",
+            categories=catalog_categories,
+        ),
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
@@ -345,6 +441,10 @@ async def close_attack_agent(agent: Agent | None) -> None:
     """关闭 Attack 任务持有的 AntSword SSE 会话，不关闭 GUI 服务。"""
     if agent is None:
         return
+    if hasattr(agent, "get_if_loaded"):
+        agent = agent.get_if_loaded()
+        if agent is None:
+            return
     client = getattr(agent, "_antsword_mcp_client", None)
     if (
         client is not None

@@ -34,77 +34,21 @@ from agent.experts import ORCHESTRATOR_EXPERT
 from agent.categorize import extract_recon_signals
 
 
-ORCHESTRATOR_SYS_PROMPT = """# 网络安全行动总指挥（Orchestrator）
+ORCHESTRATOR_SYS_PROMPT = """你是网络安全行动总指挥（Orchestrator）。
+你是唯一可推进任务阶段、维护计划与结束任务的角色；只负责状态、证据与专家调度，
+不得亲自进行扫描分析、CVE 匹配、利用参数生成、Flag 判断或其他专家计算。
 
-## 角色
-你是网络安全行动总指挥（Orchestrator），**唯一拥有任务阶段推进、证据记录与任务结束权的核心决策者**。需严格调度Recon/Attack等智能体执行分工，**禁止亲自处理任何计算类任务**（如漏洞利用逻辑计算、CVE匹配、攻击参数生成、Flag校验等），所有计算任务必须通过调度智能体完成。
-
-
-## 技能
-
-### 技能 1：被动侦察调度（dispatch_recon）
-- **功能**：派遣Recon智能体执行纯被动信息收集（端口/服务/指纹/页面源码）
-- **限制**：仅负责调度指令生成，**不参与端口扫描结果分析、服务指纹比对等计算型工作**，需将原始数据直接传递给Recon智能体处理
-
-
-### 技能 2：攻击行动调度（dispatch_attack）
-- **功能**：派遣Attack智能体执行验证/利用/目标达成等主动操作
-- **关键约束**：所有攻击参数（如payload生成、漏洞利用逻辑）**必须由Attack智能体自主计算**，总指挥仅负责指令触发（如调用`dispatch_attack`并指定目标服务）
-
-
-### 技能 3：利用类攻击批准请求（request_exploitation_approval）
-- **功能**：提交攻击前审批申请，**仅需描述攻击目标与依据证据**（不包含攻击计算过程）
-- **输出格式**：
-  ```text
-  🔒 请求批准
-  - 目标服务：<IP:端口>
-  - 攻击类型：<漏洞类型/CVE编号>
-  - 计算依据：<Recon获取的指纹数据>
-  ```
-
-
-### 技能 4-6：作战计划管理、历史经验查询、任务收尾
-- **原功能保留**，但明确：
-  - 查询历史经验（QueryMemory）仅调用智能体返回结果，不自行分析CVE匹配逻辑
-  - 提交Flag（submit_nss_flag）仅触发智能体执行校验，不参与Flag正确性计算
-  - 提交Flag（submit_slab_flag）仅触发智能体执行校验，不参与Flag正确性计算
-  - 任务状态更新（UpdatePlan）仅记录智能体返回的计算结果（如"攻击成功/失败"）
-
-
-## 新增限制
-1. **禁止计算型任务**：不亲自执行任何计算，包括但不限于：
-   - 漏洞利用逻辑设计与参数生成
-   - CVE漏洞匹配与攻击链计算
-   - NSSCTF Flag校验算法及结果判断
-   - 端口扫描结果的有效性分析
-   - 攻击路径的计算优化（如最优Payload选择）
-
-2. **严格委托原则**：所有计算密集型任务必须通过智能体执行：
-   - 侦察结果分析 → 由Recon智能体生成原始数据后，通过action接口传递给总指挥
-   - 攻击动作执行 → 仅触发Attack智能体执行，不干预其内部计算过程
-   - 作战方案优化 → 仅基于智能体返回的计算结果（如"剩余尝试次数"）调整计划
-
-3. **计算型指令规范**：需通过结构化指令触发智能体计算：
-   - 调用`QueryMemory`获取历史攻击经验（由智能体返回计算结果）
-   - 使用`submit_nss_flag`提交Flag校验（由任务系统直接处理计算逻辑）
-
-4. **状态监控边界**：仅依据智能体返回的状态信息（如"攻击次数剩余2次"）进行任务管理，不自行计算剩余次数
-
-
-## 原有限制延续
-- 必须通过request_exploitation_approval获取攻击批准
-- 内网IP扩容需走request_scope_expansion流程
-- 作战计划需通过AddPlan/UpdatePlan维护，禁止无证据标记完成
-- 禁止伪造任务结果，未完成任务需明确标注失败状态
-
-## Hypothesis / Failed Path 执行纪律
-- 对需要验证的判断先调用 manage_hypothesis(propose)，后续 dispatch_* 传入 hypothesis_id。
-- 每轮先读取当前有效 Hypothesis 与近期 Failed Paths；rejected 假设必须停止原路径。
-- transient 才允许原参数 Retry；parameter 必须改参数；tool/environment/method 必须 Fallback。
-- 工具返回的 Action Dedup/Failed Path 提示是确定性约束，不得仅改写自然语言绕过。
-
-（注：所有计算型任务的输出参数必须由智能体返回，总指挥仅负责指令触发与流程控制）
-
+执行规则：
+- 只调用本轮 Toolkit 实际提供的能力；未出现的专家、提交或扩容工具视为不可用。
+- Recon 负责侦察，Attack 负责验证/利用，Reverse 仅在其调度工具存在时处理二进制。
+- 首次进入利用前必须调用 request_exploitation_approval；拒绝时不得绕过。
+- 用 AddPlan/UpdatePlan/DeletePlan/ListPlan 维护计划；completed 必须附真实证据。
+- 对待验证判断先 manage_hypothesis(propose)，dispatch 时关联 hypothesis_id。
+- 每轮读取有效 Hypothesis 和近期 Failed Paths：rejected 停止原路径；transient 才可
+  原参数 Retry；parameter 必须改参数；tool/environment/method 必须 Fallback。
+- Action Dedup/Failed Path 返回是确定性约束，不得靠改写自然语言绕过。
+- 只依据真实 Agent/Tool 结果更新状态；不得伪造成功。无法完成时如实失败收尾。
+- 达成目标或已无有效路径时立即调用 complete_mission，禁止无信息增益地继续循环。
 """
 
 
@@ -180,7 +124,10 @@ def create_orchestrator_agent(
                 recon_agent,
                 UserMsg(
                     name="Orchestrator",
-                    content=f"授权目标：{mission.target}\n本轮重点：{focus}\n收集到足够证据后立即输出最终报告，禁止继续调用工具。",
+                    content=(
+                        f"授权目标：{mission.target}\n本轮重点：{focus[:2000]}\n"
+                        "收集到足够证据后立即输出最终报告，禁止继续调用工具。"
+                    ),
                 ),
                 prefix="[Recon] ",
                 on_event=event_callback,
@@ -339,8 +286,8 @@ def create_orchestrator_agent(
                 UserMsg(
                     name="Orchestrator",
                     content=(
-                        f"授权目标：{mission.target}\n本轮目标：{objective}\n\n"
-                        f"真实目标信息：\n{target_info}\n\n"
+                        f"授权目标：{mission.target}\n本轮目标：{objective[:1500]}\n\n"
+                        f"真实目标信息（当前相关证据）：\n{target_info[:8000]}\n\n"
                         "完成分析/验证后立即输出最终报告，禁止继续调用工具。"
                     ),
                 ),
@@ -452,7 +399,7 @@ def create_orchestrator_agent(
                     content=(
                         f"授权目标：{mission.target}\n"
                         f"二进制文件：{binary_path}\n"
-                        f"本轮目标：{objective}\n\n"
+                        f"本轮目标：{objective[:1500]}\n\n"
                         "先调用 ida_open_binary 打开文件并保存 database 会话 ID，"
                         "禁止手动启动 idat 或直接调用 idb_open；需要动态验证时使用 "
                         "gdb_create_session，结束后关闭 GDB 会话。\n"
@@ -760,12 +707,9 @@ def create_orchestrator_agent(
     def view_mission_state() -> dict:
         """查看有界决策状态；完整状态仍持久化，但不灌入 Agent Prompt。"""
         return {
-            "target": mission.target, "goal": mission.goal,
-            "phase": mission.phase.value, "success": mission.success,
+            "context_layers": mission.context_layers(limit=8),
+            "success": mission.success,
             "active_plan_item": mission.active_plan_item,
-            "plan_items": mission.plan_items,
-            "facts": [item.content for item in mission.facts[-12:]],
-            "execution": mission.execution_context(limit=8),
             "budgets": {
                 "action": {"used": mission.action_budget.used, "limit": mission.action_budget.limit},
                 "tool": {"used": mission.tool_budget.used, "limit": mission.tool_budget.limit},
@@ -992,7 +936,6 @@ def create_orchestrator_agent(
     tools = [
         AllowedFunctionTool(dispatch_recon, is_concurrency_safe=False),
         AllowedFunctionTool(dispatch_attack, is_concurrency_safe=False),
-        AllowedFunctionTool(dispatch_reverse, is_concurrency_safe=False),
         AllowedFunctionTool(manage_hypothesis, is_concurrency_safe=False),
         AllowedFunctionTool(view_mission_state, is_read_only=True),
         create_add_plan_tool(mission, store, event_callback, default_origin="orchestrator"),
@@ -1001,14 +944,38 @@ def create_orchestrator_agent(
         create_list_plan_tool(mission),
         AllowedFunctionTool(complete_mission, is_concurrency_safe=False),
         AllowedFunctionTool(request_exploitation_approval, is_concurrency_safe=False),
-        AllowedFunctionTool(request_scope_expansion, is_concurrency_safe=False),
-        AllowedFunctionTool(submit_nss_flag, is_concurrency_safe=False),
-        AllowedFunctionTool(submit_slab_flag, is_concurrency_safe=False),
         create_query_memory_tool(),
     ]
+    category = str((mission.category_decision or {}).get("primary") or "unknown")
+    target_kind = str((mission.target_spec or {}).get("kind") or "")
+    if category in {"pwn", "reverse", "malware"} or target_kind != "network":
+        tools.append(AllowedFunctionTool(dispatch_reverse, is_concurrency_safe=False))
+    if target_kind == "network":
+        tools.append(AllowedFunctionTool(request_scope_expansion, is_concurrency_safe=False))
+    if nss_context:
+        tools.append(AllowedFunctionTool(submit_nss_flag, is_concurrency_safe=False))
+    if slab_context:
+        tools.append(AllowedFunctionTool(submit_slab_flag, is_concurrency_safe=False))
+    enabled_capabilities = [
+        "recon", "attack", "hypothesis", "plan", "state", "approval", "memory",
+    ]
+    if category in {"pwn", "reverse", "malware"} or target_kind != "network":
+        enabled_capabilities.append("reverse")
+    if target_kind == "network":
+        enabled_capabilities.append("scope_expansion")
+    if nss_context:
+        enabled_capabilities.append("nss_submit")
+    if slab_context:
+        enabled_capabilities.append("slab_submit")
+    orchestrator_prompt = (
+        ORCHESTRATOR_SYS_PROMPT
+        + "\n本轮已启用职责："
+        + ", ".join(enabled_capabilities)
+        + "。"
+    )
     return Agent(
         name=ORCHESTRATOR_EXPERT,
-        system_prompt=ORCHESTRATOR_SYS_PROMPT,
+        system_prompt=orchestrator_prompt,
         model=model,
         toolkit=StrictJSONToolkit(tools=tools),
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),

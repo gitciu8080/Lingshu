@@ -19,6 +19,16 @@ TRIGGER_RATIO = 0.75
 RESERVE_RATIO = 0.12
 TOOL_RESULT_LIMIT = 4000
 
+_ROLE_CONTEXT_PROFILES: dict[str, tuple[float, float, int]] = {
+    "brain": (0.75, 0.10, 1800),
+    "recon": (0.70, 0.10, 2400),
+    "analysis": (0.70, 0.10, 1800),
+    "attack": (0.68, 0.10, 2600),
+    "reserve": (0.68, 0.10, 2800),
+    "orchestrator": (0.70, 0.10, 2400),
+    "summary": (0.70, 0.10, 2600),
+}
+
 # 自定义摘要 Schema：压缩时必须保留的恢复语义字段。
 # 由 agent 的压缩模型按此结构输出，缺失字段时旧摘要不丢失关键信息。
 SUMMARY_SCHEMA: dict = {
@@ -70,12 +80,16 @@ SUMMARY_SCHEMA: dict = {
 }
 
 
-def build_agent_context_config() -> ContextConfig:
-    """返回灵枢统一的 ContextConfig（计划锁定的参数与摘要 Schema）。"""
+def build_agent_context_config(role: str = "") -> ContextConfig:
+    """返回角色级 ContextConfig；无 role 时保持第一批默认契约。"""
+    trigger, reserve, tool_limit = _ROLE_CONTEXT_PROFILES.get(
+        role.strip().lower(),
+        (TRIGGER_RATIO, RESERVE_RATIO, TOOL_RESULT_LIMIT),
+    )
     return ContextConfig(
-        trigger_ratio=TRIGGER_RATIO,
-        reserve_ratio=RESERVE_RATIO,
-        tool_result_limit=TOOL_RESULT_LIMIT,
+        trigger_ratio=trigger,
+        reserve_ratio=reserve,
+        tool_result_limit=tool_limit,
         summary_schema=SUMMARY_SCHEMA,
     )
 

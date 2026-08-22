@@ -49,6 +49,45 @@ class AgentMaxIterationsError(RuntimeError):
     """
 
 
+class LazyAgent:
+    """首次收到 reply 时才构造真实 Agent 的异步惰性句柄。
+
+    Orchestrator 仍只看到原来的 Agent 协议（name/reply_stream），因此无需改变
+    调度工具或状态机。初始化使用锁保证并发工具路径最多创建一次实例。
+    """
+
+    def __init__(self, name: str, factory: Callable[[], Any]) -> None:
+        self.name = name
+        self._factory = factory
+        self._agent: Agent | None = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def loaded(self) -> bool:
+        return self._agent is not None
+
+    def get_if_loaded(self) -> Agent | None:
+        return self._agent
+
+    async def get(self) -> Agent:
+        if self._agent is not None:
+            return self._agent
+        async with self._lock:
+            if self._agent is None:
+                created = self._factory()
+                if hasattr(created, "__await__"):
+                    created = await created
+                if not isinstance(created, Agent):
+                    raise TypeError(f"LazyAgent factory 未返回 Agent: {type(created)!r}")
+                self._agent = created
+        return self._agent
+
+    async def reply_stream(self, *args: Any, **kwargs: Any):
+        agent = await self.get()
+        async for item in agent.reply_stream(*args, **kwargs):
+            yield item
+
+
 class ToolJSONValidationError(RuntimeError):
     """模型连续两次返回损坏或不符合 schema 的工具参数。"""
 

@@ -779,6 +779,94 @@ class MissionState:
             "failed_paths": [asdict(item) for item in self.failed_paths[-limit:]],
         }
 
+    def context_layers(self, *, limit: int = 8) -> dict[str, Any]:
+        """返回 Core/Working/Historical 三层有界上下文。
+
+        Historical 只提供引用与计数；需要完整记录时由状态工具/持久化层查询，
+        不在每轮 LLM 请求中重复注入。
+        """
+        active_hypotheses = [
+            item for item in self.hypotheses
+            if item.status not in {"rejected", "confirmed"}
+        ][-limit:]
+        current_plans = [
+            item for item in self.plan_items
+            if item.get("status") in {"pending", "in_progress"}
+        ][:limit]
+        recent_actions = self.action_history[-limit:]
+        recent_evidence = self.evidence_records[-limit:]
+        recent_failures = self.failed_paths[-limit:]
+        terminal_hypotheses = [
+            item for item in self.hypotheses
+            if item.status in {"rejected", "confirmed"}
+        ][-limit:]
+        return {
+            "core_state": {
+                "task": self.goal,
+                "target": self.target,
+                "phase": self.phase.value,
+                "authorized": self.authorized,
+                "approval": self.exploitation_approved,
+                "hypotheses": [
+                    {
+                        "id": item.id, "statement": item.statement[:800],
+                        "status": item.status, "confidence": item.confidence,
+                        "next_validation": item.next_validation[:500],
+                    }
+                    for item in active_hypotheses
+                ],
+                "facts": [
+                    {
+                        "id": item.id, "content": item.content[:800],
+                        "confidence": item.confidence,
+                        "evidence_ids": item.evidence_ids,
+                    }
+                    for item in self.facts[-limit:]
+                ],
+            },
+            "working_context": {
+                "plan_items": _bounded_data(current_plans),
+                "evidence": [
+                    {
+                        "id": item.id, "source": item.source, "kind": item.kind,
+                        "summary": item.summary[:800], "artifact": item.artifact,
+                    }
+                    for item in recent_evidence
+                ],
+                "recent_actions": [
+                    {
+                        "id": item.id, "tool": item.tool, "status": item.status,
+                        "context": item.context[:400],
+                        "result": item.result_summary[:600],
+                    }
+                    for item in recent_actions
+                ],
+                "recent_failed_paths": [
+                    {
+                        "id": item.id, "tool": item.tool,
+                        "failure_type": item.failure_type,
+                        "reason": item.failure_reason[:500],
+                        "resolution": item.resolution,
+                        "hypothesis": item.related_hypothesis,
+                    }
+                    for item in recent_failures
+                ],
+            },
+            "historical_context": {
+                "counts": {
+                    "facts": len(self.facts), "evidence": len(self.evidence_records),
+                    "actions": len(self.action_history),
+                    "failed_paths": len(self.failed_paths),
+                    "hypotheses": len(self.hypotheses),
+                },
+                "terminal_hypotheses": [
+                    {"id": item.id, "status": item.status}
+                    for item in terminal_hypotheses
+                ],
+                "agent_context_refs": dict(self.agent_context_refs),
+            },
+        }
+
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["phase"] = self.phase.value

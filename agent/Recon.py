@@ -33,12 +33,11 @@ NETWORK_RECON_SYS_PROMPT = """你是网络安全信息侦察专家（NetworkReco
   禁止发送 POST/PUT/PATCH 请求体、禁止注入 payload、禁止验证漏洞、禁止执行远程命令。
   即使页面源码里发现了疑似后门（如 eval/exec/system），也只能报告不利用。
 - 不声称未由工具输出证明的端口、版本、目录或漏洞。
-- 若授权会话工作区中已有网页截图或目标图片，可主动调用 analyze_image 理解
-  页面结构和视觉线索；不得借此读取本任务目录之外的图片。
+- 若本轮 Toolkit 提供 analyze_image 且工作区已有相关图片，可用于理解视觉线索。
 - 不修改全局任务状态，也不在任意路径写文件。
 
 cve_search 使用策略：
-- 仅在任务上下文中明确提到具体 CVE 编号时（如 "CVE-2018-2894"），才调用 cve_search 获取公开情报。
+- 仅当本轮 Toolkit 提供且任务上下文明确提到具体 CVE 编号时，才调用它获取公开情报。
   其他情况一律不调用 cve_search，专注于 scoped_shell 的被动收集。
 - 调用 cve_search 最多 1-2 次，获取到情报后立即纳入报告。
 
@@ -64,18 +63,22 @@ def create_network_recon_agent(
     artifact_root: str | Path | None = None,
     vision_model=None,
     vision_roots: tuple[str | Path, ...] = (),
+    include_cve_search: bool = True,
 ) -> Agent:
     tools = [
         create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root),
-        create_cve_search_tool(),
-        *create_tool_catalog_tools("recon"),
+        *create_tool_catalog_tools("recon", categories={"recon", "web"}),
     ]
+    if include_cve_search:
+        tools.append(create_cve_search_tool())
     if vision_model is not None and vision_roots:
         tools.append(create_vision_analysis_tool(vision_model, vision_roots))
     toolkit = StrictJSONToolkit(tools=tools)
     return Agent(
         name=NETWORK_RECON_EXPERT,
-        system_prompt=append_capability_summary(NETWORK_RECON_SYS_PROMPT, "recon"),
+        system_prompt=append_capability_summary(
+            NETWORK_RECON_SYS_PROMPT, "recon", categories={"recon", "web"},
+        ),
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),
@@ -96,13 +99,12 @@ ARTIFACT_TRIAGE_SYS_PROMPT = """你是 CTF 文件分析专家（ArtifactTriage�
 - 使用 scoped_shell 仅在工作目录内执行只读分析命令。
 - 先获取文件列表，识别文件类型（ELF/PE/PCAP/镜像/脚本/加密文件等）。
 - 对 ELF 执行 checksec/readelf；对 PCAP 执行 tcpdump/capinfos；对压缩包执行 file/unzip -l。
-- 对图片、截图或扫描文档可调用 ocr_image，使用 Tesseract 提取文本。
-- 发现图片、截图、图表、二维码、界面或视觉型题目时，主动调用 analyze_image
-  理解画面语义和安全线索；需要逐字提取时再用 ocr_image 交叉验证。
-- 发现 .raw/.mem/.vmem/.dmp 等内存镜像时，使用 volatility_analyze：先运行
+- 可选的 OCR、视觉、TonyDec、Volatility 能力仅在本轮文件类型需要时挂载；
+  只使用 Toolkit 实际提供的工具，不得臆造未挂载能力。
+- Toolkit 提供 volatility_analyze 且发现内存镜像时，先运行
   imageinfo 或 kdbgscan 确认 profile，再运行 pslist/psscan、netscan、cmdline、
   consoles、filescan、malfind 等取证插件。不得凭文件扩展名猜测 profile。
-- 若文件头完整匹配 6688ff4f6886005611611618，调用 tonydec 解码到新的输出路径，
+- Toolkit 提供 tonydec 且文件头完整匹配 6688ff4f6886005611611618 时才解码，
   再用 file/xxd/strings 确认真实格式；未匹配时不得猜测为 TonyEnc。
 - 绝不直接执行二进制文件（./chall 等）— 这属于 Attack 阶段的职责。
 - 不执行漏洞利用、口令爆破或破坏性操作。
@@ -130,21 +132,31 @@ def create_artifact_triage_agent(
     artifact_root: str | Path | None = None,
     vision_model=None,
     vision_roots: tuple[str | Path, ...] = (),
+    capability_categories: set[str] | None = None,
 ) -> Agent:
     """创建文件分析 Agent，工作目录约束在 workdir 内。"""
+    selected = set(capability_categories or {"forensics", "reverse", "mobile", "misc"})
+    catalog_categories = selected.intersection({"forensics", "reverse", "mobile"})
     tools = [
             create_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root),
-            create_tesseract_ocr_tool(workdir, timeout=min(timeout, 90)),
-            create_tonydec_tool(workdir),
-            *create_volatility_tools((workdir,), timeout=max(timeout, 300)),
-            *create_tool_catalog_tools("triage"),
+            *create_tool_catalog_tools("triage", categories=catalog_categories),
         ]
-    if vision_model is not None:
+    if selected.intersection({"forensics", "misc", "osint", "ai-ml"}):
+        tools.append(create_tesseract_ocr_tool(workdir, timeout=min(timeout, 90)))
+    if selected.intersection({"forensics", "malware", "misc"}):
+        tools.append(create_tonydec_tool(workdir))
+    if selected.intersection({"forensics", "malware"}):
+        tools.extend(create_volatility_tools((workdir,), timeout=max(timeout, 300)))
+    if vision_model is not None and selected.intersection({
+        "forensics", "misc", "osint", "ai-ml",
+    }):
         tools.append(create_vision_analysis_tool(vision_model, vision_roots or (workdir,)))
     toolkit = StrictJSONToolkit(tools=tools)
     return Agent(
         name=ARTIFACT_TRIAGE_EXPERT,
-        system_prompt=append_capability_summary(ARTIFACT_TRIAGE_SYS_PROMPT, "triage"),
+        system_prompt=append_capability_summary(
+            ARTIFACT_TRIAGE_SYS_PROMPT, "triage", categories=catalog_categories,
+        ),
         model=model,
         toolkit=toolkit,
         react_config=ReActConfig(max_iters=max_iters, interruption_raise_cancelled_error=True),

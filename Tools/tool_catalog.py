@@ -153,15 +153,32 @@ class ToolCatalog:
                 self._cache_at = now
             return [dict(item) for item in self._cache.values()]
 
-    def for_role(self, role: str, *, include_unavailable: bool = False) -> list[dict[str, Any]]:
+    def for_role(
+        self,
+        role: str,
+        *,
+        include_unavailable: bool = False,
+        categories: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         normalized = role.strip().lower()
         items = [item for item in self.snapshot() if normalized in item["roles"]]
+        normalized_categories = {
+            str(item).strip().lower() for item in (categories or set()) if str(item).strip()
+        }
+        if normalized_categories:
+            items = [item for item in items if item["category"] in normalized_categories]
         if not include_unavailable:
             items = [item for item in items if item["status"] == "available"]
         return sorted(items, key=lambda item: (item["category"], item["id"]))
 
-    def capability_summary(self, role: str, *, max_items: int = 36) -> str:
-        items = self.for_role(role)[:max_items]
+    def capability_summary(
+        self,
+        role: str,
+        *,
+        max_items: int = 18,
+        categories: set[str] | None = None,
+    ) -> str:
+        items = self.for_role(role, categories=categories)[:max_items]
         if not items:
             return "\n\n## 动态工具能力\n当前运行环境没有检测到分配给本角色的系统命令；只使用 Toolkit 中实际注册的函数/MCP 工具。"
         groups: dict[str, list[str]] = {}
@@ -173,9 +190,19 @@ class ToolCatalog:
         lines.append("仅可使用以上系统命令及 Toolkit 中实际出现的函数/MCP 工具；需要参数说明时调用 get_tool_usage。")
         return "\n".join(lines)
 
-    def get(self, tool_id: str, role: str) -> dict[str, Any] | None:
+    def get(
+        self,
+        tool_id: str,
+        role: str,
+        *,
+        categories: set[str] | None = None,
+    ) -> dict[str, Any] | None:
         normalized = tool_id.strip().lower()
-        return next((item for item in self.for_role(role, include_unavailable=True) if item["id"] == normalized), None)
+        return next((
+            item for item in self.for_role(
+                role, include_unavailable=True, categories=categories,
+            ) if item["id"] == normalized
+        ), None)
 
 
 _DEFAULT_CATALOG: ToolCatalog | None = None
@@ -190,7 +217,12 @@ def get_tool_catalog() -> ToolCatalog:
         return _DEFAULT_CATALOG
 
 
-def create_tool_catalog_tools(role: str, catalog: ToolCatalog | None = None) -> list[AllowedFunctionTool]:
+def create_tool_catalog_tools(
+    role: str,
+    catalog: ToolCatalog | None = None,
+    *,
+    categories: set[str] | None = None,
+) -> list[AllowedFunctionTool]:
     """创建仅展示当前角色有效能力的查询工具。"""
     active_catalog = catalog or get_tool_catalog()
     normalized_role = role.strip().lower()
@@ -204,7 +236,7 @@ def create_tool_catalog_tools(role: str, catalog: ToolCatalog | None = None) -> 
         """
         category_key = category.strip().lower()
         keyword_key = keyword.strip().lower()
-        items = active_catalog.for_role(normalized_role)
+        items = active_catalog.for_role(normalized_role, categories=categories)
         if category_key:
             items = [item for item in items if item["category"] == category_key]
         if keyword_key:
@@ -226,7 +258,9 @@ def create_tool_catalog_tools(role: str, catalog: ToolCatalog | None = None) -> 
         Args:
             tool_id: list_available_tools 返回的工具 id。
         """
-        item = active_catalog.get(tool_id, normalized_role)
+        item = active_catalog.get(
+            tool_id, normalized_role, categories=categories,
+        )
         if item is None:
             return "该工具未分配给当前 Agent。"
         if item["status"] != "available":
@@ -244,5 +278,13 @@ def create_tool_catalog_tools(role: str, catalog: ToolCatalog | None = None) -> 
     ]
 
 
-def append_capability_summary(system_prompt: str, role: str, catalog: ToolCatalog | None = None) -> str:
-    return system_prompt.rstrip() + (catalog or get_tool_catalog()).capability_summary(role)
+def append_capability_summary(
+    system_prompt: str,
+    role: str,
+    catalog: ToolCatalog | None = None,
+    *,
+    categories: set[str] | None = None,
+) -> str:
+    return system_prompt.rstrip() + (catalog or get_tool_catalog()).capability_summary(
+        role, categories=categories,
+    )

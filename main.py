@@ -53,7 +53,13 @@ from agent.Recon import (
 from agent.Summary import SUMMARY_EXPERT, create_summary_agent  # 对话总结与报告 Agent
 from agent.Reserve import close_reverse_agent, create_reverse_agent  # 逆向分析 Agent（IDA MCP）
 from agent.ScopeAuditor import create_scope_auditor_agent  # IP 授权审核 Agent
-from agent.experts import build_expert_assignments
+from agent.experts import (
+    ANALYSIS_EXPERT,
+    REVERSE_EXPERT,
+    SCOPE_AUDITOR_EXPERT,
+    attack_expert_name,
+    build_expert_assignments,
+)
 from Tools.Plan import (  # Brain 计划登记工具
     create_add_plan_tool,
     create_submit_plan_tool,
@@ -74,6 +80,7 @@ from agent.context import (  # 内部 Agent 的统一 Offloader/ContextConfig/�
 from workspace_service import get_workspace_service  # Workspace v2 生命周期
 from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     AgentMaxIterationsError,
+    LazyAgent,
     ToolJSONValidationError,
     bind_action_lifecycle_handler,
     bind_agent_tasks,
@@ -513,6 +520,13 @@ def _build_summary_transcript(messages: list[dict], maximum_chars: int = 120_000
     return prefix + "\n".join(selected)
 
 
+def _summary_mission_context(mission: MissionState) -> dict[str, Any]:
+    """返回报告专用完整状态；仅移除已在 transcript 中提供的原始事件流。"""
+    data = mission.to_dict()
+    data.pop("events", None)
+    return data
+
+
 async def run_summary_report(
     mission: MissionState,
     *,
@@ -543,8 +557,7 @@ async def run_summary_report(
         生成的报告正文 Markdown
     """
     transcript = _build_summary_transcript(messages)
-    mission_data = mission.to_dict()
-    mission_data.pop("events", None)
+    mission_data = _summary_mission_context(mission)
     prompt = (
         "请总结以下一次完整授权安全测试。\n\n"
         f"【结构化任务状态】\n{json.dumps(mission_data, ensure_ascii=False, indent=2)[:50000]}\n\n"
@@ -572,6 +585,7 @@ async def run_summary_report(
         summary_agent = create_summary_agent(
             model,
             offloader=offloader,
+            # 报告完整性优先，不使用运行阶段为低延迟设置的角色级裁剪。
             context_config=build_agent_context_config(),
         )
         token = bind_agent_tasks(agent_tasks if agent_tasks is not None else set())
@@ -1597,12 +1611,13 @@ async def run_mission(
         # 全局 WorkDir，仅用于打开旧会话。
         if use_v2_workspace:
             workspace = await ws_service.get(user_id, mission_id)
-            context_config = build_agent_context_config()
             ws_root = ws_service.workspace_dir(user_id, mission_id)
         else:
             workspace = None
-            context_config = None
             ws_root = None
+
+        def _role_context(role: str):
+            return build_agent_context_config(role) if use_v2_workspace else None
 
         # ── 5. 模型与基础 Agent ──
         # Qwen 启动前必须核对 llama.cpp 实际加载的模型。只有服务端唯一模型
@@ -1632,11 +1647,26 @@ async def run_mission(
         # 创建共享模型；Qwen 的纯文本温度沿用这里的配置，工具调用由模型
         # 适配层固定为 0.1。
         model = create_model(provider=provider, Ver=model_ver, temperature=None, config=runtime)
-        # 视觉分析使用独立模型实例，避免嵌套工具调用与主 Agent 的流式状态
-        # 相互干扰。即使主任务选择 Qwen/GLM，只要管理员配置了 DeepSeek
-        # 凭证，专家也可按需调用 V4 Flash Vision；未配置时静默不挂载工具。
+        # 视觉模型只在文件/视觉题型存在实际需求时创建；网络任务不会再因空
+        # Workspace 默认承担额外模型和 schema 上下文。
         vision_model = None
-        if runtime.get_api_key("deepseek") and runtime.get_base_url("deepseek"):
+        initial_categories = {
+            str(category_decision.primary or "unknown"),
+            *[str(item) for item in category_decision.secondary],
+        }
+        visual_signal = any(term in goal_text.lower() for term in (
+            "image", "screenshot", "qr", "图片", "截图", "二维码", "图像",
+        ))
+        needs_vision = (
+            target_spec.kind != "network"
+            or visual_signal
+            or bool(initial_categories.intersection({"forensics", "misc", "osint", "ai-ml"}))
+        )
+        if (
+            needs_vision
+            and runtime.get_api_key("deepseek")
+            and runtime.get_base_url("deepseek")
+        ):
             try:
                 vision_model = create_model(
                     provider="deepseek",
@@ -1664,7 +1694,18 @@ async def run_mission(
         # Brain 通过 SubmitPlan 一次原子提交完整计划，避免 Qwen 长工具参数
         # 被拆成多次 AddPlan 后留下半份持久化状态。
         rag_service = get_rag_service(project_dir)
-        await rag_service.start()
+        # Brain 只有在初始分类不确定且任务复杂时才需要历史知识辅助；正式分类
+        # 清晰时仅使用首轮 Recon Facts，避免每个任务都启动向量库/Embedding。
+        brain_needs_rag = (
+            complexity == "complex"
+            and (
+                category_decision.primary == "unknown"
+                or category_decision.confidence < 0.55
+            )
+        )
+        if brain_needs_rag:
+            await rag_service.start()
+        brain_rag_middleware = rag_service.middleware() if brain_needs_rag else None
         # AgentWorld 等本地 Qwen 对扁平参数工具更可靠；标准模式用于验证
         # 嵌套批量工具协议。DeepSeek 始终保持原子 SubmitPlan。
         qwen_flat_plan_tools = (
@@ -1682,17 +1723,23 @@ async def run_mission(
             max_iters=(15 if qwen_flat_plan_tools else _iter_budget(
                 target_spec.kind, "brain", complexity,
             )),
-            rag_middleware=rag_service.middleware(),
+            rag_middleware=brain_rag_middleware,
             plan_tool_mode="item" if qwen_flat_plan_tools else "batch",
             offloader=workspace,
-            context_config=context_config,
+            context_config=_role_context("brain"),
             state=build_role_agent_state(mission_id, "brain") if use_v2_workspace else None,
         )
-        analysis = create_analysis_agent(
-            model,
-            offloader=workspace,
-            context_config=context_config,
-            state=build_role_agent_state(mission_id, "analysis") if use_v2_workspace else None,
+        analysis = LazyAgent(
+            ANALYSIS_EXPERT,
+            lambda: create_analysis_agent(
+                model,
+                offloader=workspace,
+                context_config=_role_context("analysis"),
+                state=(
+                    build_role_agent_state(mission_id, "analysis")
+                    if use_v2_workspace else None
+                ),
+            ),
         )
 
         # ── 6. Recon / Triage 路由 ──
@@ -1705,22 +1752,27 @@ async def run_mission(
                 scope_registry=scope_registry,
                 max_iters=_iter_budget(target_spec.kind, "recon", complexity),
                 offloader=workspace,
-                context_config=context_config,
+                context_config=_role_context("recon"),
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
                 artifact_root=ws_root,
                 vision_model=vision_model,
                 vision_roots=vision_roots,
+                include_cve_search=bool(re.search(r"\bCVE-\d{4}-\d+\b", goal_text, re.IGNORECASE)),
             )
         else:
+            triage_categories = set(initial_categories)
+            if "unknown" in triage_categories:
+                triage_categories.update({"forensics", "reverse", "misc"})
             recon = create_artifact_triage_agent(
                 model, workdir, project_dir, runtime.command_timeout,
                 max_iters=_iter_budget(target_spec.kind, "recon", complexity),
                 offloader=workspace,
-                context_config=context_config,
+                context_config=_role_context("recon"),
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
                 artifact_root=ws_root,
                 vision_model=vision_model,
                 vision_roots=vision_roots,
+                capability_categories=triage_categories,
             )
 
         # ── 6b. 首轮 Recon/Triage 与二次分类 ──
@@ -1915,50 +1967,101 @@ async def run_mission(
         _push_target_info()   # 首次推送靶机信息
         print(f"[Brain] 作战计划\n{mission.plan}\n")
 
-        # ── 8. Attack 延迟创建（Recon 后可能会 reclassify）──
-        # 传入当前任务携带的分类结果；若后续 Recon 触发重分类，
-        # Orchestrator 会更新 mission.category_decision，Attack 据此动态加载 Skill。
-        attack = await create_attack_agent(
-            model,
-            analysis,
-            mission.target,
-            project_dir,
-            runtime.command_timeout,
-            category_decision=mission.category_decision,
-            scope_registry=scope_registry,
-            max_iters=_iter_budget(target_spec.kind, "attack", complexity, len(mission.plan_items)),
-            rag_middleware=rag_service.middleware(),
-            expert_context=mission.plan,
-            event_callback=event_callback,
-            offloader=workspace,
-            context_config=context_config,
-            state=build_role_agent_state(mission_id, "attack") if use_v2_workspace else None,
-            artifact_root=ws_root,
-            exploitation_approved=lambda: mission.exploitation_approved,
-            vision_model=vision_model,
-            vision_roots=vision_roots,
-            forensic_roots=vision_roots,
+        # ── 8. 专家按需加载 ──
+        # Orchestrator 的 dispatch_* 接口保持不变；真实 Attack/Reserve/ScopeAuditor
+        # 只在首次被派遣时构造。未使用的专家不会加载 Skill、MCP 或 Tool schema。
+        capability_context = "\n".join([
+            mission.goal[:1500],
+            mission.plan[:5000],
+            *[item.content[:500] for item in mission.facts[-8:]],
+        ])
+
+        async def _load_attack_agent():
+            # RAG 只属于实际进入 Attack 的任务；Brain 未使用时在这里惰性启动。
+            if not rag_service.started:
+                await rag_service.start()
+            mission.record(
+                "system", "agent_capability_loaded",
+                role="attack", category=(mission.category_decision or {}).get("primary"),
+            )
+            store.save(mission)
+            return await create_attack_agent(
+                model,
+                analysis,
+                mission.target,
+                project_dir,
+                runtime.command_timeout,
+                category_decision=mission.category_decision,
+                scope_registry=scope_registry,
+                max_iters=_iter_budget(
+                    target_spec.kind, "attack", complexity, len(mission.plan_items),
+                ),
+                rag_middleware=rag_service.middleware(),
+                expert_context=mission.plan[:2000],
+                event_callback=event_callback,
+                offloader=workspace,
+                context_config=_role_context("attack"),
+                state=(
+                    build_role_agent_state(mission_id, "attack")
+                    if use_v2_workspace else None
+                ),
+                artifact_root=ws_root,
+                exploitation_approved=lambda: mission.exploitation_approved,
+                vision_model=vision_model,
+                vision_roots=vision_roots,
+                forensic_roots=vision_roots,
+                target_kind=target_spec.kind,
+                capability_context=capability_context,
+            )
+
+        attack = LazyAgent(
+            attack_expert_name(
+                str((mission.category_decision or {}).get("primary") or "unknown"),
+                target_spec.kind,
+                mission.plan[:2000],
+            ),
+            _load_attack_agent,
         )
 
-        reserve = await create_reverse_agent(
-            model,
-            analysis,
-            mission.target,
-            project_dir,
-            runtime.command_timeout,
-            category_decision=mission.category_decision,
-            scope_registry=scope_registry,
-            max_iters=_iter_budget(target_spec.kind, "reserve", complexity, len(mission.plan_items)),
-            event_callback=event_callback,
-            offloader=workspace,
-            context_config=context_config,
-            state=build_role_agent_state(mission_id, "reserve") if use_v2_workspace else None,
-            artifact_root=ws_root,
-            vision_model=vision_model,
-            vision_roots=vision_roots,
-        )
+        dynamic_debug_needed = any(term in capability_context.lower() for term in (
+            "gdb", "动态调试", "动态验证", "运行时", "core dump", "核心转储",
+        ))
 
-        scope_auditor = create_scope_auditor_agent(model)
+        async def _load_reverse_agent():
+            mission.record(
+                "system", "agent_capability_loaded",
+                role="reserve", gdb=dynamic_debug_needed,
+            )
+            store.save(mission)
+            return await create_reverse_agent(
+                model,
+                analysis,
+                mission.target,
+                project_dir,
+                runtime.command_timeout,
+                category_decision=mission.category_decision,
+                scope_registry=scope_registry,
+                max_iters=_iter_budget(
+                    target_spec.kind, "reserve", complexity, len(mission.plan_items),
+                ),
+                event_callback=event_callback,
+                offloader=workspace,
+                context_config=_role_context("reserve"),
+                state=(
+                    build_role_agent_state(mission_id, "reserve")
+                    if use_v2_workspace else None
+                ),
+                artifact_root=ws_root,
+                vision_model=vision_model,
+                vision_roots=vision_roots,
+                enable_gdb=dynamic_debug_needed,
+            )
+
+        reserve = LazyAgent(REVERSE_EXPERT, _load_reverse_agent)
+        scope_auditor = LazyAgent(
+            SCOPE_AUDITOR_EXPERT,
+            lambda: create_scope_auditor_agent(model),
+        )
 
         # ── 9. Orchestrator 主循环 ──
         # 战术调度核心：持有 recon/attack/state/store 的唯一调度者，
@@ -1979,7 +2082,7 @@ async def run_mission(
             slab_context=slab_context,
             max_iters=20 if complexity == "simple" else 30,
             offloader=workspace,
-            context_config=context_config,
+            context_config=_role_context("orchestrator"),
             state=build_role_agent_state(mission_id, "orchestrator") if use_v2_workspace else None,
         )
         # 结构化计划清单文本（Orchestrator 需要知道条目 id 才能用 UpdatePlan 等工具维护）
@@ -1999,11 +2102,10 @@ async def run_mission(
         # ── Orchestrator 主循环（steering 由 dispatcher 层 + 此处兜底处理） ──
         orch_content = (
             f"执行以下已授权任务。\n目标：{mission.target}\n目标要求：{mission.goal}\n\n"
-            f"Brain 计划：\n{mission.plan}\n\n"
+            f"Brain 计划摘要：\n{mission.plan[:12000]}\n\n"
             f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
-            f"当前 Facts：{'; '.join(item.content for item in mission.facts[-10:]) or '暂无'}\n"
-            f"当前 Hypotheses / Failed Paths（有界结构化摘要）：\n"
-            f"{json.dumps(mission.execution_context(limit=8), ensure_ascii=False)}\n"
+            f"分层决策上下文（Historical 仅含引用，需要时调用 view_mission_state）：\n"
+            f"{json.dumps(mission.context_layers(limit=8), ensure_ascii=False)}\n"
             f"行动预算：{mission.action_budget.used}/{mission.action_budget.limit}；"
             f"工具预算：{mission.tool_budget.used}/{mission.tool_budget.limit}\n"
             "首轮 Recon 与题型确认已经完成；只有存在明确证据缺口时才补充侦察，"
