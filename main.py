@@ -1240,6 +1240,35 @@ async def run_mission(
         # 创建共享模型；Qwen 的纯文本温度沿用这里的配置，工具调用由模型
         # 适配层固定为 0.1。
         model = create_model(provider=provider, Ver=model_ver, temperature=None, config=runtime)
+        # 视觉分析使用独立模型实例，避免嵌套工具调用与主 Agent 的流式状态
+        # 相互干扰。即使主任务选择 Qwen/GLM，只要管理员配置了 DeepSeek
+        # 凭证，专家也可按需调用 V4 Flash Vision；未配置时静默不挂载工具。
+        vision_model = None
+        if runtime.get_api_key("deepseek") and runtime.get_base_url("deepseek"):
+            try:
+                vision_model = create_model(
+                    provider="deepseek",
+                    Ver="Min",
+                    temperature=None,
+                    web_search=False,
+                    model_name=runtime.deepseek_vision_model,
+                    thinking_intensity="medium",
+                    vision=True,
+                    config=runtime,
+                )
+            except (TypeError, ValueError) as exc:
+                logger.warning("DeepSeek 视觉模型初始化失败，本任务不挂载视觉工具: %s", exc)
+
+        # 图片只允许来自本会话 Workspace；文件类任务还允许其上传/解压目录。
+        # API 网络任务不暴露共享 WorkDir，防止跨会话读取扫描产物。
+        vision_roots: tuple[Path, ...]
+        if target_spec.kind == "network" and ws_root is not None:
+            vision_roots = (Path(ws_root),)
+        else:
+            vision_roots = tuple(dict.fromkeys(
+                path for path in (Path(workdir), Path(ws_root) if ws_root else None)
+                if path is not None
+            ))
         # Brain 通过 SubmitPlan 一次原子提交完整计划，避免 Qwen 长工具参数
         # 被拆成多次 AddPlan 后留下半份持久化状态。
         rag_service = get_rag_service(project_dir)
@@ -1287,6 +1316,8 @@ async def run_mission(
                 context_config=context_config,
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
                 artifact_root=ws_root,
+                vision_model=vision_model,
+                vision_roots=vision_roots,
             )
         else:
             recon = create_artifact_triage_agent(
@@ -1296,6 +1327,8 @@ async def run_mission(
                 context_config=context_config,
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
                 artifact_root=ws_root,
+                vision_model=vision_model,
+                vision_roots=vision_roots,
             )
 
         # ── 7. Brain 战略规划（包含分类结果）──
@@ -1435,6 +1468,8 @@ async def run_mission(
             state=build_role_agent_state(mission_id, "attack") if use_v2_workspace else None,
             artifact_root=ws_root,
             exploitation_approved=lambda: mission.exploitation_approved,
+            vision_model=vision_model,
+            vision_roots=vision_roots,
         )
 
         reserve = await create_reverse_agent(
@@ -1451,6 +1486,8 @@ async def run_mission(
             context_config=context_config,
             state=build_role_agent_state(mission_id, "reserve") if use_v2_workspace else None,
             artifact_root=ws_root,
+            vision_model=vision_model,
+            vision_roots=vision_roots,
         )
 
         scope_auditor = create_scope_auditor_agent(model)

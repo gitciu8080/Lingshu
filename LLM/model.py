@@ -1,4 +1,4 @@
-"""AgentScope 2.x 模型工厂 — DeepSeek + Qwen (llama.cpp 兼容)。
+"""AgentScope 2.x 模型工厂 — DeepSeek Responses（含视觉）+ Qwen/GLM。
 
 思考级别:
   Low → 快速响应 / 低推理深度
@@ -7,7 +7,7 @@
 
 DeepSeek 走 Responses API（联网搜索工具仅在该 API 下可用），
 通过 web_search 参数（或环境变量 DEEPSEEK_WEB_SEARCH）开启/关闭
-服务端内置联网搜索。
+服务端内置联网搜索。``deepseek-v4-flash-vision-exp`` 额外接受图片输入。
 """
 import logging
 from typing import Any, AsyncGenerator, Literal, Union
@@ -28,6 +28,26 @@ from config import RuntimeConfig
 
 
 logger = logging.getLogger(__name__)
+
+THINKING_INTENSITIES: tuple[str, ...] = ("off", "low", "medium", "high")
+_INTENSITY_TO_EFFORT: dict[str, str] = {
+    "off": "none",
+    "low": "low",
+    "medium": "high",
+    "high": "max",
+}
+VISION_MODEL = "deepseek-v4-flash-vision-exp"
+
+
+def resolve_thinking_intensity(intensity: str | None) -> tuple[bool, str]:
+    """把 Web 思考强度映射为 DeepSeek Responses 的开关与 effort。"""
+    normalized = (intensity or "medium").strip().lower()
+    if normalized not in _INTENSITY_TO_EFFORT:
+        raise ValueError(
+            f"不支持的思考强度: {intensity}，可选 "
+            + ", ".join(THINKING_INTENSITIES),
+        )
+    return normalized != "off", _INTENSITY_TO_EFFORT[normalized]
 
 
 class QwenModelUnavailableError(RuntimeError):
@@ -161,13 +181,14 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
         gateway_mode: str = "base_url",
         native_tools: list[dict[str, Any]] | None = None,
         reasoning_wire_format: str = "responses",
+        vision: bool = False,
         **kwargs,
     ) -> None:
         """初始化 DeepSeek Responses API 模型。
 
         Args:
             credential: OpenAI 兼容凭证（指向 DeepSeek base_url）。
-            model: DeepSeek 模型名（默认支持 deepseek-v4-flash / deepseek-v4-pro）。
+            model: DeepSeek 模型名（含 deepseek-v4-flash-vision-exp）。
             parameters: Responses API 参数。
             web_search: 是否注入服务端联网搜索工具。
             **kwargs: 透传给 OpenAIResponseModel 的其他参数。
@@ -188,6 +209,7 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
         if gateway_mode not in {"base_url", "full_endpoint"}:
             raise ValueError("DeepSeek gateway_mode 仅支持 base_url 或 full_endpoint")
         self.gateway_mode = gateway_mode
+        self.vision = bool(vision or model == VISION_MODEL)
 
     async def _call_api(
         self,
@@ -205,6 +227,22 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
         仅切换请求路径。
         """
         formatted_messages = await self.formatter.format(messages)
+        has_images = any(
+            part.get("type") == "input_image"
+            for item in formatted_messages
+            if isinstance(item, dict)
+            for part in (
+                item.get("content", [])
+                if isinstance(item.get("content"), list)
+                else []
+            )
+            if isinstance(part, dict)
+        )
+        if has_images and not self.vision:
+            raise ValueError(
+                "图片输入仅支持 deepseek-v4-flash-vision-exp，"
+                f"当前模型为 {model_name}",
+            )
         api_kwargs: dict[str, Any] = {
             "model": model_name,
             "input": formatted_messages,
@@ -222,7 +260,9 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
             }
             if self.parameters.thinking_enable and self.parameters.reasoning_effort:
                 api_kwargs["reasoning_effort"] = self.parameters.reasoning_effort
-        elif self.parameters.thinking_enable and self.parameters.reasoning_effort:
+        elif self.parameters.reasoning_effort:
+            # DeepSeek Responses 默认开启思考；关闭时必须显式传 none，
+            # 不能仅省略 reasoning，否则服务端会重新启用默认 high。
             api_kwargs["reasoning"] = {"effort": self.parameters.reasoning_effort}
         api_kwargs.update({
             k: v for k, v in generate_kwargs.items()
@@ -231,7 +271,7 @@ class DeepSeekResponsesModel(OpenAIResponseModel):
         fmt_tools, fmt_tool_choice = self._format_tools(tools, tool_choice)
         if fmt_tools is not None:
             api_kwargs["tools"] = fmt_tools
-        if fmt_tool_choice is not None:
+        if fmt_tool_choice is not None and not self.parameters.thinking_enable:
             api_kwargs["tool_choice"] = fmt_tool_choice
 
         from datetime import datetime
@@ -369,6 +409,9 @@ def DeepSeek(
         think: bool = True,
         temperature: float | None = None,
         web_search: bool | None = None,
+        model_name: str | None = None,
+        thinking_intensity: str | None = None,
+        vision: bool = False,
         config: RuntimeConfig | None = None,
 ) -> Union[DeepSeekResponsesModel, DeepSeekChatModel]:
     """创建 DeepSeek 模型，自带联网搜索开关（可开关）。
@@ -386,6 +429,10 @@ def DeepSeek(
         web_search: 是否启用服务端联网搜索。None 时读取环境变量
             DEEPSEEK_WEB_SEARCH（1/true/yes/on 视为开启），默认关闭。
             仅 Responses API 模型生效，回退到 Chat Completions 时忽略。
+        model_name: 显式选择的模型；为空时继续使用 Low/Min/Max 映射。
+        thinking_intensity: Web 新版思考强度 off/low/medium/high；为空时
+            保留旧版 Low/Min/Max 行为。
+        vision: 强制选择 DeepSeek 实验视觉模型。
         config: 运行时配置。
 
     Returns:
@@ -398,30 +445,42 @@ def DeepSeek(
     max_retries = int(settings.get("max_retries", 3))
     context_size = int(settings.get("context_size", 128000))
     timeout_seconds = float(settings.get("timeout_seconds", 600))
-    think = think and bool(settings.get("thinking_enabled", True))
-    if web_search is None:
-        web_search = runtime.deepseek_web_search
-
-    model_name = runtime.model_name(Ver, provider="deepseek")
-
-    # 未被配置为 Responses API 的模型回退到 Chat Completions；联网搜索
-    # 仅 Responses API 提供，此处忽略 web_search 开关。
-    if model_name not in runtime.deepseek_responses_models:
+    if thinking_intensity is not None:
+        think, _effort = resolve_thinking_intensity(thinking_intensity)
+    else:
         if not think:
-            _effort = None
-        elif Ver in ("Low", "Min"):
+            _effort = "none"
+        elif Ver == "Low":
+            _effort = "low"
+        elif Ver == "Min":
             _effort = "high"
         else:
             _effort = "max"
+    think = think and bool(settings.get("thinking_enabled", True))
+    if not think:
+        _effort = "none"
+    if web_search is None:
+        web_search = runtime.deepseek_web_search
+
+    selected_model = (
+        runtime.deepseek_vision_model
+        if vision
+        else (str(model_name or "").strip() or runtime.model_name(Ver, provider="deepseek"))
+    )
+    is_vision = selected_model == runtime.deepseek_vision_model or selected_model == VISION_MODEL
+
+    # 未被配置为 Responses API 的模型回退到 Chat Completions；联网搜索
+    # 仅 Responses API 提供，此处忽略 web_search 开关。
+    if selected_model not in runtime.deepseek_responses_models and not is_vision:
         return DeepSeekChatModel(
             credential=DeepSeekCredential(
                 api_key=SecretStr(runtime.get_api_key("deepseek")),
                 base_url=runtime.get_base_url("deepseek"),
             ),
-            model=model_name,
+            model=selected_model,
             parameters=DeepSeekChatModel.Parameters(
                 thinking_enable=think,
-                reasoning_effort=_effort,
+                reasoning_effort=None if _effort == "none" else _effort,
                 temperature=temperature,
                 top_p=float(settings.get("top_p", 0.95)),
                 max_tokens=max_tokens,
@@ -432,20 +491,12 @@ def DeepSeek(
             client_kwargs={"timeout": timeout_seconds},
         )
 
-    if not think:
-        _effort = "none"
-    elif Ver == "Low":
-        _effort = "low"
-    elif Ver == "Min":
-        _effort = "high"
-    else:
-        _effort = "max"
     return DeepSeekResponsesModel(
         credential=OpenAICredential(
             api_key=SecretStr(runtime.get_api_key("deepseek")),
             base_url=runtime.get_base_url("deepseek"),
         ),
-        model=runtime.model_name(Ver, provider="deepseek"),
+        model=selected_model,
         parameters=DeepSeekResponsesModel.Parameters(
             thinking_enable=think,
             reasoning_effort=_effort,
@@ -455,6 +506,7 @@ def DeepSeek(
         web_search=web_search,
         gateway_mode=runtime.deepseek_gateway_mode,
         native_tools=[{"type": name} for name in runtime.deepseek_native_tools],
+        vision=is_vision,
         stream=True,
         max_retries=max_retries,
         context_size=context_size,
@@ -703,6 +755,9 @@ def create_model(
         Ver: str = "Min",
         temperature: float | None = None,
         web_search: bool | None = None,
+        model_name: str | None = None,
+        thinking_intensity: str | None = None,
+        vision: bool = False,
         config: RuntimeConfig | None = None,
 ):
     """统一的模型工厂入口。
@@ -728,5 +783,6 @@ def create_model(
         )
     return DeepSeek(
         Ver=Ver, think=True, temperature=temperature,
-        web_search=web_search, config=config,
+        web_search=web_search, model_name=model_name,
+        thinking_intensity=thinking_intensity, vision=vision, config=config,
     )

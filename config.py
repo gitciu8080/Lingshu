@@ -66,10 +66,13 @@ class RuntimeConfig:
     deepseek_model_low: str = "deepseek-v4-flash"       # 低推理（chat 已弃用合并为 flash）
     deepseek_model_min: str = "deepseek-v4-flash"       # 默认
     deepseek_model_max: str = "deepseek-v4-pro"         # 深度推理
+    deepseek_vision_model: str = "deepseek-v4-flash-vision-exp"
     deepseek_web_search: bool = False                   # Responses API 服务端联网搜索开关
     # V4 Flash / Pro 均走 OpenAI Responses 协议；可由环境变量覆盖，兼容
     # 尚未提供 Responses 端点的私有网关。
-    deepseek_responses_models: tuple[str, ...] = ("deepseek-v4-flash", "deepseek-v4-pro")
+    deepseek_responses_models: tuple[str, ...] = (
+        "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp",
+    )
     deepseek_native_tools: tuple[str, ...] = ()
     deepseek_model_settings: dict[str, object] = field(default_factory=dict)
 
@@ -146,12 +149,16 @@ class RuntimeConfig:
             deepseek_model_low=os.getenv("DEEPSEEK_MODEL_LOW", "deepseek-v4-flash"),
             deepseek_model_min=os.getenv("DEEPSEEK_MODEL_MIN", "deepseek-v4-flash"),
             deepseek_model_max=os.getenv("DEEPSEEK_MODEL_MAX", "deepseek-v4-pro"),
+            deepseek_vision_model=os.getenv(
+                "DEEPSEEK_VISION_MODEL", "deepseek-v4-flash-vision-exp",
+            ),
             deepseek_web_search=os.getenv("DEEPSEEK_WEB_SEARCH", "0").strip().lower()
             in ("1", "true", "yes", "on"),
             deepseek_responses_models=tuple(
                 m.strip()
                 for m in os.getenv(
-                    "DEEPSEEK_RESPONSES_MODELS", "deepseek-v4-flash,deepseek-v4-pro",
+                    "DEEPSEEK_RESPONSES_MODELS",
+                    "deepseek-v4-flash,deepseek-v4-pro,deepseek-v4-flash-vision-exp",
                 ).split(",")
                 if m.strip()
             ),

@@ -21,6 +21,7 @@ from Tools.OCR import create_tesseract_ocr_tool
 from Tools.SageMath import execute_sagemath        
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.TonyDec import create_tonydec_tool
+from Tools.Vision import create_vision_analysis_tool
 from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool, run_interruptible_agent_reply
 from agent.experts import attack_expert_name
 
@@ -65,6 +66,8 @@ ATTACK_SYS_PROMPT = """你是网络安全验证与攻击专家（Attack）。
 8. execute_sagemath：在隔离 SageMath 环境中执行数学/密码学计算代码。     # ← 新增
    适用于 RSA/ECC/离散对数/大数运算/符号求解/数论/矩阵等 CTF 题目。
    每次调用为全新会话，变量不持久化，必须用 print() 输出结果。
+9. analyze_image：理解授权工作区内的图片、网页截图、图表、二维码和视觉题目；
+   发现相关图片时应主动调用，精确文字再用 ocr_image 复核。
 
 工作原则：
 - 先调用 analysis 获取独立研判；候选 CVE 应再用 cve_search 核验。
@@ -248,6 +251,8 @@ async def create_attack_agent(
     state=None,
     artifact_root: str | Path | None = None,
     exploitation_approved: Callable[[], bool] | None = None,
+    vision_model=None,
+    vision_roots: tuple[str | Path, ...] = (),
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -289,8 +294,7 @@ async def create_attack_agent(
     except Exception as exc:  # AntSword 不可用不应让非 WebShell 任务整体失败
         logger.warning("Attack 未能接入 AntSword MCP: %s", exc)
 
-    toolkit = StrictJSONToolkit(
-        tools=[
+    tools = [
             AllowedFunctionTool(analysis, is_read_only=True),
             AllowedFunctionTool(cve_search, is_read_only=True),
             AllowedFunctionTool(execute_sagemath, is_read_only=True), 
@@ -298,7 +302,11 @@ async def create_attack_agent(
             create_tesseract_ocr_tool(project_dir, timeout=min(timeout, 90)),
             create_tonydec_tool(project_dir),
             *antsword_tools,
-        ],
+        ]
+    if vision_model is not None and vision_roots:
+        tools.append(create_vision_analysis_tool(vision_model, vision_roots))
+    toolkit = StrictJSONToolkit(
+        tools=tools,
         skills_or_loaders=skill_list,
     )
     agent = Agent(

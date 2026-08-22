@@ -21,6 +21,7 @@ from agent.Attack import _build_skill_list
 from Tools.IntelPwn import create_intelpwn_tool
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool, run_interruptible_agent_reply
+from Tools.Vision import create_vision_analysis_tool
 from agent.experts import REVERSE_EXPERT
 
 RESERVE_SYS_PROMPT = """你是二进制逆向与动态调试专家（Reserve）。
@@ -34,6 +35,7 @@ RESERVE_SYS_PROMPT = """你是二进制逆向与动态调试专家（Reserve）�
 5. GDB_Tool: 多会话 GDB/MI 工具集（断点、运行、上下文、寄存器、内存、反汇编等）。
 6. analysis: 委托 Analysis 专家独立研判。
 7. intelpwn_analyze: IntelPwn 二进制静态漏洞分析工具。
+8. analyze_image: 理解授权工作区内的程序截图、流程图、二维码、图形资源和视觉线索。
 
 工作流程（严格遵守顺序）：
 1. 先调用 analysis 获取独立研判，确定分析重点。
@@ -133,6 +135,8 @@ async def create_reverse_agent(
     context_config=None,
     state=None,
     artifact_root: str | Path | None = None,
+    vision_model=None,
+    vision_roots: tuple[str | Path, ...] = (),
 ) -> Agent:
     async def analysis(service_info: str) -> str:
         """委托 Analysis 专家研判真实证据。
@@ -369,8 +373,7 @@ async def create_reverse_agent(
             for block in result.content
         )
 
-    toolkit = StrictJSONToolkit(
-        tools=[
+    tools = [
             AllowedFunctionTool(analysis, is_read_only=True),
             create_intelpwn_tool(timeout),
             create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="reserve", artifact_root=artifact_root),
@@ -379,7 +382,11 @@ async def create_reverse_agent(
             AllowedFunctionTool(gdb_load_core, is_read_only=True),
             *exposed_ida_tools,
             *exposed_gdb_tools,
-        ],
+        ]
+    if vision_model is not None and vision_roots:
+        tools.append(create_vision_analysis_tool(vision_model, vision_roots))
+    toolkit = StrictJSONToolkit(
+        tools=tools,
         skills_or_loaders=skill_list,
     )
     agent = Agent(

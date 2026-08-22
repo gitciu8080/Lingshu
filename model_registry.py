@@ -398,7 +398,10 @@ def load_runtime_overrides() -> dict[str, Any]:
                 deepseek_model_low=item["model_low"], deepseek_model_min=item["model_min"],
                 deepseek_model_max=item["model_max"], deepseek_model_settings=item["settings"],
                 deepseek_responses_models=(
-                    tuple(dict.fromkeys((item["model_low"], item["model_min"], item["model_max"])))
+                    tuple(dict.fromkeys((
+                        item["model_low"], item["model_min"], item["model_max"],
+                        "deepseek-v4-flash-vision-exp",
+                    )))
                     if item["api_style"] == "responses" else ()
                 ),
                 deepseek_native_tools=tuple(item.get("native_tools") or ()),

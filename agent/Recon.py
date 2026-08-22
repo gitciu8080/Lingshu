@@ -13,6 +13,7 @@ from Tools.CVE_Search import create_cve_search_tool
 from Tools.OCR import create_tesseract_ocr_tool
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.TonyDec import create_tonydec_tool
+from Tools.Vision import create_vision_analysis_tool
 from Tools.tooling import StrictJSONToolkit, create_scoped_shell_tool
 from agent.experts import ARTIFACT_TRIAGE_EXPERT, NETWORK_RECON_EXPERT
 
@@ -30,6 +31,8 @@ NETWORK_RECON_SYS_PROMPT = """你是网络安全信息侦察专家（NetworkReco
   禁止发送 POST/PUT/PATCH 请求体、禁止注入 payload、禁止验证漏洞、禁止执行远程命令。
   即使页面源码里发现了疑似后门（如 eval/exec/system），也只能报告不利用。
 - 不声称未由工具输出证明的端口、版本、目录或漏洞。
+- 若授权会话工作区中已有网页截图或目标图片，可主动调用 analyze_image 理解
+  页面结构和视觉线索；不得借此读取本任务目录之外的图片。
 - 不修改全局任务状态，也不在任意路径写文件。
 
 cve_search 使用策略：
@@ -57,10 +60,16 @@ def create_network_recon_agent(
     context_config=None,
     state=None,
     artifact_root: str | Path | None = None,
+    vision_model=None,
+    vision_roots: tuple[str | Path, ...] = (),
 ) -> Agent:
-    toolkit = StrictJSONToolkit(
-        tools=[create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root), create_cve_search_tool()],
-    )
+    tools = [
+        create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root),
+        create_cve_search_tool(),
+    ]
+    if vision_model is not None and vision_roots:
+        tools.append(create_vision_analysis_tool(vision_model, vision_roots))
+    toolkit = StrictJSONToolkit(tools=tools)
     return Agent(
         name=NETWORK_RECON_EXPERT,
         system_prompt=NETWORK_RECON_SYS_PROMPT,
@@ -85,6 +94,8 @@ ARTIFACT_TRIAGE_SYS_PROMPT = """你是 CTF 文件分析专家（ArtifactTriage�
 - 先获取文件列表，识别文件类型（ELF/PE/PCAP/镜像/脚本/加密文件等）。
 - 对 ELF 执行 checksec/readelf；对 PCAP 执行 tcpdump/capinfos；对压缩包执行 file/unzip -l。
 - 对图片、截图或扫描文档可调用 ocr_image，使用 Tesseract 提取文本。
+- 发现图片、截图、图表、二维码、界面或视觉型题目时，主动调用 analyze_image
+  理解画面语义和安全线索；需要逐字提取时再用 ocr_image 交叉验证。
 - 若文件头完整匹配 6688ff4f6886005611611618，调用 tonydec 解码到新的输出路径，
   再用 file/xxd/strings 确认真实格式；未匹配时不得猜测为 TonyEnc。
 - 绝不直接执行二进制文件（./chall 等）— 这属于 Attack 阶段的职责。
@@ -111,15 +122,18 @@ def create_artifact_triage_agent(
     context_config=None,
     state=None,
     artifact_root: str | Path | None = None,
+    vision_model=None,
+    vision_roots: tuple[str | Path, ...] = (),
 ) -> Agent:
     """创建文件分析 Agent，工作目录约束在 workdir 内。"""
-    toolkit = StrictJSONToolkit(
-        tools=[
+    tools = [
             create_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root),
             create_tesseract_ocr_tool(workdir, timeout=min(timeout, 90)),
             create_tonydec_tool(workdir),
-        ],
-    )
+        ]
+    if vision_model is not None:
+        tools.append(create_vision_analysis_tool(vision_model, vision_roots or (workdir,)))
+    toolkit = StrictJSONToolkit(tools=tools)
     return Agent(
         name=ARTIFACT_TRIAGE_EXPERT,
         system_prompt=ARTIFACT_TRIAGE_SYS_PROMPT,
