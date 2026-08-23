@@ -29,7 +29,10 @@ from pydantic import SecretStr
 from auth import get_current_user
 from config import RuntimeConfig
 import session_store
+from persistence_service import get_persistence_writer
+from session_events import message_operation, session_create_operation
 from Tools.tooling import cancel_agent_tasks
+from workspace_service import get_workspace_service
 
 from .facade import LingshuMissionAgent
 from .account_events import subscribe_account, unsubscribe_account
@@ -83,8 +86,17 @@ agentscope_app.dependency_overrides[default_user_id] = _jwt_user_id
 async def agentscope_lifespan():
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
     _WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-    async with agentscope_app.router.lifespan_context(agentscope_app):
-        yield
+    await asyncio.to_thread(session_store.init_sessions_db)
+    writer = get_persistence_writer()
+    owns_writer = not writer.running
+    if owns_writer:
+        await writer.start()
+    try:
+        async with agentscope_app.router.lifespan_context(agentscope_app):
+            yield
+    finally:
+        if owns_writer:
+            await writer.stop()
 
 
 class RuntimeInput(BaseModel):
@@ -215,10 +227,14 @@ async def prepare_service_session(
         if source is None:
             import session_store
 
-            legacy = session_store.get_session(body.source_session_id)
+            legacy = await asyncio.to_thread(
+                session_store.get_session, body.source_session_id,
+            )
             if legacy is None or str(legacy.get("user_id")) != user_id:
                 raise HTTPException(status_code=404, detail="来源会话不存在")
-        initial_context = _build_mission_context(body.source_session_id)
+        initial_context = await asyncio.to_thread(
+            _build_mission_context, body.source_session_id,
+        )
     return {
         "agent_id": agent_id,
         "chat_model_config": ChatModelConfig(
@@ -277,17 +293,12 @@ async def send_runtime_input(
     if runtime is None:
         raise HTTPException(status_code=409, detail="该会话当前没有运行中的任务")
     content = body.content.strip()
-    try:
-        if session_store.get_session(session_id) is not None:
-            session_store.add_message(
-                session_id,
-                "user",
-                content,
-                "user_message",
-                "user",
-            )
-    except Exception:
-        logger.exception("Failed to persist user input for %s", session_id)
+    operation = message_operation(
+        session_id, "user_message",
+        {"agent": "user", "_content_override": content}, role="user",
+    )
+    if operation is not None:
+        await get_persistence_writer().submit([operation], wait=True)
     if runtime.pending_approval is not None:
         if runtime.approval_decision_submitted:
             return {"status": "duplicate", "session_id": session_id}
@@ -310,26 +321,22 @@ async def mirror_session(
     current_user: dict = Depends(get_current_user),
 ):
     await _owned_session(str(current_user["id"]), session_id)
-    existing = session_store.get_session(session_id)
+    existing = await asyncio.to_thread(session_store.get_session, session_id)
     if existing is not None:
         if str(existing.get("user_id")) != str(current_user["id"]):
             raise HTTPException(status_code=409, detail="会话 ID 冲突")
         return {"status": "exists", "session_id": session_id}
-    session_store.create_session(
-        user_id=current_user["id"],
-        target=body.target,
-        goal=body.goal,
-        provider=body.provider,
-        model=body.model,
+    create = session_create_operation(
+        session_id, user_id=current_user["id"], target=body.target,
+        goal=body.goal, provider=body.provider, model=body.model,
         title=f"[{session_id[:8]}] 安全测试任务",
-        session_id=session_id,
     )
-    session_store.add_message(
-        session_id,
-        "user",
-        body.goal,
-        "user_message",
-        "user",
+    first_message = message_operation(
+        session_id, "user_message",
+        {"agent": "user", "_content_override": body.goal}, role="user",
+    )
+    await get_persistence_writer().submit(
+        [create, *([first_message] if first_message is not None else [])], wait=True,
     )
     return {"status": "created", "session_id": session_id}
 
@@ -350,8 +357,8 @@ async def interrupt_runtime(
         cancellation_requested = task.cancel()
         if cancellation_requested:
             marker = _cancel_marker(session_id)
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text("cancelled\n", encoding="utf-8")
+            await asyncio.to_thread(marker.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(marker.write_text, "cancelled\n", encoding="utf-8")
         try:
             await task
         except asyncio.CancelledError:
@@ -393,7 +400,9 @@ async def get_mission_state(
         import json
 
         try:
-            mission_state = json.loads(mission_path.read_text(encoding="utf-8"))
+            mission_state = await asyncio.to_thread(
+                lambda: json.loads(mission_path.read_text(encoding="utf-8")),
+            )
         except (OSError, json.JSONDecodeError):
             mission_state = None
     phase = (mission_state or {}).get("phase", "planning")
@@ -454,7 +463,7 @@ async def delete_mission_state(
     try:
         await _owned_session(str(current_user["id"]), session_id)
     except HTTPException as exc:
-        legacy = session_store.get_session(session_id)
+        legacy = await asyncio.to_thread(session_store.get_session, session_id)
         if (
             exc.status_code != 404
             or legacy is None
@@ -463,9 +472,9 @@ async def delete_mission_state(
             raise
     mission_path = _ROOT / ".TaskMemory" / "sessions" / f"{session_id}.json"
     try:
-        mission_path.unlink(missing_ok=True)
-        _cancel_marker(session_id).unlink(missing_ok=True)
-        _owner_marker(session_id).unlink(missing_ok=True)
+        await asyncio.to_thread(mission_path.unlink, missing_ok=True)
+        await asyncio.to_thread(_cancel_marker(session_id).unlink, missing_ok=True)
+        await asyncio.to_thread(_owner_marker(session_id).unlink, missing_ok=True)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"删除任务状态失败: {exc}") from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -482,22 +491,24 @@ async def delete_service_session(
     user_id = str(current_user["id"])
     agent_id = _agent_id(user_id)
     native = await storage.get_session(user_id, agent_id, session_id)
-    legacy = session_store.get_session(session_id)
+    legacy = await asyncio.to_thread(session_store.get_session, session_id)
     legacy_owned = (
         legacy is not None
         and str(legacy.get("user_id")) == user_id
     )
     owner_marker = _owner_marker(session_id)
     try:
-        marker_owned = owner_marker.read_text(encoding="utf-8").strip() == user_id
+        marker_owned = (
+            await asyncio.to_thread(owner_marker.read_text, encoding="utf-8")
+        ).strip() == user_id
     except OSError:
         marker_owned = False
     if native is None and not legacy_owned and not marker_owned:
         raise HTTPException(status_code=404, detail="会话不存在")
 
     if native is not None:
-        owner_marker.parent.mkdir(parents=True, exist_ok=True)
-        owner_marker.write_text(user_id, encoding="utf-8")
+        await asyncio.to_thread(owner_marker.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(owner_marker.write_text, user_id, encoding="utf-8")
         deleted = await agentscope_app.state.session_service.delete_session(
             user_id,
             agent_id,
@@ -506,17 +517,28 @@ async def delete_service_session(
         if not deleted:
             raise HTTPException(status_code=409, detail="AgentScope 会话删除失败")
 
+    workspace = get_workspace_service()
+    try:
+        await workspace.delete(int(user_id), session_id)
+    except FileNotFoundError:
+        pass
+
     mission_path = _ROOT / ".TaskMemory" / "sessions" / f"{session_id}.json"
     try:
-        mission_path.unlink(missing_ok=True)
-        _cancel_marker(session_id).unlink(missing_ok=True)
+        await asyncio.to_thread(mission_path.unlink, missing_ok=True)
+        await asyncio.to_thread(_cancel_marker(session_id).unlink, missing_ok=True)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"删除任务状态失败: {exc}") from exc
 
     if legacy_owned:
-        session_store.delete_session(session_id)
+        await get_persistence_writer().flush()
+        orphaned = await asyncio.to_thread(session_store.delete_session, session_id)
+        for sha256 in orphaned:
+            await asyncio.to_thread(
+                workspace.remove_blob_if_unreferenced, sha256, False,
+            )
     try:
-        owner_marker.unlink(missing_ok=True)
+        await asyncio.to_thread(owner_marker.unlink, missing_ok=True)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"删除所有权标记失败: {exc}") from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)

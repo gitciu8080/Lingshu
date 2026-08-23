@@ -202,21 +202,53 @@ _UPDATABLE_FIELDS = {
 }
 
 
+def _terminal_rank(success, status: str, phase: str) -> int:
+    if bool(success) and (status == "completed" or phase == "completed"):
+        return 3
+    if status == "cancelled" or phase == "cancelled":
+        return 2
+    if status == "failed" or phase == "failed":
+        return 1
+    return 0
+
+
+def _merge_terminal_fields(
+    conn: sqlite3.Connection,
+    session_id: str,
+    updates: dict,
+) -> dict:
+    """Make terminal projection monotonic; confirmed success can never regress."""
+    row = conn.execute(
+        "SELECT success, status, phase FROM sessions WHERE id = ?", (session_id,),
+    ).fetchone()
+    if row is None:
+        return updates
+    current_rank = _terminal_rank(row[0], str(row[1] or ""), str(row[2] or ""))
+    incoming_success = updates.get("success", row[0])
+    incoming_status = str(updates.get("status", row[1]) or "")
+    incoming_phase = str(updates.get("phase", row[2]) or "")
+    incoming_rank = _terminal_rank(incoming_success, incoming_status, incoming_phase)
+    if incoming_rank < current_rank:
+        for key in ("success", "status", "phase", "flag"):
+            updates.pop(key, None)
+    elif incoming_rank == 3:
+        updates.update(success=True, status="completed", phase="completed")
+    return updates
+
+
 @_retry_locked_write
 def update_session(session_id: str, **fields) -> None:
     """动态更新会话的指定字段（仅允许白名单中的字段）。"""
     # 过滤非法字段
     updates = {k: v for k, v in fields.items() if k in _UPDATABLE_FIELDS}
-    if not updates:
-        return
-    # 自动设置 updated_at
-    updates['updated_at'] = datetime.now().isoformat()
-
-    set_clause = ', '.join(f'{k} = ?' for k in updates)
-    values = list(updates.values()) + [session_id]
-
     conn = get_db()
     try:
+        updates = _merge_terminal_fields(conn, session_id, updates)
+        if not updates:
+            return
+        updates['updated_at'] = datetime.now().isoformat()
+        set_clause = ', '.join(f'{k} = ?' for k in updates)
+        values = list(updates.values()) + [session_id]
         conn.execute(f"UPDATE sessions SET {set_clause} WHERE id = ?", values)
         conn.commit()
     finally:
@@ -279,6 +311,25 @@ def get_session(session_id: str) -> dict | None:
     try:
         row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_sessions_by_ids(session_ids: list[str]) -> dict[str, dict]:
+    """Bulk lookup used by startup reconciliation; avoids one connection per file."""
+    if not session_ids:
+        return {}
+    conn = get_db()
+    try:
+        result: dict[str, dict] = {}
+        for offset in range(0, len(session_ids), 500):
+            batch = session_ids[offset:offset + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT * FROM sessions WHERE id IN ({placeholders})", batch,
+            ).fetchall()
+            result.update((str(row["id"]), dict(row)) for row in rows)
+        return result
     finally:
         conn.close()
 
@@ -486,6 +537,7 @@ def apply_persistence_batch(operations: list[dict]) -> list[int | None]:
                     key: value for key, value in dict(operation.get("fields") or {}).items()
                     if key in _UPDATABLE_FIELDS
                 }
+                updates = _merge_terminal_fields(conn, session_id, updates)
                 if updates:
                     updates["updated_at"] = datetime.now().isoformat()
                     set_clause = ", ".join(f"{key} = ?" for key in updates)

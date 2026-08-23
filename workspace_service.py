@@ -93,13 +93,22 @@ class WorkspaceService:
         )
         self._cache: dict[str, _CachedWorkspace] = {}
         self._lock = asyncio.Lock()
+        self._key_locks: dict[str, asyncio.Lock] = {}
         self._deleting: set[str] = set()
+        self._pinned: set[str] = set()
         self._generation = 0
         self.last_cleanup_at: float | None = None
         self.cleanup_runs = 0
         self.cleanup_failures = 0
         self.cleaned_files = 0
         self.cleaned_bytes = 0
+        self._health_lock = asyncio.Lock()
+        self._health_cache: dict[str, Any] | None = None
+        self._health_cache_key: tuple[tuple[str, str], ...] = ()
+        self._health_cache_at = 0.0
+        self.health_cache_seconds = max(
+            1.0, float(os.getenv("LINGSHU_WORKSPACE_HEALTH_CACHE_SECONDS", "30")),
+        )
 
     def ensure_capacity(self, required_bytes: int = 0) -> None:
         """Reject managed writes before the global free-space waterline is crossed."""
@@ -163,7 +172,16 @@ class WorkspaceService:
             if cached is not None:
                 cached.last_used = time.monotonic()
                 return cached.workspace
+            key_lock = self._key_locks.setdefault(key, asyncio.Lock())
 
+        async with key_lock:
+            async with self._lock:
+                if key in self._deleting:
+                    raise RuntimeError(f"工作区正在删除: {key}")
+                cached = self._cache.get(key)
+                if cached is not None:
+                    cached.last_used = time.monotonic()
+                    return cached.workspace
             self.ensure_capacity()
             workdir = self.workspace_dir(user_id, session_id)
             workdir.mkdir(parents=True, exist_ok=True)
@@ -178,8 +196,16 @@ class WorkspaceService:
                 skill_paths=[str(p) for p in (skill_paths or [])],
             )
             await workspace.initialize()
-            self._generation += 1
-            self._cache[key] = _CachedWorkspace(workspace, generation=self._generation)
+            reject_initialized = False
+            async with self._lock:
+                if key in self._deleting:
+                    reject_initialized = True
+                else:
+                    self._generation += 1
+                    self._cache[key] = _CachedWorkspace(workspace, generation=self._generation)
+            if reject_initialized:
+                await workspace.close()
+                raise RuntimeError(f"工作区正在删除: {key}")
             return workspace
 
     async def touch(self, user_id: int | None, session_id: str) -> None:
@@ -189,6 +215,17 @@ class WorkspaceService:
             cached = self._cache.get(key)
             if cached is not None:
                 cached.last_used = time.monotonic()
+
+    async def pin(self, user_id: int | None, session_id: str) -> None:
+        """Protect a running mission workspace from idle eviction."""
+        key = self.workspace_id(user_id, session_id)
+        async with self._lock:
+            self._pinned.add(key)
+
+    async def unpin(self, user_id: int | None, session_id: str) -> None:
+        key = self.workspace_id(user_id, session_id)
+        async with self._lock:
+            self._pinned.discard(key)
 
     async def close_idle(self, *, ttl_seconds: float | None = None) -> int:
         """关闭并移除超过 TTL 未使用的工作区缓存条目。
@@ -201,7 +238,9 @@ class WorkspaceService:
             stale = [
                 self._cache.pop(key)
                 for key, entry in tuple(self._cache.items())
-                if key not in self._deleting and now - entry.last_used > ttl
+                if key not in self._deleting
+                and key not in self._pinned
+                and now - entry.last_used > ttl
             ]
         await self._close_entries(stale)
         return len(stale)
@@ -211,14 +250,19 @@ class WorkspaceService:
         async with self._lock:
             entries = list(self._cache.values())
             self._cache.clear()
+            self._pinned.clear()
         await self._close_entries(entries)
 
     async def close_one(self, user_id: int | None, session_id: str) -> None:
         """只关闭指定会话的工作区并移除缓存条目（不删除磁盘数据）。"""
         key = self.workspace_id(user_id, session_id)
         async with self._lock:
-            entry = self._cache.pop(key, None)
-        await self._close_entries([entry] if entry is not None else [])
+            key_lock = self._key_locks.setdefault(key, asyncio.Lock())
+        async with key_lock:
+            async with self._lock:
+                entry = self._cache.pop(key, None)
+                self._pinned.discard(key)
+            await self._close_entries([entry] if entry is not None else [])
 
     async def _close_entries(self, entries: list[_CachedWorkspace]) -> None:
         for entry in entries:
@@ -238,17 +282,21 @@ class WorkspaceService:
             if key in self._deleting:
                 raise RuntimeError(f"工作区已在删除: {key}")
             self._deleting.add(key)
-            entry = self._cache.pop(key, None)
+            self._pinned.discard(key)
+            key_lock = self._key_locks.setdefault(key, asyncio.Lock())
         try:
-            await self._close_entries([entry] if entry is not None else [])
-            src = self.workspace_dir(user_id, session_id)
-            if not src.exists():
-                raise FileNotFoundError(f"工作区不存在: {src}")
-            trash_root = self.root / "trash"
-            trash_root.mkdir(parents=True, exist_ok=True)
-            dst = trash_root / f"{src.name}-{int(time.time())}"
-            os.replace(src, dst)
-            return dst
+            async with key_lock:
+                async with self._lock:
+                    entry = self._cache.pop(key, None)
+                await self._close_entries([entry] if entry is not None else [])
+                src = self.workspace_dir(user_id, session_id)
+                if not src.exists():
+                    raise FileNotFoundError(f"工作区不存在: {src}")
+                trash_root = self.root / "trash"
+                trash_root.mkdir(parents=True, exist_ok=True)
+                dst = trash_root / f"{src.name}-{int(time.time())}"
+                os.replace(src, dst)
+                return dst
         finally:
             async with self._lock:
                 self._deleting.discard(key)
@@ -358,9 +406,40 @@ class WorkspaceService:
         async with self._lock:
             active_workspaces = len(self._cache)
             deleting_workspaces = len(self._deleting)
-        return await asyncio.to_thread(
-            self._health_sync, active_workspaces, deleting_workspaces, extra_paths,
-        )
+            pinned_workspaces = len(self._pinned)
+        cache_key = tuple(sorted(
+            (name, str(path.resolve())) for name, path in (extra_paths or {}).items()
+        ))
+        now = time.monotonic()
+        if (
+            self._health_cache is not None
+            and self._health_cache_key == cache_key
+            and now - self._health_cache_at < self.health_cache_seconds
+        ):
+            cached = dict(self._health_cache)
+            cached["active_workspaces"] = active_workspaces
+            cached["deleting_workspaces"] = deleting_workspaces
+            cached["pinned_workspaces"] = pinned_workspaces
+            cached["cache_age_seconds"] = round(now - self._health_cache_at, 3)
+            return cached
+        async with self._health_lock:
+            now = time.monotonic()
+            if (
+                self._health_cache is None
+                or self._health_cache_key != cache_key
+                or now - self._health_cache_at >= self.health_cache_seconds
+            ):
+                self._health_cache = await asyncio.to_thread(
+                    self._health_sync, active_workspaces, deleting_workspaces, extra_paths,
+                )
+                self._health_cache_key = cache_key
+                self._health_cache_at = now
+            result = dict(self._health_cache)
+            result["active_workspaces"] = active_workspaces
+            result["deleting_workspaces"] = deleting_workspaces
+            result["pinned_workspaces"] = pinned_workspaces
+            result["cache_age_seconds"] = round(time.monotonic() - self._health_cache_at, 3)
+            return result
 
     def _health_sync(
         self,

@@ -875,7 +875,9 @@ class MissionStore:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 data = state.to_dict()
                 data["schema_version"] = SCHEMA_VERSION
-                json.dump(data, handle, ensure_ascii=False, indent=2)
+                json.dump(
+                    data, handle, ensure_ascii=False, separators=(",", ":"),
+                )
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, self.path)
@@ -1019,7 +1021,9 @@ class MissionStore:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 data = state.to_dict()
                 data["schema_version"] = SCHEMA_VERSION
-                json.dump(data, handle, ensure_ascii=False, indent=2)
+                json.dump(
+                    data, handle, ensure_ascii=False, separators=(",", ":"),
+                )
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, target)

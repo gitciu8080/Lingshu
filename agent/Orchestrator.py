@@ -793,7 +793,8 @@ def create_orchestrator_agent(
         }
         url = f"{api_base}/skill/agent/arena/attempt/{attempt_id}/submit/"
         try:
-            resp = await httpx.AsyncClient(timeout=60.0).post(url, json=payload, headers=headers)
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json().get("data", {})
         except Exception as exc:
@@ -887,7 +888,8 @@ def create_orchestrator_agent(
         }
         url = f"{api_base}/slab-match/api/v1/agent/answer-panel/answer"
         try:
-            resp = await httpx.AsyncClient(timeout=60.0).post(url, json=payload, headers=headers)
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             body = resp.json()
             if body.get("code") != "00000":

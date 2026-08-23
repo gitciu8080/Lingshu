@@ -414,7 +414,24 @@ def _make_summary_collector(
     plan_updated、expert_joined 等）的 content 参考 api.py 持久化规则做
     轻量映射，保证与历史 transcript 格式一致。
     """
-    buffers: dict[str, str] = {}
+    buffers: dict[str, list[str]] = {}
+    buffer_sizes: dict[str, int] = {}
+    stream_limit = max(
+        16_384, int(os.getenv("LINGSHU_STREAM_BUFFER_MAX_CHARS", "1048576")),
+    )
+    transcript_limit = max(
+        100_000, int(os.getenv("LINGSHU_SUMMARY_COLLECTOR_MAX_CHARS", "4000000")),
+    )
+    collected_chars = {"value": sum(len(str(item.get("content") or "")) for item in messages)}
+
+    def append_message(item: dict[str, Any]) -> None:
+        content = str(item.get("content") or "")[:20_000]
+        item["content"] = content
+        messages.append(item)
+        collected_chars["value"] += len(content)
+        while messages and collected_chars["value"] > transcript_limit:
+            removed = messages.pop(0)
+            collected_chars["value"] -= len(str(removed.get("content") or ""))
     # Summary 报告生成阶段由 run_summary_report 置为 False：Summary 自身的
     # 流式事件只转发给前端展示，不回流进 _runtime_messages（避免自我污染）。
     collect_state = {"enabled": True}
@@ -423,17 +440,22 @@ def _make_summary_collector(
         if collect_state["enabled"]:
             if event_type in ("text_delta", "thinking_delta"):
                 key = f"{event_type.removesuffix('_delta')}:{payload.get('agent', '')}"
-                buffers[key] = buffers.get(key, "") + (
-                    payload.get("delta") or payload.get("content") or ""
-                )
+                delta = str(payload.get("delta") or payload.get("content") or "")
+                size = buffer_sizes.get(key, 0)
+                remaining = max(0, stream_limit - size)
+                if remaining:
+                    chunk = delta[:remaining]
+                    buffers.setdefault(key, []).append(chunk)
+                    buffer_sizes[key] = size + len(chunk)
             elif event_type in ("text_end", "thinking_end"):
                 key = f"{event_type.removesuffix('_end')}:{payload.get('agent', '')}"
-                full = buffers.pop(key, "") or payload.get("full_text") or payload.get("content") or ""
+                full = "".join(buffers.pop(key, [])) or payload.get("full_text") or payload.get("content") or ""
+                buffer_sizes.pop(key, None)
                 # 推理链（thinking_end）仅供前端实时展示，不进入 Summary 报告素材：
                 # 混入后模型会把 Agent 的内心独白当作会话正文复述进报告。正式回复
                 # （text_end）与系统/工具事件仍正常收集。
                 if event_type != "thinking_end" and full.strip():
-                    messages.append({
+                    append_message({
                         "event_type": "text_end",
                         "agent_name": str(payload.get("agent") or "system"),
                         "content": full,
@@ -465,7 +487,7 @@ def _make_summary_collector(
                 else:
                     content = str(payload.get("content") or "")
                 if content.strip():
-                    messages.append({
+                    append_message({
                         "event_type": event_type,
                         "agent_name": agent_name,
                         "content": content,
@@ -1566,6 +1588,7 @@ async def run_mission(
         # 全局 WorkDir，仅用于打开旧会话。
         if use_v2_workspace:
             workspace = await ws_service.get(user_id, mission_id)
+            await ws_service.pin(user_id, mission_id)
             ws_root = ws_service.workspace_dir(user_id, mission_id)
         else:
             workspace = None
@@ -2389,6 +2412,7 @@ async def run_mission(
         # v0.3.0：任务结束关闭本会话 Workspace（释放 MCP 与对象；磁盘
         # 数据保留，供 resume 或审计使用）
         try:
+            await ws_service.unpin(user_id, mission_id)
             await ws_service.close_one(user_id, mission_id)
         except Exception:  # noqa: BLE001
             pass

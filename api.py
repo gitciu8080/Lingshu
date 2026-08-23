@@ -92,7 +92,8 @@ class SessionContext:
     input_queue: asyncio.Queue
     task: asyncio.Task | None = None
     subscribers: set[asyncio.Queue] = field(default_factory=set)
-    stream_buffers: dict[str, str] = field(default_factory=dict)
+    stream_buffers: dict[str, list[str]] = field(default_factory=dict)
+    stream_buffer_sizes: dict[str, int] = field(default_factory=dict)
     # stream key → 稳定 block id。必须跨 start/delta/end 传递，历史恢复时
     # 才不会把同一 Agent 的多次推理合并覆盖成一条。
     stream_blocks: dict[str, str] = field(default_factory=dict)
@@ -100,7 +101,7 @@ class SessionContext:
     # 旧 WebUI 通道的未完成流快照写入节流状态。模型可能按单个字符返回，
     # 不能让每个 delta 都重新打开 SQLite、覆盖完整正文并提交事务。
     stream_snapshot_writes: dict[str, tuple[float, int]] = field(default_factory=dict)
-    tool_buffers: dict[str, dict[str, str]] = field(default_factory=dict)
+    tool_buffers: dict[str, dict[str, Any]] = field(default_factory=dict)
     approval_decision_submitted: bool = False
     agent_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     # 运行时追加指令状态（非审批用户消息 → 中断 Agent → 注入后恢复）
@@ -110,6 +111,8 @@ class SessionContext:
     # 用户已点击停止：AgentScope 可能吞掉 CancelledError 使 run_mission 正常返回，
     # 此标记确保 _run_and_cleanup 终态强制收敛为 cancelled 而非 failed。
     cancel_requested: bool = False
+    deleting: bool = False
+    sse_resyncs: int = 0
     # 上一条已处理的用户消息内容（P4：忽略前端双击等产生的连续重复指令）
     last_user_content: str = ""
 
@@ -117,6 +120,43 @@ class SessionContext:
 _active_sessions: dict[str, SessionContext] = {}
 _sessions_dir = _PROJECT_ROOT / ".TaskMemory" / "sessions"
 _sessions_dir.mkdir(parents=True, exist_ok=True)
+
+_STREAM_BUFFER_MAX_CHARS = max(
+    16_384, int(os.getenv("LINGSHU_STREAM_BUFFER_MAX_CHARS", "1048576")),
+)
+_TOOL_ARGS_MAX_CHARS = max(
+    4096, int(os.getenv("LINGSHU_TOOL_ARGS_MAX_CHARS", "262144")),
+)
+_SSE_SUBSCRIBER_QUEUE_SIZE = max(
+    32, int(os.getenv("LINGSHU_SSE_SUBSCRIBER_QUEUE_SIZE", "512")),
+)
+
+
+def _buffer_text(parts: list[str]) -> str:
+    return "".join(parts)
+
+
+def _publish_session_event(ctx: SessionContext, event: dict[str, Any]) -> None:
+    """Bound per-browser backlog; a slow client must resync from SQLite."""
+    for subscriber in tuple(ctx.subscribers):
+        try:
+            subscriber.put_nowait(event.copy())
+            continue
+        except asyncio.QueueFull:
+            pass
+        while True:
+            try:
+                subscriber.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        ctx.sse_resyncs += 1
+        subscriber.put_nowait({
+            "type": "resync_required",
+            "session_id": ctx.session_id,
+            "reason": "slow_subscriber",
+        })
+        if not subscriber.full():
+            subscriber.put_nowait(event.copy())
 
 # 用户并发上限
 MAX_CONCURRENT_SESSIONS_PER_USER = 5
@@ -134,6 +174,24 @@ _upload_dir.mkdir(parents=True, exist_ok=True)
 _reports_dir = _PROJECT_ROOT / ".Reports"
 _reports_dir.mkdir(parents=True, exist_ok=True)
 _workspace_janitor_task: asyncio.Task[None] | None = None
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _spawn_background(coro, *, name: str) -> asyncio.Task[Any]:
+    task = asyncio.create_task(coro, name=name)
+    _background_tasks.add(task)
+    def completed(done: asyncio.Task[Any]) -> None:
+        _background_tasks.discard(done)
+        if done.cancelled():
+            return
+        error = done.exception()
+        if error is not None:
+            logger.error(
+                "后台任务 %s 异常: %s", done.get_name(), error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+    task.add_done_callback(completed)
+    return task
 
 
 def _protected_upload_paths() -> set[Path]:
@@ -235,6 +293,8 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
     时在 Agent 日志面板创建气泡入口。
     """
     def callback(event_type: str, **payload: Any) -> None:
+        if ctx.deleting:
+            return
         stream_key = ""
         persistence_operations: list[dict] = []
         # 全文缓冲：text_delta / thinking_delta → 累积
@@ -244,12 +304,17 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             block_id = ctx.stream_blocks.get(stream_key)
             if block_id:
                 payload["block_id"] = block_id
-            ctx.stream_buffers[stream_key] = ctx.stream_buffers.get(stream_key, "") + (
-                payload.get("delta") or payload.get("content") or ""
-            )
+            delta = str(payload.get("delta") or payload.get("content") or "")
+            parts = ctx.stream_buffers.setdefault(stream_key, [])
+            current_size = ctx.stream_buffer_sizes.get(stream_key, 0)
+            remaining = max(0, _STREAM_BUFFER_MAX_CHARS - current_size)
+            if remaining:
+                chunk = delta[:remaining]
+                parts.append(chunk)
+                ctx.stream_buffer_sizes[stream_key] = current_size + len(chunk)
             if block_id:
                 now = time.monotonic()
-                full_text = ctx.stream_buffers[stream_key]
+                full_text = _buffer_text(parts)
                 last_write, last_size = ctx.stream_snapshot_writes.get(
                     stream_key, (0.0, 0),
                 )
@@ -279,7 +344,8 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                     "session_id": session_id,
                     "block_id": block_id,
                 })
-            full = ctx.stream_buffers.pop(stream_key, "")
+            full = _buffer_text(ctx.stream_buffers.pop(stream_key, []))
+            ctx.stream_buffer_sizes.pop(stream_key, None)
             ctx.stream_snapshot_writes.pop(stream_key, None)
             if full:
                 payload["full_text"] = full
@@ -293,7 +359,8 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             ctx.stream_counter += 1
             block_id = f"{stream_key}:{ctx.stream_counter}"
             ctx.stream_blocks[stream_key] = block_id
-            ctx.stream_buffers[stream_key] = ""
+            ctx.stream_buffers[stream_key] = []
+            ctx.stream_buffer_sizes[stream_key] = 0
             ctx.stream_snapshot_writes.pop(stream_key, None)
             payload["block_id"] = block_id
 
@@ -304,7 +371,8 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                 ctx.tool_buffers[tool_call_id] = {
                     "agent": payload.get("agent", ""),
                     "tool_name": payload.get("tool_name", ""),
-                    "full_args": "",
+                    "full_args_parts": [],
+                    "full_args_size": 0,
                     "output": "",
                 }
         elif event_type == "tool_call_delta":
@@ -313,15 +381,22 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                 tool = ctx.tool_buffers.setdefault(tool_call_id, {
                     "agent": payload.get("agent", ""),
                     "tool_name": "",
-                    "full_args": "",
+                    "full_args_parts": [],
+                    "full_args_size": 0,
                     "output": "",
                 })
-                tool["full_args"] += payload.get("delta") or ""
+                delta = str(payload.get("delta") or "")
+                size = int(tool.get("full_args_size") or 0)
+                remaining = max(0, _TOOL_ARGS_MAX_CHARS - size)
+                if remaining:
+                    chunk = delta[:remaining]
+                    tool.setdefault("full_args_parts", []).append(chunk)
+                    tool["full_args_size"] = size + len(chunk)
         elif event_type == "tool_call_end":
             tool_call_id = payload.get("tool_call_id", "")
             tool = ctx.tool_buffers.pop(tool_call_id, None)
             if tool:
-                payload["full_args"] = tool.get("full_args", "")
+                payload["full_args"] = "".join(tool.get("full_args_parts", []))
                 if not payload.get("tool_name"):
                     payload["tool_name"] = tool.get("tool_name", "")
             # 部分 ToolCallEndEvent 不携带输出；保留空字符串以稳定前端结构。
@@ -344,6 +419,10 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                 "phase": "planning",
                 "exploitation_approved": False,
             }))
+            publish_account_event(
+                ctx.user_id, "account_session_started",
+                session_id=session_id,
+            )
         elif event_type == "target_info":
             persistence_operations.append(target_info_operation(session_id, {
                 key: value for key, value in payload.items()
@@ -377,6 +456,15 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             flag = payload.get("flag") or payload.get("content")
             if flag:
                 persistence_operations.append(target_info_operation(session_id, {"flag": flag}))
+        if event_type in {"mission_end", "mission_cancelled"}:
+            publish_account_event(
+                ctx.user_id, "account_session_terminal",
+                session_id=session_id,
+                status=payload.get("status") or (
+                    "cancelled" if event_type == "mission_cancelled" else "failed"
+                ),
+                success=payload.get("success"),
+            )
         # 审批状态持久化：approval_required 时保存完整事件数据，approval_resolved 时清除
         if event_type == "approval_required":
             ctx.approval_decision_submitted = False
@@ -397,8 +485,7 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             get_persistence_writer().submit_from_callback(persistence_operations)
 
         # 每个浏览器连接拥有独立队列，所有订阅者收到完全相同的事件。
-        for subscriber in tuple(ctx.subscribers):
-            subscriber.put_nowait(event.copy())
+        _publish_session_event(ctx, event)
 
     return callback
 
@@ -454,7 +541,7 @@ async def _session_event_generator(
     after_seq: int = 0,
 ):
     """为单个客户端建立独立订阅，并补偿刷新建连间隙事件。"""
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=_SSE_SUBSCRIBER_QUEUE_SIZE)
     ctx.subscribers.add(queue)
     # 注册订阅和读取补偿消息之间不 await，不会产生事件丢失窗口。
     catchup = await asyncio.to_thread(
@@ -464,8 +551,8 @@ async def _session_event_generator(
         5000,
     )
     stream_snapshot = [
-        (key, full_text, ctx.stream_blocks.get(key, ""))
-        for key, full_text in ctx.stream_buffers.items()
+        (key, _buffer_text(parts), ctx.stream_blocks.get(key, ""))
+        for key, parts in ctx.stream_buffers.items()
     ]
     tool_snapshot = {
         tool_call_id: dict(tool)
@@ -491,7 +578,7 @@ async def _session_event_generator(
                 "tool_call_id": tool_call_id,
                 "tool_name": tool.get("tool_name", ""),
                 "agent": tool.get("agent", ""),
-                "full_args": tool.get("full_args", ""),
+                "full_args": "".join(tool.get("full_args_parts", [])),
                 "session_id": session_id,
             }
             yield f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
@@ -613,12 +700,6 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                 status_val = "failed"
             # Summary 报告已由 run_mission 收尾阶段生成（含 PDF 落盘与 report_ready
             # 事件），此处仅落库并通知前端任务结束。
-            await get_persistence_writer().submit([
-                session_update_operation(
-                    session_id, status=status_val, phase=phase, success=success,
-                    flag=flag, summary=summary,
-                ),
-            ], wait=True)
             callback(
                 "mission_end",
                 message="任务执行已结束",
@@ -649,9 +730,25 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             phase = "cancelled"
             callback("mission_cancelled", message="任务已被用户取消", agent="system")
     except Exception as exc:
-        status_val = "failed"
-        phase = "failed"
-        callback("error", message=f"任务异常：{exc}", agent="system")
+        confirmed_success = bool(
+            mission_state is not None
+            and getattr(mission_state, "success", False)
+            and str(getattr(getattr(mission_state, "phase", ""), "value", getattr(mission_state, "phase", "")))
+            == "completed"
+        )
+        if confirmed_success:
+            status_val = "completed"
+            phase = "completed"
+            success = True
+            flag = getattr(mission_state, "flag", flag)
+            summary = getattr(mission_state, "summary", summary) or summary
+            callback(
+                "report_error", message=f"任务成功后的收尾步骤异常：{exc}", agent="system",
+            )
+        else:
+            status_val = "failed"
+            phase = "failed"
+            callback("error", message=f"任务异常：{exc}", agent="system")
     finally:
         if mission_state is None or status_val == "cancelled":
             existing = await asyncio.to_thread(session_store.get_session, session_id) or {}
@@ -686,14 +783,15 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
         ], wait=True)
         # 保存到长期记忆
         try:
-            _save_long_term_memory(session_id, target, goal, phase, success, flag, summary)
+            await asyncio.to_thread(
+                _save_long_term_memory,
+                session_id, target, goal, phase, success, flag, summary,
+            )
         except Exception:
             pass
-        # 正常结束时短暂保留 SSE；用户主动停止必须立即完成清理并返回。
-        if status_val != "cancelled":
-            await asyncio.sleep(5)
-        if session_id in _active_sessions:
-            del _active_sessions[session_id]
+        # 终态事件已经广播且写入持久化队列，无需为 SSE 人为保留整套 Agent
+        # 上下文；前端断线后直接从历史投影恢复。
+        _active_sessions.pop(session_id, None)
 
 
 @asynccontextmanager
@@ -701,7 +799,11 @@ async def _app_lifespan(_: FastAPI):
     global _workspace_janitor_task
     writer = get_persistence_writer()
     await writer.start()
-    repaired = await writer.reconcile_mission_states(_sessions_dir)
+    try:
+        repaired = await writer.reconcile_mission_states(_sessions_dir)
+    except Exception:
+        await writer.stop()
+        raise
     if repaired:
         logger.info("启动时已从 Mission JSON 校正 %d 条会话索引", repaired)
     _workspace_janitor_task = asyncio.create_task(
@@ -737,6 +839,15 @@ async def _app_lifespan(_: FastAPI):
             try:
                 yield
             finally:
+                active_tasks = [
+                    ctx.task for ctx in _active_sessions.values()
+                    if ctx.task is not None and not ctx.task.done()
+                ]
+                for task in active_tasks:
+                    task.cancel()
+                if active_tasks:
+                    await asyncio.gather(*active_tasks, return_exceptions=True)
+                _active_sessions.clear()
                 if _workspace_janitor_task is not None:
                     _workspace_janitor_task.cancel()
                     with suppress(asyncio.CancelledError):
@@ -747,9 +858,20 @@ async def _app_lifespan(_: FastAPI):
                     rag_start_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await rag_start_task
+                for task in tuple(_background_tasks):
+                    task.cancel()
+                if _background_tasks:
+                    await asyncio.gather(*tuple(_background_tasks), return_exceptions=True)
                 await rag.close()
                 await writer.stop()
     finally:
+        if _workspace_janitor_task is not None:
+            _workspace_janitor_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await _workspace_janitor_task
+            _workspace_janitor_task = None
+        await get_workspace_service().close_all()
+        await writer.stop()
         await antsword.stop()
 
 
@@ -1019,8 +1141,14 @@ def _build_initial_context(source_session_id: str, user_id: str) -> str | None:
 
 
 # ── 版本信息（登录页无需认证） ──
+_runtime_version_cache: dict[str, str] | None = None
+
+
 @app.get("/api/version")
 async def get_runtime_version():
+    global _runtime_version_cache
+    if _runtime_version_cache is not None:
+        return _runtime_version_cache
     branch = os.getenv("LINGSHU_GIT_BRANCH", "unknown")
     commit = os.getenv("LINGSHU_GIT_COMMIT", "unknown")
     try:
@@ -1038,7 +1166,8 @@ async def get_runtime_version():
         commit = commit_result.stdout.strip() or commit
     except (OSError, subprocess.SubprocessError):
         pass
-    return {"branch": branch, "commit": commit}
+    _runtime_version_cache = {"branch": branch, "commit": commit}
+    return _runtime_version_cache
 
 
 # ── 认证路由 ──
@@ -1149,6 +1278,14 @@ async def superadmin_runtime_health(current_user: dict = Depends(get_current_use
         ) else "ok",
         "persistence": {**sqlite_status, **get_persistence_writer().health()},
         "workspace": workspace_health,
+        "realtime": {
+            "active_sessions": len(_active_sessions),
+            "subscribers": sum(len(ctx.subscribers) for ctx in _active_sessions.values()),
+            "resyncs": sum(ctx.sse_resyncs for ctx in _active_sessions.values()),
+            "buffer_chars": sum(
+                sum(ctx.stream_buffer_sizes.values()) for ctx in _active_sessions.values()
+            ),
+        },
     }
 
 
@@ -1444,7 +1581,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         ctx = SessionContext(
             session_id=session_id,
             user_id=current_user["id"],
-            input_queue=asyncio.Queue(),
+            input_queue=asyncio.Queue(maxsize=128),
         )
 
         # 注册到活跃会话
@@ -1453,17 +1590,25 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
 
     # 持久化到 DB（传入 API 层生成的 session_id）
     workspace_id = get_workspace_service().workspace_id(current_user["id"], session_id)
-    await writer.submit([
-        session_create_operation(
-            session_id, user_id=current_user["id"], target=authorized_target,
-            goal=req.goal, provider=req.provider, model=model_level,
-            title=f"[{session_id[:8]}] 安全测试任务",
-        ),
-        session_update_operation(
-            session_id, workspace_id=workspace_id, workspace_version=2,
-            resume_status="fresh", checkpoint_seq=0,
-        ),
-    ], wait=True)
+    try:
+        await writer.submit([
+            session_create_operation(
+                session_id, user_id=current_user["id"], target=authorized_target,
+                goal=req.goal, provider=req.provider, model=model_level,
+                title=f"[{session_id[:8]}] 安全测试任务",
+            ),
+            session_update_operation(
+                session_id, workspace_id=workspace_id, workspace_version=2,
+                resume_status="fresh", checkpoint_seq=0,
+            ),
+        ], wait=True)
+    except Exception as exc:
+        async with _session_creation_lock:
+            if _active_sessions.get(session_id) is ctx:
+                _active_sessions.pop(session_id, None)
+            if _recent_session_creations.get(fingerprint, (None, None))[1] == session_id:
+                _recent_session_creations.pop(fingerprint, None)
+        raise HTTPException(status_code=503, detail="会话持久化暂不可用，请稍后重试") from exc
 
     # 构建 session-aware callback
     callback = _make_session_callback(session_id, ctx)
@@ -1540,8 +1685,7 @@ async def send_message(session_id: str, msg: ChatMessage, current_user: dict = D
         "content": msg.content,
         "seq": seq,
     }
-    for subscriber in tuple(ctx.subscribers):
-        subscriber.put_nowait(event.copy())
+    _publish_session_event(ctx, event)
 
     # ── 运行时追加指令（非审批消息 + 会话活跃 → 中断 Agent 并注入） ──
     if ctx.task and not ctx.task.done() and content not in {"批准", "补充侦察", "拒绝"}:
@@ -1583,8 +1727,7 @@ async def send_message(session_id: str, msg: ChatMessage, current_user: dict = D
             "content": "新情报已接收：正在中断当前步骤并交给行动指挥处理。",
             "seq": ack_seq,
         }
-        for subscriber in tuple(ctx.subscribers):
-            subscriber.put_nowait(ack.copy())
+        _publish_session_event(ctx, ack)
         # 这不是伪造模型推理，而是执行层对“当前实际工作者已接收中断”的
         # 明确回执；每条同样持久化，刷新会话后仍可辨认情报交给了谁。
         for agent_name in acknowledgement_agents:
@@ -1600,8 +1743,7 @@ async def send_message(session_id: str, msg: ChatMessage, current_user: dict = D
                 "content": "已接收操作员的新情报，当前步骤已中断；正在将上下文交回行动指挥重新规划。",
                 "seq": agent_seq,
             }
-            for subscriber in tuple(ctx.subscribers):
-                subscriber.put_nowait(agent_ack.copy())
+            _publish_session_event(ctx, agent_ack)
         return {
             "status": "steering",
             "interrupted_tasks": interrupted,
@@ -1664,7 +1806,9 @@ async def get_session_detail(session_id: str, current_user: dict = Depends(get_c
     session_file = _sessions_dir / f"{session_id}.json"
     if session_file.is_file():
         try:
-            mission_data = json.loads(session_file.read_text(encoding="utf-8"))
+            mission_data = await asyncio.to_thread(
+                lambda: json.loads(session_file.read_text(encoding="utf-8")),
+            )
             session["mission_state"] = mission_data
             session["markdown_available"] = bool(
                 (mission_data.get("summary") or "").strip()
@@ -1742,7 +1886,9 @@ async def download_session_report_markdown(
     session_file = _sessions_dir / f"{session_id}.json"
     if session_file.is_file():
         try:
-            mission_data = json.loads(session_file.read_text(encoding="utf-8"))
+            mission_data = await asyncio.to_thread(
+                lambda: json.loads(session_file.read_text(encoding="utf-8")),
+            )
             markdown = (mission_data.get("summary") or "").strip()
         except (json.JSONDecodeError, OSError):
             markdown = ""
@@ -1953,9 +2099,9 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
     # 如果会话仍在运行，先取消并等待
     ctx = _active_sessions.get(session_id)
     if ctx:
+        ctx.deleting = True
         deleted_event = {"type": "session_deleted", "session_id": session_id}
-        for subscriber in tuple(ctx.subscribers):
-            subscriber.put_nowait(deleted_event.copy())
+        _publish_session_event(ctx, deleted_event)
         # 防止任务取消过程继续向旧浏览器广播审批等迟到事件。
         ctx.subscribers.clear()
         _active_sessions.pop(session_id, None)
@@ -1979,13 +2125,14 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
     )
     # 后台清除孤儿 blob 与 trash（不阻塞响应）
     if orphaned_blobs:
-        asyncio.get_running_loop().create_task(
+        _spawn_background(
             _purge_orphaned_blobs(svc, orphaned_blobs),
+            name=f"lingshu-purge-blobs:{session_id}",
         )
     # 删除 JSON 文件
     session_file = _sessions_dir / f"{session_id}.json"
     if session_file.is_file():
-        session_file.unlink()
+        await asyncio.to_thread(session_file.unlink)
     report_file = _reports_dir / f"{session_id}.pdf"
     if report_file.is_file():
         if trash_path is None:
@@ -1993,7 +2140,10 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
             trash_path.mkdir(parents=True, exist_ok=True)
         report_trash = trash_path / "reports"
         report_trash.mkdir(parents=True, exist_ok=True)
-        os.replace(report_file, report_trash / report_file.name)
+        await asyncio.to_thread(os.replace, report_file, report_trash / report_file.name)
+    publish_account_event(
+        current_user["id"], "account_session_deleted", session_id=session_id,
+    )
     return {"status": "deleted"}
 
 
@@ -2087,7 +2237,7 @@ async def resume_session(
     ctx = SessionContext(
         session_id=session_id,
         user_id=current_user["id"],
-        input_queue=asyncio.Queue(),
+        input_queue=asyncio.Queue(maxsize=128),
     )
     _active_sessions[session_id] = ctx
     callback = _make_session_callback(session_id, ctx)
@@ -2217,13 +2367,17 @@ async def mission_state_compat(current_user: dict = Depends(get_current_user)):
             session_file = _sessions_dir / f"{sid}.json"
             if session_file.is_file():
                 try:
-                    return json.loads(session_file.read_text(encoding="utf-8"))
+                    return await asyncio.to_thread(
+                        lambda: json.loads(session_file.read_text(encoding="utf-8")),
+                    )
                 except (json.JSONDecodeError, OSError):
                     pass
     # 兜底读取旧路径
     if _mission_store_path.is_file():
         try:
-            return json.loads(_mission_store_path.read_text(encoding="utf-8"))
+            return await asyncio.to_thread(
+                lambda: json.loads(_mission_store_path.read_text(encoding="utf-8")),
+            )
         except (json.JSONDecodeError, OSError):
             pass
     return {"phase": "idle", "message": "无运行中的任务"}
@@ -2234,7 +2388,9 @@ async def mission_history(limit: int = 20, current_user: dict = Depends(get_curr
     """读取长期记忆中的任务历史。"""
     if _long_memory_path.is_file():
         try:
-            data = json.loads(_long_memory_path.read_text(encoding="utf-8"))
+            data = await asyncio.to_thread(
+                lambda: json.loads(_long_memory_path.read_text(encoding="utf-8")),
+            )
             missions = data.get("missions", [])
             return {"missions": missions[-limit:], "total": len(missions)}
         except (json.JSONDecodeError, OSError):
@@ -2263,7 +2419,7 @@ async def upload_target(
 
     workspace = get_workspace_service()
     try:
-        workspace.ensure_capacity()
+        await asyncio.to_thread(workspace.ensure_capacity)
     except WorkspaceCapacityError as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
     batch_dir = _upload_dir / uuid.uuid4().hex[:16]
@@ -2279,6 +2435,7 @@ async def upload_target(
             if destination.exists():
                 destination = batch_dir / f"{index}_{safe_name}"
             file_size = 0
+            reserved_bytes = 0
             with destination.open("xb") as handle:
                 while chunk := await upload.read(1024 * 1024):
                     file_size += len(chunk)
@@ -2290,11 +2447,17 @@ async def upload_target(
                         )
                     if total_size > max_total_size:
                         raise HTTPException(status_code=413, detail="文件总大小超过配置上限")
-                    try:
-                        workspace.ensure_capacity(len(chunk))
-                    except WorkspaceCapacityError as exc:
-                        raise HTTPException(status_code=507, detail=str(exc)) from exc
-                    handle.write(chunk)
+                    if len(chunk) > reserved_bytes:
+                        reserve = max(16 * 1024 * 1024, len(chunk))
+                        try:
+                            await asyncio.to_thread(
+                                workspace.ensure_capacity, reserve,
+                            )
+                        except WorkspaceCapacityError as exc:
+                            raise HTTPException(status_code=507, detail=str(exc)) from exc
+                        reserved_bytes += reserve
+                    await asyncio.to_thread(handle.write, chunk)
+                    reserved_bytes -= len(chunk)
             uploaded.append({"filename": safe_name, "path": str(destination), "size": file_size})
     except Exception:
         for child in batch_dir.iterdir():

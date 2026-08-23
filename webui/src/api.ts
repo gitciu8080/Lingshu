@@ -316,40 +316,112 @@ export async function* stream(
   signal: AbortSignal,
   afterSeq = 0,
 ): AsyncGenerator<Event> {
-  const response = await fetch(
-    base +
-      `/api/session/${encodeURIComponent(id)}/stream?after_seq=${afterSeq}`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "text/event-stream",
-      },
-      signal,
-    },
-  );
-  if (!response.ok || !response.body) throw new Error("实时连接失败");
-  const reader = response.body.getReader(),
-    decoder = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    buf += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const frames = buf.split(/\r?\n\r?\n/);
-    buf = frames.pop() || "";
-    for (const frame of frames) {
-      const raw = frame
-        .split(/\r?\n/)
-        .filter((x) => x.startsWith("data:"))
-        .map((x) => x.slice(5).trim())
-        .join("\n");
-      if (raw)
-        try {
-          const parsed = JSON.parse(raw);
-          yield parsed && typeof parsed === "object"
-            ? parsed
-            : { event_type: "message", content: String(parsed ?? "") };
-        } catch {}
+  let cursor = afterSeq;
+  let retryDelay = 400;
+  while (!signal.aborted) {
+    try {
+      const response = await fetch(
+        base + `/api/session/${encodeURIComponent(id)}/stream?after_seq=${cursor}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "text/event-stream",
+          },
+          signal,
+        },
+      );
+      // 任务正常结束后活跃流端点会返回 404，此时不再无意义重连。
+      if (response.status === 404) return;
+      if (!response.ok || !response.body)
+        throw new Error(`实时连接失败 (${response.status})`);
+      retryDelay = 400;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (!signal.aborted) {
+        const { done, value } = await reader.read();
+        buf += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const frames = buf.split(/\r?\n\r?\n/);
+        buf = frames.pop() || "";
+        for (const frame of frames) {
+          const raw = frame
+            .split(/\r?\n/)
+            .filter((x) => x.startsWith("data:"))
+            .map((x) => x.slice(5).trim())
+            .join("\n");
+          if (!raw) continue;
+          try {
+            const parsed = JSON.parse(raw);
+            const event: Event = parsed && typeof parsed === "object"
+              ? parsed
+              : { event_type: "message", content: String(parsed ?? "") };
+            cursor = Math.max(cursor, Number(event.seq || 0));
+            yield event;
+            const kind = String(event.type || event.event_type || "");
+            if (["mission_end", "mission_cancelled", "session_deleted"].includes(kind)) {
+              await reader.cancel().catch(() => undefined);
+              return;
+            }
+          } catch {}
+        }
+        if (done) break;
+      }
+    } catch (error) {
+      if (signal.aborted) return;
+      console.warn("实时连接中断，准备续传", error);
     }
-    if (done) break;
+    if (signal.aborted) return;
+    await abortableDelay(retryDelay, signal);
+    retryDelay = Math.min(retryDelay * 2, 5000);
+  }
+}
+
+async function abortableDelay(milliseconds: number, signal: AbortSignal) {
+  await new Promise<void>((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = window.setTimeout(done, milliseconds);
+    function done() {
+      window.clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+export async function* accountStream(signal: AbortSignal): AsyncGenerator<Event> {
+  let retryDelay = 500;
+  while (!signal.aborted) {
+    try {
+      const response = await fetch(base + "/api/agent-service/account/stream", {
+        headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
+        signal,
+      });
+      if (!response.ok || !response.body)
+        throw new Error(`账户实时连接失败 (${response.status})`);
+      retryDelay = 500;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!signal.aborted) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const frames = buffer.split(/\r?\n\r?\n/);
+        buffer = frames.pop() || "";
+        for (const frame of frames) {
+          const raw = frame.split(/\r?\n/)
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trim()).join("\n");
+          if (!raw) continue;
+          try { yield JSON.parse(raw) as Event; } catch {}
+        }
+        if (done) break;
+      }
+    } catch (error) {
+      if (signal.aborted) return;
+      console.warn("账户实时连接中断，准备重连", error);
+    }
+    await abortableDelay(retryDelay, signal);
+    retryDelay = Math.min(retryDelay * 2, 5000);
   }
 }

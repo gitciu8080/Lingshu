@@ -3,33 +3,44 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections import defaultdict
 from typing import Any
 
-import session_store
+from persistence_service import get_persistence_writer
+from session_events import message_operation, session_update_operation
 from .account_events import publish_account_event
 
 
 class RoleHistoryRecorder:
     """Persist inner-agent events while the outer AgentScope reply is running."""
 
-    def __init__(self, session_id: str, reply_id: str = "") -> None:
+    def __init__(
+        self,
+        session_id: str,
+        reply_id: str = "",
+        *,
+        enabled: bool = True,
+        user_id: int | None = None,
+    ) -> None:
         self.session_id = session_id
         self.reply_id = reply_id
-        try:
-            session = session_store.get_session(session_id)
-            self.enabled = session is not None
-            self.user_id = session.get("user_id") if session else None
-        except Exception:
-            self.enabled = False
-            self.user_id = None
-        self._streams: dict[tuple[str, str], str] = defaultdict(str)
+        self.enabled = enabled
+        self.user_id = user_id
+        self._streams: dict[tuple[str, str], list[str]] = defaultdict(list)
+        self._stream_sizes: dict[tuple[str, str], int] = defaultdict(int)
+        self._stream_limit = max(
+            16_384, int(os.getenv("LINGSHU_STREAM_BUFFER_MAX_CHARS", "1048576")),
+        )
+        self._tool_args_limit = max(
+            4096, int(os.getenv("LINGSHU_TOOL_ARGS_MAX_CHARS", "262144")),
+        )
         self._stream_ids: dict[tuple[str, str], str] = {}
         self._snapshot_writes: dict[tuple[str, str], tuple[float, int]] = {}
         self._last_text: dict[str, str] = {}
         self._text_parts: dict[str, list[str]] = defaultdict(list)
-        self._tools: dict[tuple[str, str], dict[str, str]] = {}
+        self._tools: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _add(
         self,
@@ -39,15 +50,21 @@ class RoleHistoryRecorder:
         role: str = "agent",
         source_id: str = "",
     ) -> None:
-        if self.enabled:
-            session_store.add_message(
-                self.session_id,
-                role,
-                content,
-                event_type,
-                agent,
-                source_id,
-            )
+        del role
+        if not self.enabled:
+            return
+        operation = message_operation(
+            self.session_id,
+            event_type,
+            {"agent": agent, "_content_override": content},
+            source_id=source_id,
+        )
+        if operation is not None:
+            get_persistence_writer().submit_from_callback([operation])
+
+    def _submit(self, *operations: dict[str, Any]) -> None:
+        if self.enabled and operations:
+            get_persistence_writer().submit_from_callback(list(operations))
 
     def record(
         self,
@@ -60,7 +77,7 @@ class RoleHistoryRecorder:
         agent = str(payload.get("agent") or "Lingshu")
         if event_type == "session_title":
             title = str(payload.get("title") or "安全测试任务")
-            session_store.update_session(self.session_id, title=title)
+            self._submit(session_update_operation(self.session_id, title=title))
             if self.user_id is not None:
                 publish_account_event(
                     self.user_id,
@@ -72,46 +89,58 @@ class RoleHistoryRecorder:
             return
         if event_type in {"text_start", "thinking_start"}:
             kind = "thinking" if event_type.startswith("thinking") else "text"
-            self._streams[(agent, kind)] = ""
+            self._streams[(agent, kind)] = []
+            self._stream_sizes[(agent, kind)] = 0
             self._stream_ids[(agent, kind)] = source_id
-            session_store.upsert_stream_snapshot(
-                self.session_id,
-                self.reply_id,
-                source_id,
-                agent,
-                kind,
-                "",
-            )
+            self._submit({
+                "type": "snapshot_upsert", "session_id": self.session_id,
+                "reply_id": self.reply_id, "block_id": source_id,
+                "agent_name": agent, "stream_type": kind, "content": "",
+            })
             self._snapshot_writes[(agent, kind)] = (time.monotonic(), 0)
             return
         if event_type in {"text_delta", "thinking_delta"}:
             kind = "thinking" if event_type.startswith("thinking") else "text"
-            self._streams[(agent, kind)] += str(payload.get("delta") or "")
+            key = (agent, kind)
+            delta = str(payload.get("delta") or "")
+            size = self._stream_sizes[key]
+            remaining = max(0, self._stream_limit - size)
+            if remaining:
+                chunk = delta[:remaining]
+                self._streams[key].append(chunk)
+                self._stream_sizes[key] = size + len(chunk)
             block_id = self._stream_ids.get((agent, kind), source_id)
             now = time.monotonic()
             last_write, last_size = self._snapshot_writes.get((agent, kind), (0.0, 0))
-            content = self._streams[(agent, kind)]
+            content = "".join(self._streams[(agent, kind)])
             if now - last_write >= 0.2 or len(content) - last_size >= 512:
-                session_store.upsert_stream_snapshot(
-                    self.session_id,
-                    self.reply_id,
-                    block_id,
-                    agent,
-                    kind,
-                    content,
-                )
+                self._submit({
+                    "type": "snapshot_upsert", "session_id": self.session_id,
+                    "reply_id": self.reply_id, "block_id": block_id,
+                    "agent_name": agent, "stream_type": kind, "content": content,
+                })
                 self._snapshot_writes[(agent, kind)] = (now, len(content))
             return
         if event_type in {"text_end", "thinking_end"}:
             kind = "thinking" if event_type.startswith("thinking") else "text"
-            content = self._streams.pop((agent, kind), "")
+            content = "".join(self._streams.pop((agent, kind), []))
+            self._stream_sizes.pop((agent, kind), None)
             block_id = self._stream_ids.pop((agent, kind), source_id)
             if content:
-                self._add(event_type, content, agent, source_id=block_id)
+                operation = message_operation(
+                    self.session_id, event_type,
+                    {"agent": agent, "full_text": content, "block_id": block_id},
+                    source_id=block_id,
+                )
+                if operation is not None:
+                    self._submit(operation)
                 if kind == "text":
                     self._last_text[agent] = content
                     self._text_parts[agent].append(content)
-            session_store.delete_stream_snapshot(self.session_id, block_id)
+            self._submit({
+                "type": "snapshot_delete", "session_id": self.session_id,
+                "block_id": block_id,
+            })
             self._snapshot_writes.pop((agent, kind), None)
             return
         if event_type == "message":
@@ -129,7 +158,8 @@ class RoleHistoryRecorder:
             self._tools[key] = {
                 "agent": agent,
                 "tool_name": str(payload.get("tool_name") or ""),
-                "args": "",
+                "args_parts": [],
+                "args_size": 0,
             }
             self._add(
                 event_type,
@@ -146,16 +176,22 @@ class RoleHistoryRecorder:
             key = (agent, tool_id)
             tool = self._tools.setdefault(
                 key,
-                {"agent": agent, "tool_name": "", "args": ""},
+                {"agent": agent, "tool_name": "", "args_parts": [], "args_size": 0},
             )
-            tool["args"] += str(payload.get("delta") or "")
+            delta = str(payload.get("delta") or "")
+            size = int(tool.get("args_size") or 0)
+            remaining = max(0, self._tool_args_limit - size)
+            if remaining:
+                chunk = delta[:remaining]
+                tool.setdefault("args_parts", []).append(chunk)
+                tool["args_size"] = size + len(chunk)
             return
         if event_type == "tool_call_end":
             tool_id = str(payload.get("tool_call_id") or "")
             key = (agent, tool_id)
             tool = self._tools.pop(
                 key,
-                {"agent": agent, "tool_name": str(payload.get("tool_name") or ""), "args": ""},
+                {"agent": agent, "tool_name": str(payload.get("tool_name") or ""), "args_parts": []},
             )
             self._add(
                 event_type,
@@ -163,7 +199,7 @@ class RoleHistoryRecorder:
                     {
                         "tool_call_id": tool_id,
                         "tool_name": tool.get("tool_name") or payload.get("tool_name", ""),
-                        "full_args": tool.get("args", ""),
+                        "full_args": "".join(tool.get("args_parts", [])),
                     },
                     ensure_ascii=False,
                 ),
@@ -205,10 +241,9 @@ class RoleHistoryRecorder:
         self._add(event_type, content, agent, role, source_id)
 
         if event_type == "phase_change" and self.user_id is not None:
-            session_store.update_session(
-                self.session_id,
-                phase=str(payload.get("phase") or ""),
-            )
+            self._submit(session_update_operation(
+                self.session_id, phase=str(payload.get("phase") or ""),
+            ))
             publish_account_event(
                 self.user_id,
                 "account_phase_change",
@@ -222,24 +257,15 @@ class RoleHistoryRecorder:
         if event_type == "mission_end":
             status = str(payload.get("status") or "failed")
             success = payload.get("success")
-            session_store.update_session(
-                self.session_id,
-                status="completed" if success else "failed",
-                phase=status,
-                success=success,
-                flag=payload.get("flag"),
-            )
+            self._submit(session_update_operation(
+                self.session_id, status="completed" if success else "failed",
+                phase=status, success=success, flag=payload.get("flag"),
+            ))
         elif event_type == "mission_cancelled":
-            session_store.update_session(
-                self.session_id,
-                status="cancelled",
-                phase="cancelled",
-                success=False,
-            )
+            self._submit(session_update_operation(
+                self.session_id, status="cancelled", phase="cancelled", success=False,
+            ))
         elif event_type == "error":
-            session_store.update_session(
-                self.session_id,
-                status="failed",
-                phase="failed",
-                success=False,
-            )
+            self._submit(session_update_operation(
+                self.session_id, status="failed", phase="failed", success=False,
+            ))

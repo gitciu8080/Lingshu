@@ -36,7 +36,7 @@ import {
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api, auth, Event, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, Session, stream, SystemUser } from "./api";
+import { accountStream, api, auth, Event, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, Session, stream, SystemUser } from "./api";
 import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
 
@@ -90,6 +90,10 @@ function LiquidGlassLayer() {
       scene.style.setProperty("--py", `${ty}px`);
     };
     const onPointerMove = (e: PointerEvent) => {
+      if (
+        document.visibilityState !== "visible" ||
+        document.documentElement.dataset.theme !== "liquid"
+      ) return;
       tx = e.clientX;
       ty = e.clientY;
       if (!raf) raf = requestAnimationFrame(apply);
@@ -1990,6 +1994,7 @@ function ConsoleApp() {
   const historyHasMoreRef = useRef(false);
   const oldestSeqRef = useRef(0);
   const loadingHistoryRef = useRef(false);
+  const loadingSessionsRef = useRef(false);
   const visibleCountRef = useRef(visibleCount);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const activeSessionRef = useRef(active);
@@ -2024,7 +2029,8 @@ function ConsoleApp() {
   const hiddenCount = Math.max(0, events.length - visibleCount);
   const renderedEvents = hiddenCount > 0 ? events.slice(-visibleCount) : events;
   const load = async (append = false) => {
-    if (loadingMoreSessions) return;
+    if (loadingSessionsRef.current) return;
+    loadingSessionsRef.current = true;
     setLoadingMoreSessions(true);
     try {
       const offset = append ? sessionsRef.current.length : 0;
@@ -2039,11 +2045,12 @@ function ConsoleApp() {
         : page.sessions;
       setSessions(next);
       setHasMoreSessions(page.hasMore);
-      if (!active && next[0]) setActive(next[0].id);
+      if (!activeSessionRef.current && next[0]) setActive(next[0].id);
     } catch {
       auth.clear();
       setReady(false);
     } finally {
+      loadingSessionsRef.current = false;
       setLoadingMoreSessions(false);
     }
   };
@@ -2065,6 +2072,66 @@ function ConsoleApp() {
   }, [autoScrollEnabled]);
   useEffect(() => {
     if (ready) void load();
+  }, [ready]);
+  useEffect(() => {
+    if (!ready) return;
+    const controller = new AbortController();
+    void (async () => {
+      for await (const event of accountStream(controller.signal)) {
+        if (controller.signal.aborted) break;
+        const kind = kindOf(event);
+        const payload = dataOf(event);
+        const sessionId = String(payload.session_id || event.session_id || "");
+        if (!sessionId) continue;
+        if (kind === "account_phase_change") {
+          const nextPhase = String(payload.phase || "");
+          setSessions((items) => items.map((item) =>
+            item.id === sessionId
+              ? {
+                  ...item,
+                  phase: nextPhase || item.phase,
+                  is_live: !["completed", "failed", "cancelled"].includes(nextPhase),
+                }
+              : item,
+          ));
+          if (activeSessionRef.current === sessionId)
+            setDetail((value) => ({ ...value, phase: nextPhase || value.phase }));
+        } else if (kind === "account_session_title") {
+          const title = String(payload.title || "");
+          setSessions((items) => items.map((item) =>
+            item.id === sessionId ? { ...item, title: title || item.title } : item,
+          ));
+        } else if (kind === "account_session_started") {
+          void load();
+        } else if (kind === "account_session_terminal") {
+          const status = String(payload.status || "failed");
+          setSessions((items) => items.map((item) =>
+            item.id === sessionId
+              ? {
+                  ...item,
+                  phase: status,
+                  status,
+                  is_live: false,
+                  success: payload.success === true ? true : item.success,
+                }
+              : item,
+          ));
+        } else if (kind === "account_session_deleted") {
+          setSessions((items) => items.filter((item) => item.id !== sessionId));
+          if (activeSessionRef.current === sessionId) setActive("");
+        }
+      }
+    })();
+    const refreshVisible = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", refreshVisible);
+    window.addEventListener("online", refreshVisible);
+    return () => {
+      controller.abort();
+      document.removeEventListener("visibilitychange", refreshVisible);
+      window.removeEventListener("online", refreshVisible);
+    };
   }, [ready]);
   useEffect(() => {
     if (!active) return;
@@ -2122,8 +2189,9 @@ function ConsoleApp() {
           if (flushTimer) window.clearTimeout(flushTimer);
           flushEvents();
         } else if (!flushTimer) {
-          // 25 FPS 足以保持连续观感，同时避免单字 delta 抢占主线程。
-          flushTimer = window.setTimeout(flushEvents, 40);
+          // Markdown 自身按约 8 FPS 排版；事件仓库按 12.5 FPS 合并即可
+          // 保持连续观感，并显著减少整页状态复制和 React 重渲染。
+          flushTimer = window.setTimeout(flushEvents, 80);
         }
       };
       try {
@@ -2162,6 +2230,31 @@ function ConsoleApp() {
           enqueueEvent(event);
           const payload = dataOf(event);
           const eventKind = kindOf(event);
+          afterSeq = Math.max(afterSeq, Number(event.seq || 0));
+          if (eventKind === "resync_required") {
+            try {
+              await new Promise((resolve) => window.setTimeout(resolve, 150));
+              let more = true;
+              while (more && !controller.signal.aborted) {
+                const recovered = await api.messages(sessionId, {
+                  afterSeq,
+                  limit: 500,
+                });
+                const recoveredEvents = [
+                  ...(recovered.messages || []),
+                  ...(recovered.snapshots || []),
+                ];
+                for (const recoveredEvent of recoveredEvents) {
+                  afterSeq = Math.max(afterSeq, Number(recoveredEvent.seq || 0));
+                  enqueueEvent(recoveredEvent);
+                }
+                more = recovered.hasMore && (recovered.messages || []).length > 0;
+              }
+            } catch (error) {
+              console.warn("实时历史补偿失败，将在下次续传时重试", error);
+            }
+            continue;
+          }
           if (eventKind === "approval_required")
             setPendingApproval(payload);
           if (eventKind === "approval_resolved") setPendingApproval(null);

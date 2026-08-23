@@ -16,6 +16,7 @@ from agentscope.types import ErrorInfo, ErrorType, ReplyFinishedReason
 
 from main import run_mission
 import session_store
+from persistence_service import get_persistence_writer
 
 from .events import EventTranslator
 from .history import RoleHistoryRecorder
@@ -24,8 +25,8 @@ from .runtime import MissionRuntime, register_runtime, unregister_runtime
 logger = logging.getLogger(__name__)
 
 
-def _terminal_session_title(session_id: str, outcome: str) -> str:
-    session = session_store.get_session(session_id) or {}
+async def _terminal_session_title(session_id: str, outcome: str) -> str:
+    session = await asyncio.to_thread(session_store.get_session, session_id) or {}
     title = str(session.get("title") or "安全测试任务")
     if title == str(session.get("target") or ""):
         title = "安全测试任务"
@@ -88,9 +89,15 @@ class LingshuMissionAgent(Agent):
         reply_id = uuid.uuid4().hex
         self.state.reply_id = reply_id
         translator = EventTranslator(reply_id)
-        history = RoleHistoryRecorder(session_id, reply_id)
-        event_queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
-        runtime = MissionRuntime(input_queue=asyncio.Queue())
+        session = await asyncio.to_thread(session_store.get_session, session_id)
+        history = RoleHistoryRecorder(
+            session_id,
+            reply_id,
+            enabled=session is not None,
+            user_id=int(session["user_id"]) if session and session.get("user_id") is not None else None,
+        )
+        event_queue: asyncio.Queue[AgentEvent] = asyncio.Queue(maxsize=1024)
+        runtime = MissionRuntime(input_queue=asyncio.Queue(maxsize=128))
 
         def callback(event_type: str, **payload: Any) -> None:
             event = translator.translate(event_type, payload)
@@ -109,7 +116,18 @@ class LingshuMissionAgent(Agent):
                 runtime.approval_decision = None
             elif event_type == "approval_resolved":
                 runtime.pending_approval = None
-            event_queue.put_nowait(event)
+            try:
+                event_queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # 增量事件可由最终 end 事件重建；语义事件到达时腾出一个
+                # 旧实时槽位，避免断开的外层消费者拖垮任务进程。
+                if event_type.endswith("_delta"):
+                    return
+                try:
+                    event_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                event_queue.put_nowait(event)
 
         mission_task: asyncio.Task | None = None
         await register_runtime(session_id, runtime)
@@ -200,7 +218,7 @@ class LingshuMissionAgent(Agent):
                     pass
             callback(
                 "session_title",
-                title=_terminal_session_title(session_id, "任务已取消"),
+                title=await _terminal_session_title(session_id, "任务已取消"),
                 agent="system",
             )
             callback("mission_cancelled", message="任务已被用户取消", agent="system")
@@ -214,7 +232,7 @@ class LingshuMissionAgent(Agent):
         except Exception as exc:
             callback(
                 "session_title",
-                title=_terminal_session_title(session_id, "任务异常结束"),
+                title=await _terminal_session_title(session_id, "任务异常结束"),
                 agent="system",
             )
             callback("error", message=str(exc), agent="system")
@@ -234,3 +252,4 @@ class LingshuMissionAgent(Agent):
                 except asyncio.CancelledError:
                     pass
             await unregister_runtime(session_id, runtime)
+            await get_persistence_writer().flush()
