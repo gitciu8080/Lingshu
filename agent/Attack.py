@@ -219,7 +219,7 @@ async def create_attack_agent(
     state=None,
     artifact_root: str | Path | None = None,
     exploitation_approved: Callable[[], bool] | None = None,
-    executor: "Any | None" = None,
+    executor: "Any",
 ) -> Agent:
     """创建 Attack Agent。
 

@@ -514,8 +514,7 @@ Lingshu/
 | `QWEN_MODEL` | `…Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf` | Qwen 模型名称 |
 | `QWEN_REPEAT_PENALTY` | `1.08` | llama.cpp 重复惩罚；显式超过 1.2 时告警但保留原值 |
 | `LINGSHU_COMMAND_TIMEOUT` | `300` | Shell 命令超时秒数（10-600） |
-| `LINGSHU_WORKSPACE_MODE` | `docker` | 工作区模式：`docker`(每会话容器) / `local`(宿主机) / `legacy`(旧 WorkDir) |
-| `LINGSHU_WORKSPACE_BASE_IMAGE` | `kali-full:latest` | docker 工作区基础镜像（须含 `python3`；首次启动构建派生镜像） |
+| `LINGSHU_WORKSPACE_BASE_IMAGE` | `kali-full:latest` | Docker 工作区基础镜像（须含 `python3`；首次启动构建派生镜像） |
 | `LINGSHU_WORKSPACE_GATEWAY_PORT` | 自动 | 容器内 MCP 网关节选端口 |
 | `LINGSHU_WORKSPACE_DOCKER_EXTRA_PIP` | — | 打进派生镜像的额外 pip 包（逗号分隔） |
 | `LINGSHU_IDA_MCP_URL` | `http://127.0.0.1:8745` | 容器化 IDA MCP 根地址（MCP 端点为 `<URL>/sse`） |

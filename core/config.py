@@ -93,14 +93,9 @@ class RuntimeConfig:
 
     command_timeout: int = 300
 
-    # ── Workspace v2 模式（v0.4.0）──
-    # docker: 新会话使用按 (user_id, session_id) 隔离的 DockerWorkspace
-    #         （基于 kali-full 镜像，工具在容器内执行）；
-    # local:  新会话使用按 (user_id, session_id) 隔离的 LocalWorkspace（宿主机执行）；
-    # legacy: 旧行为（全局 WorkDir），仅用于打开旧会话，不新建 Workspace v2。
-    workspace_mode: str = "docker"
-
-    # ── Docker 工作区（workspace_mode=docker）──
+    # ── Docker 工作区 ──
+    # 每个会话使用按 (user_id, session_id) 隔离的 DockerWorkspace
+    # （基于 kali-full 镜像，所有工具在容器内执行）。
     # 基础镜像必须提供 python3（agentscope 会构建带网关 venv 的派生镜像）。
     workspace_base_image: str = "kali-full:latest"
     workspace_gateway_port: int | None = None
@@ -109,9 +104,6 @@ class RuntimeConfig:
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
         _load_dotenv()
-        workspace_mode = os.getenv("LINGSHU_WORKSPACE_MODE", "docker").strip().lower()
-        if workspace_mode not in {"docker", "local", "legacy"}:
-            workspace_mode = "docker"
         repeat_penalty_raw = os.getenv("QWEN_REPEAT_PENALTY")
         qwen_repeat_penalty = float(repeat_penalty_raw or "1.08")
         if qwen_repeat_penalty <= 0:
@@ -160,8 +152,6 @@ class RuntimeConfig:
             in ("1", "true", "yes", "on"),
             # 通用
             command_timeout=max(10, min(int(os.getenv("LINGSHU_COMMAND_TIMEOUT", "300")), 600)),
-            # Workspace 模式：默认 docker；legacy 仅用于打开旧会话
-            workspace_mode=workspace_mode,
             workspace_base_image=os.getenv(
                 "LINGSHU_WORKSPACE_BASE_IMAGE", "kali-full:latest",
             ).strip(),

@@ -64,12 +64,10 @@ from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     ToolJSONValidationError,
     bind_agent_tasks,
     bind_expert_roster,
-    bind_process_tracker,
     bind_tool_json_failure_handler,
     cancel_agent_tasks,
     reset_agent_tasks,
     reset_expert_roster,
-    reset_process_tracker,
     reset_tool_json_failure_handler,
     run_interruptible_agent_reply,
     stream_agent_reply,
@@ -853,6 +851,53 @@ def _prepare_workspace(target_spec: TargetSpec) -> tuple[str, Path, dict | None]
     raise SystemExit(f"无法处理目标类型: {target_spec.kind}")
 
 
+def _stage_attachments(paths: list[str] | None, workdir: Path) -> str:
+    """把“链接 + 文件”混合目标的附加附件复制进工作目录，返回提示文本。
+
+    - 网络靶标场景下工作目录为全局 WorkDir，附件落在 ``attachments/`` 子目录；
+      文件目标场景下附件与题目文件同处一个工作区。
+    - 复制失败仅打印警告并跳过单个附件，不阻塞任务启动。
+    - 返回空字符串表示无有效附件，调用方无需注入任何提示。
+    """
+    if not paths:
+        return ""
+    dest_root = workdir / "attachments"
+    copied: list[str] = []
+    try:
+        dest_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"[系统] 附件目录创建失败，忽略全部附件: {exc}")
+        return ""
+    for index, raw in enumerate(paths, 1):
+        src = Path(raw)
+        if not src.exists():
+            print(f"[系统] 附件不存在，已跳过: {src}")
+            continue
+        name = src.name or f"attachment-{index}"
+        dest = dest_root / name
+        if dest.exists():
+            dest = dest_root / f"{index}_{name}"
+        try:
+            if src.is_dir():
+                shutil.copytree(src, dest)
+                file_count = sum(1 for p in dest.rglob("*") if p.is_file())
+                copied.append(f"- {dest}（目录，{file_count} 个文件）")
+            else:
+                shutil.copy2(src, dest)
+                copied.append(f"- {dest}（{dest.stat().st_size:,} 字节）")
+        except OSError as exc:
+            print(f"[系统] 附件复制失败 {src}: {exc}")
+    if not copied:
+        return ""
+    listing = "\n".join(copied)
+    return (
+        "\n## 任务附件材料\n"
+        "用户随任务同时上传了附件（题目手册/二进制/数据包等），已复制到本地：\n"
+        f"{listing}\n"
+        "请把这些附件纳入侦察与分析范围。"
+    )
+
+
 def _extract_declared_network_targets(text: str) -> list[str]:
     """提取用户明确写在任务说明中的网络目标。
 
@@ -922,6 +967,7 @@ async def run_mission(
     user_id: int | None = None,
     auto_approve: bool = False,
     vision: bool = False,
+    attachment_paths: list[str] | None = None,
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
@@ -951,6 +997,8 @@ async def run_mission(
         agent_tasks: 当前会话活跃的 Agent reply task 注册表
         steering_state: 运行时追加指令共享状态 {"pending": str|None, "processed": bool}
         authorization_source: 审计记录中的授权入口来源（CLI 或 Agent Service）
+        attachment_paths: 附加附件路径（Web 端“链接 + 文件”混合目标时由 API 层传入），
+            附件会被复制进工作目录 attachments/ 并注入各 Agent 提示
 
     Returns:
         最终任务状态 MissionState（含 plan / flag / success 等）
@@ -967,12 +1015,17 @@ async def run_mission(
     # 返回: 规范化目标字符串、工作目录路径、归档清单（非归档为 None）
     target_str, workdir, manifest = _prepare_workspace(target_spec)
 
+    # ── 2.5 附加附件材料（“链接 + 文件”混合目标）──
+    # 用户可能同时提供网络靶标（链接/IP）与题目附件（压缩包/二进制等）。
+    # 把附件复制进工作目录并生成提示文本，注入分类信号与 Recon/Orchestrator 提示。
+    attachments_note = _stage_attachments(attachment_paths, workdir)
+
     # ── 3. 初始题型分类 ──
     # classify 基于目标类型 + 目标描述 + 归档清单做启发式判断，
     # 输出 primary 题型、候选题型、置信度、证据与所属阶段，
     # 供后续 Brain 规划与 Attack 技能加载使用。
     goal_text = goal.strip() or "获取 Flag"  # 空目标时兜底默认
-    category_decision = classify(target_spec, goal_text, manifest)
+    category_decision = classify(target_spec, goal_text + attachments_note, manifest)
     # 用户在任务说明中明确声明的服务器 IP / 域名也属于初始授权输入。
     # 典型场景：上传的应急响应任务书列出 SSH 目标与端口。对纯文本附件
     # 一并检查，避免前端只上传任务书、未将其全文复制到“任务目标”时漏掉授权。
@@ -1122,11 +1175,9 @@ async def run_mission(
         mission_id = uuid.uuid4().hex[:12]
     else:
         mission_id = session_id
-    use_v2_workspace = runtime.workspace_mode in {"docker", "local"}
-    if use_v2_workspace:
-        mission.workspace_id = ws_service.workspace_id(user_id, mission_id)
-        # 安全检查点镜像写入工作区 mission/checkpoint.json（权威 JSON 的原子副本）
-        store.bind_checkpoint_path(ws_service.checkpoint_path(user_id, mission_id))
+    mission.workspace_id = ws_service.workspace_id(user_id, mission_id)
+    # 安全检查点镜像写入工作区 mission/checkpoint.json（权威 JSON 的原子副本）
+    store.bind_checkpoint_path(ws_service.checkpoint_path(user_id, mission_id))
     if not resume:
         store.save(mission)
 
@@ -1196,7 +1247,6 @@ async def run_mission(
 
         consumer_task = asyncio.create_task(_poll_input_queue())
 
-    process_tracker, process_tracker_token = bind_process_tracker()
     active_agent_tasks = agent_tasks if agent_tasks is not None else set()
     agent_tasks_token = bind_agent_tasks(active_agent_tasks)
     expert_roster_token = None
@@ -1217,54 +1267,43 @@ async def run_mission(
 
         tool_json_token = bind_tool_json_failure_handler(_record_tool_json_failure)
 
-        # ── v0.3.0：获取会话 Workspace（Docker/Local + 业务目录）──
+        # ── v0.3.0：获取会话 Docker Workspace（+ 业务目录）──
         # 同一会话所有内部 Agent 共享同一 Workspace：
         #   - offloader：压缩上下文与超限工具结果卸载（角色分区）
         #   - scoped_shell artifacts 根：完整工具输出落盘
         # 任务结束时不删除磁盘数据；TTL 仅关闭 MCP/释放对象。
-        # legacy 模式（LINGSHU_WORKSPACE_MODE=legacy）跳过：旧行为使用
-        # 全局 WorkDir，仅用于打开旧会话。
-        executor = None
-        if use_v2_workspace:
-            workspace = await ws_service.get(user_id, mission_id)
-            context_config = build_agent_context_config()
-            ws_root = ws_service.workspace_dir(user_id, mission_id)
-            if runtime.workspace_mode == "docker":
-                # docker 模式：scoped_shell/workspace 文件工具在容器内执行。
-                from Tools.docker_exec import LingshuDockerExecutor
+        workspace = await ws_service.get(user_id, mission_id)
+        context_config = build_agent_context_config()
+        ws_root = ws_service.workspace_dir(user_id, mission_id)
 
-                backend = workspace.get_backend()
-                session_dir = ws_service.workspace_dir(user_id, mission_id)
+        # scoped_shell/workspace 文件工具在容器内执行。
+        from Tools.docker_exec import LingshuDockerExecutor
 
-                def _to_container(path: str | Path) -> str:
-                    # 会话目录内的宿主路径映射到 /workspace；项目目录、
-                    # 归档 workdir 等会话外路径一律落到容器默认 /workspace。
-                    try:
-                        return ws_service.host_to_container(
-                            user_id, mission_id, path,
-                        )
-                    except ValueError:
-                        return "/workspace"
+        backend = workspace.get_backend()
 
-                executor = LingshuDockerExecutor(
-                    backend,
-                    to_container=_to_container,
-                    default_timeout=runtime.command_timeout,
+        def _to_container(path: str | Path) -> str:
+            # 会话目录内的宿主路径映射到 /workspace；项目目录、
+            # 归档 workdir 等会话外路径一律落到容器默认 /workspace。
+            try:
+                return ws_service.host_to_container(
+                    user_id, mission_id, path,
                 )
-        else:
-            workspace = None
-            context_config = None
-            ws_root = None
+            except ValueError:
+                return "/workspace"
 
-        # ── 4c. Docker 模式：将文件目标迁移到 v2 session input/ ──
+        executor = LingshuDockerExecutor(
+            backend,
+            to_container=_to_container,
+            default_timeout=runtime.command_timeout,
+        )
+
+        # ── 4c. 将文件目标迁移到 session input/ ──
         # _prepare_workspace 将归档解压到旧 WorkDir/ 路径，该路径不在
-        # v2 session 目录内，Docker 容器无法通过 /workspace 访问。
+        # session 目录内，Docker 容器无法通过 /workspace 访问。
         # 将文件复制到 session 的 input/ 目录并重定向 workdir，使容器内
         # Agent 能通过 /workspace/input/ 看到所有目标文件。
         if (
-            use_v2_workspace
-            and ws_root is not None
-            and target_spec.kind in ("archive", "single_file", "directory")
+            target_spec.kind in ("archive", "single_file", "directory")
             and not resume
         ):
             try:
@@ -1346,7 +1385,7 @@ async def run_mission(
             light_model,
             offloader=workspace,
             context_config=context_config,
-            state=build_role_agent_state(mission_id, "analysis") if use_v2_workspace else None,
+            state=build_role_agent_state(mission_id, "analysis"),
         )
 
         # ── 6. Recon / Triage 路由 ──
@@ -1360,7 +1399,7 @@ async def run_mission(
                 max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
                 offloader=workspace,
                 context_config=context_config,
-                state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
+                state=build_role_agent_state(mission_id, "recon"),
                 artifact_root=ws_root,
                 executor=executor,
                 mission=mission,
@@ -1373,7 +1412,7 @@ async def run_mission(
                 max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
                 offloader=workspace,
                 context_config=context_config,
-                state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
+                state=build_role_agent_state(mission_id, "recon"),
                 artifact_root=ws_root,
                 executor=executor,
                 mission=mission,
@@ -1404,6 +1443,8 @@ async def run_mission(
                 "用户任务说明中明确声明并已自动授权的网络目标："
                 f"{', '.join(declared_network_targets)}\n"
             )
+        if attachments_note:
+            planning_recon_prompt += attachments_note + "\n"
         if category_decision.secondary:
             planning_recon_prompt += f"候选题型：{', '.join(category_decision.secondary)}\n"
         if initial_context:
@@ -1553,7 +1594,7 @@ async def run_mission(
             event_callback=event_callback,
             offloader=workspace,
             context_config=context_config,
-            state=build_role_agent_state(mission_id, "attack") if use_v2_workspace else None,
+            state=build_role_agent_state(mission_id, "attack"),
             artifact_root=ws_root,
             exploitation_approved=lambda: mission.exploitation_approved,
             executor=executor,
@@ -1571,7 +1612,7 @@ async def run_mission(
             event_callback=event_callback,
             offloader=workspace,
             context_config=context_config,
-            state=build_role_agent_state(mission_id, "reserve") if use_v2_workspace else None,
+            state=build_role_agent_state(mission_id, "reserve"),
             artifact_root=ws_root,
             executor=executor,
             session_dir=ws_root,
@@ -1602,7 +1643,7 @@ async def run_mission(
             nss_context=nss_context,
             offloader=workspace,
             context_config=context_config,
-            state=build_role_agent_state(mission_id, "orchestrator") if use_v2_workspace else None,
+            state=build_role_agent_state(mission_id, "orchestrator"),
         )
         # 结构化计划清单文本（Orchestrator 需要知道条目 id 才能用 UpdatePlan 等工具维护）
         plan_items_text = "\n".join(
@@ -1618,6 +1659,8 @@ async def run_mission(
                 f"避免重复完整攻击链。"
             )
             mission.record("system", "context_injected", source="rerun")
+        if attachments_note:
+            orch_context += attachments_note
         # ── Orchestrator 主循环（steering 由 dispatcher 层 + 此处兜底处理） ──
         orch_content = (
             f"执行以下已授权任务。\n目标：{mission.target}\n目标要求：{mission.goal}\n\n"
@@ -1834,9 +1877,6 @@ async def run_mission(
             reset_expert_roster(expert_roster_token)
         if tool_json_token is not None:
             reset_tool_json_failure_handler(tool_json_token)
-        # 停止本任务启动的所有命令及后台子进程，避免取消后继续运行。
-        await process_tracker.terminate_all()
-        reset_process_tracker(process_tracker_token)
         # v0.3.0：任务结束关闭本会话 Workspace（释放 MCP 与对象；磁盘
         # 数据保留，供 resume 或审计使用）
         try:

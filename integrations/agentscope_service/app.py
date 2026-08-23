@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from agentscope.app.storage import (
     AsyncSQLAlchemyStorage,
     ChatModelConfig,
 )
-from agentscope.app.workspace_manager import IsolationPolicy, LocalWorkspaceManager
+from agentscope.app.workspace_manager import DockerWorkspaceManager, IsolationPolicy
 from agentscope.credential import DeepSeekCredential, OpenAICredential
 from pydantic import SecretStr
 
@@ -54,9 +55,12 @@ storage = AsyncSQLAlchemyStorage(
     f"sqlite+aiosqlite:///{_DATA_DIR / 'agentscope.db'}",
 )
 message_bus = InMemoryMessageBus()
-workspace_manager = LocalWorkspaceManager(
+# Agent Service 同样使用 Docker 工作区（每会话独立容器，工作目录 bind mount
+# 到容器 /workspace）；基础镜像与主服务 WorkspaceService 保持一致。
+workspace_manager = DockerWorkspaceManager(
     basedir=str(_WORKSPACE_DIR),
     isolation=IsolationPolicy.PER_SESSION,
+    base_image=os.getenv("LINGSHU_WORKSPACE_BASE_IMAGE", "kali-full:latest").strip(),
 )
 
 agentscope_app = create_app(

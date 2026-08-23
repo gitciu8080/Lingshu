@@ -720,7 +720,8 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                            nss_context: dict | None = None, resume: bool = False,
                            vision: bool = False,
                            qwen_tool_call_mode: str | None = None,
-                           auto_approve: bool = False):
+                           auto_approve: bool = False,
+                           attachment_paths: list[str] | None = None):
     """运行任务并处理清理逻辑。
 
     ``model`` 为具体模型名称（空时用提供商默认），
@@ -748,6 +749,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             resume=resume,
             user_id=ctx.user_id,
             auto_approve=auto_approve,
+            attachment_paths=attachment_paths,
         )
         # 如果 Orchestrator 已经确定完成并取得 Flag，迟到的前端取消请求不得覆盖成功终态。
         mission_completed = bool(
@@ -866,20 +868,16 @@ async def _app_lifespan(_: FastAPI):
         name="lingshu-sqlite-persistence",
     )
     antsword = get_antsword_service()
-    # docker 部署下 AntSword 已作为独立容器 MCP(127.0.0.1:30080/sse)常驻，
+    # Docker 部署下 AntSword 已作为独立容器 MCP(127.0.0.1:30080/sse)常驻，
     # API 只负责"连接复用"而非宿主拉起 Electron/Xvfb：仍探测就绪状态，
     # 但不自启动进程组，避免与容器部署的实例冲突。
-    _workspace_mode = os.getenv("LINGSHU_WORKSPACE_MODE", "docker").strip().lower()
     try:
         try:
-            if _workspace_mode == "docker":
-                if not await antsword.is_ready():
-                    logger.warning(
-                        "docker 模式下未检测到 AntSword MCP(127.0.0.1:30080)，"
-                        "请确认容器已启动；Attack 接入时会再次尝试",
-                    )
-            else:
-                await antsword.start()
+            if not await antsword.is_ready():
+                logger.warning(
+                    "未检测到 AntSword MCP(127.0.0.1:30080)，"
+                    "请确认容器已启动；Attack 接入时会再次尝试",
+                )
         except Exception as exc:  # AntSword 故障不应阻止 WebUI 和其他 Agent 启动
             antsword.last_error = str(exc)
             logger.exception("AntSword MCP 自动启动失败")
@@ -1041,6 +1039,10 @@ class MissionStartRequest(BaseModel):
         default=None, pattern="^(simple|standard)$",
         description="Qwen 工具调用难度: simple（扁平兼容）| standard（批量嵌套）",
     )
+    attachments: list[str] = Field(
+        default_factory=list,
+        description="附加附件路径（由 /api/mission/upload 返回），可与授权目标（链接/IP）同时提供",
+    )
     source_session_id: str | None = Field(default=None, description="重跑来源会话ID，用于注入前次任务上下文")
     nss_context: dict | None = Field(default=None, description="NSSCTF Arena 上下文（attempt_id/token/api_base），供 Orchestrator 在线提交 Flag")
     auto_approve: bool = Field(default=False, description="自动批准攻击阶段（跳过人工审批，适用于自动化工作台）")
@@ -1063,6 +1065,23 @@ def _normalize_user_authorized_target(value: str) -> str:
             raise HTTPException(status_code=422, detail="网络目标缺少主机名或 IP 地址")
         return f"{spec.host}:{spec.port}" if spec.port is not None else spec.host
     return spec.original_input
+
+
+def _validate_attachment_paths(values: list[str]) -> list[str]:
+    """校验附件路径：必须位于本服务上传目录内且真实存在，防止任意文件读取。
+
+    返回去重后的绝对路径列表；任何非法路径直接 422，不静默降级。
+    """
+    upload_root = _upload_dir.resolve()
+    validated: list[str] = []
+    for value in values[:20]:
+        try:
+            resolved = Path(value).resolve(strict=True)
+            resolved.relative_to(upload_root)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"附件路径无效：{value}") from exc
+        validated.append(str(resolved))
+    return list(dict.fromkeys(validated))
 
 
 class ChatMessage(BaseModel):
@@ -1523,10 +1542,13 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     # 用户在“新建任务”中输入的 IP / 域名即为本次任务的初始授权目标。
     # 这里不会触发 ScopeAuditor；该审核器只用于后续发现的新增内网目标。
     authorized_target = _normalize_user_authorized_target(req.target)
+    # “链接 + 附件”混合目标：附件路径必须是本服务上传目录内的真实文件/目录。
+    attachment_paths = _validate_attachment_paths(req.attachments) if req.attachments else []
     async with _session_creation_lock:
         fingerprint = (
             current_user["id"], authorized_target, req.goal.strip(),
             req.provider, model, req.source_session_id or "",
+            tuple(attachment_paths),
         )
         now = time.monotonic()
         # 清除过期请求指纹，限制内存增长。
@@ -1603,7 +1625,8 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         _run_and_cleanup(session_id, ctx, authorized_target, req.goal, model, thinking_intensity, req.provider, callback,
                          initial_context=initial_context, nss_context=req.nss_context,
                          qwen_tool_call_mode=req.qwen_tool_call_mode,
-                         auto_approve=req.auto_approve)
+                         auto_approve=req.auto_approve,
+                         attachment_paths=attachment_paths)
     )
     ctx.task = task
 

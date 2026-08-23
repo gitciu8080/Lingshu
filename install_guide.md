@@ -9,7 +9,7 @@
 
 - [1. 系统基础依赖](#1-系统基础依赖)
 - [2. Conda 环境与 Python 依赖](#2-conda-环境与-python-依赖)
-- [3. GDB + gdb-multi-mcp（逆向调试）](#3-gdb--gdb-multi-mcp逆向调试)
+- [3. GDB 动态调试（容器内置，无需安装）](#3-gdb-动态调试容器内置无需安装)
 - [4. IDA MCP Docker 服务（逆向分析）](#4-ida-mcp-docker-服务逆向分析)
 - [5. Docker 工作区（kali-full 镜像）](#5-docker-工作区kali-full-镜像)
 - [6. AntSword MCP 服务](#6-antsword-mcp-服务)
@@ -31,7 +31,7 @@ sudo apt-get update && sudo apt-get install -y \
     poppler-utils
 ```
 
-> **注意**：`gdb` 和 `gdb-multiarch` 是 `gdb-multi-mcp` 的底层依赖，**必须**在宿主机安装。  
+> **注意**：GDB 动态调试在 Docker 工作区容器内进行，宿主机无需安装 gdb。  
 > 如果 Docker 由 snap 或独立方式安装，确保当前用户在 `docker` 组中：
 > ```bash
 > sudo usermod -aG docker $USER
@@ -58,60 +58,32 @@ pip install -r requirements.txt
 
 ---
 
-## 3. GDB + gdb-multi-mcp（逆向调试）
+## 3. GDB 动态调试（容器内置，无需安装）
 
-这是 Reserve（逆向分析 Agent）的核心工具，提供多会话、多架构的 GDB/MI 调试能力。
+Reserve（逆向分析 Agent）的动态调试通过 `gdb_debug` 工具完成：直接在会话
+Docker 容器（kali-full 镜像）内以 batch 模式运行 GDB，**无需在宿主机安装
+gdb 或 gdb-multi-mcp**。
 
-### 3.1 安装
+### 3.1 前置条件
 
-```bash
-# 确保 conda agentscope 环境已激活
-conda activate agentscope
+- Docker 工作区镜像已构建：`bash scripts/build_workspace_image.sh`
+- 容器内自带 gdb 17.x（kali-full 镜像），无需额外配置
 
-# 方式 A：pip 安装（推荐，最简单）
-pip install "git+https://github.com/Mistyovo/gdb-multi-mcp@6e8048b8e933bbbae79b6da16fe69249f56fe30d"
+### 3.2 用法说明
 
-# 方式 B：uv tool 安装（隔离环境，自动管理依赖）
-# 先安装 uv：
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source ~/.bashrc
-# 再安装：
-uv tool install --from "git+https://github.com/Mistyovo/gdb-multi-mcp@6e8048b8e933bbbae79b6da16fe69249f56fe30d" gdb-multi-mcp
+Agent 调用 `gdb_debug(program=容器内绝对路径, commands=GDB 命令脚本)`：
 
-# 方式 C：pipx 安装
-pipx install --from "git+https://github.com/Mistyovo/gdb-multi-mcp@6e8048b8e933bbbae79b6da16fe69249f56fe30d" gdb-multi-mcp
+```text
+gdb_debug(
+  program="/workspace/input/tmp/demo",
+  commands="b *0x12a0\nrun < /workspace/input/payload.txt\ninfo registers\nx/s $rdi"
+)
 ```
 
-### 3.2 验证
-
-```bash
-# 确认可执行文件存在
-which gdb-multi-mcp
-# 或在 conda 环境中查找
-ls $(conda run -n agentscope which gdb-multi-mcp 2>/dev/null)
-
-# 测试启动
-gdb-multi-mcp --help
-
-# 确认底层 GDB 可用
-gdb --version
-gdb-multiarch --version
-```
-
-### 3.3 自动探测机制
-
-灵枢的 `_find_gdb_mcp_executable()` 按以下顺序自动查找：
-
-| 优先级 | 搜索位置 | 说明 |
-|---|---|---|
-| 1 | `$LINGSHU_GDB_MCP_COMMAND` 环境变量 | 手动指定绝对路径或命令名 |
-| 2 | PATH 中的 `gdb-multi-mcp` | pip/pipx 安装到系统 |
-| 3 | PATH 中的 `uvx` | uv tool 运行时代理 |
-| 4 | `~/.local/bin/` | uv tool install 默认位置 |
-| 5 | conda 环境 `bin/` | `CONDA_PREFIX`、`sys.executable` 同级、常见环境名 |
-| 6 | `/home/kali/.local/bin/` 等 | 历史部署路径 |
-
-> **无需修改代码**：只要 `gdb-multi-mcp` 或 `uvx` 在上述任一位置，灵枢会自动发现并使用。
+- 每次调用都是全新会话（batch 模式），多步探察需根据上次输出调整脚本重调；
+- 待调试二进制必须在 `/workspace` 下，否则拒绝执行；
+- 超时（默认 300s，上限 600s）会被强杀并在输出尾部标记；
+- 完整输出同时落盘到工作区 `tmp/gdb-NNNN.out`。
 
 ---
 
@@ -250,32 +222,18 @@ SageMath 以 **conda-pack 自包含包** 的形式预装在 `kali-full` Docker �
 - Dockerfile 将其解压到容器内 `/opt/sage`，并创建 `sage` / `sage-py` 软链到 `/usr/local/bin/`
 - 无需构建期网络（conda-forge 依赖已全部打包）
 
-### 8.2 宿主机执行（可选）
+### 8.2 执行位置
 
-`Tools/SageMath.py` 的 `execute_sagemath()` 通过 `conda run -n sage sage <file>` 在**宿主机**执行。如果需要在宿主机也能运行 SageMath：
-
-```bash
-# 从 kali-full 构建目录复制预构建的 conda 环境包
-cp /home/$USER/kali_Workspace/kali-full/sage-env.tar.gz /tmp/
-
-# 解压为本地 conda 环境
-mkdir -p $(conda info --base)/envs/sage
-tar -xzf /tmp/sage-env.tar.gz -C $(conda info --base)/envs/sage
-conda run -n sage python3 -c "import conda_pack; conda_pack.unpack()" 2>/dev/null || true
-
-# 验证
-conda run -n sage sage --version
-```
+`Tools/SageMath.py` 的 `execute_sagemath()` 将代码送入会话 Docker 工作区容器内执行
+（镜像内 `/usr/local/bin/sage`），无需宿主机安装 SageMath 或 conda。
 
 ### 8.3 环境变量
 
 ```bash
-LINGSHU_CONDA_CMD=conda      # conda 命令路径
-LINGSHU_SAGE_ENV=sage        # conda 环境名
 LINGSHU_SAGE_TIMEOUT=120      # 执行超时（秒）
 ```
 
-> SageMath 为可选依赖。宿主机未安装时 `execute_sagemath` 会返回 `[SageMath Config Error]`，不影响其他功能。在 Docker 容器内可通过 `scoped_shell` 直接调用 `sage`。
+> SageMath 在会话 Docker 工作区容器内执行（镜像自带 sage），无需宿主机安装。
 
 ---
 
@@ -288,17 +246,12 @@ LINGSHU_SAGE_TIMEOUT=120      # 执行超时（秒）
 DEEPSEEK_API_KEY=sk-xxx           # DeepSeek API Key
 # ZHIPU_API_KEY=xxx               # 智谱 GLM API Key（可选）
 
-# ── 工作区 ──
-LINGSHU_WORKSPACE_MODE=docker     # docker | local | legacy
+# ── Docker 工作区 ──
 LINGSHU_WORKSPACE_BASE_IMAGE=kali-full:latest
 
 # ── MCP 服务地址 ──
 LINGSHU_IDA_MCP_URL=http://127.0.0.1:8745
 LINGSHU_ANTSWORD_MCP_URL=http://127.0.0.1:30080/sse
-
-# ── GDB MCP ──
-# 通常无需设置（自动探测）；仅在非标准安装路径时需要：
-# LINGSHU_GDB_MCP_COMMAND=/custom/path/to/gdb-multi-mcp
 
 # ── 超时 ──
 LINGSHU_COMMAND_TIMEOUT=300       # 命令执行超时（秒）

@@ -6,9 +6,7 @@ import hashlib
 import ipaddress
 import itertools
 import json
-import os
 import re
-import signal
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
@@ -150,55 +148,6 @@ class StrictJSONToolkit(Toolkit):
         )
         yield chunk
         yield response.append_chunk(chunk)
-
-
-class ProcessTracker:
-    """跟踪单次任务启动的进程组，并在任务结束时统一清理。"""
-
-    def __init__(self) -> None:
-        self._pgids: set[int] = set()
-
-    def register(self, pgid: int) -> None:
-        self._pgids.add(pgid)
-
-    @staticmethod
-    def _signal_group(pgid: int, sig: signal.Signals) -> None:
-        try:
-            os.killpg(pgid, sig)
-        except ProcessLookupError:
-            pass
-
-    async def terminate_group(self, pgid: int) -> None:
-        self._signal_group(pgid, signal.SIGTERM)
-        await asyncio.sleep(0.1)
-        self._signal_group(pgid, signal.SIGKILL)
-        self._pgids.discard(pgid)
-
-    async def terminate_all(self) -> None:
-        pgids = tuple(self._pgids)
-        for pgid in pgids:
-            self._signal_group(pgid, signal.SIGTERM)
-        if pgids:
-            await asyncio.sleep(0.2)
-        for pgid in pgids:
-            self._signal_group(pgid, signal.SIGKILL)
-        self._pgids.clear()
-
-
-_PROCESS_TRACKER: ContextVar[ProcessTracker | None] = ContextVar(
-    "lingshu_process_tracker",
-    default=None,
-)
-
-
-def bind_process_tracker() -> tuple[ProcessTracker, Token]:
-    """为当前异步任务绑定一个进程跟踪器。"""
-    tracker = ProcessTracker()
-    return tracker, _PROCESS_TRACKER.set(tracker)
-
-
-def reset_process_tracker(token: Token) -> None:
-    _PROCESS_TRACKER.reset(token)
 
 
 _AGENT_TASKS: ContextVar[set[asyncio.Task[Any]] | None] = ContextVar(
@@ -589,13 +538,13 @@ def create_scoped_shell_tool(
     role: str = "",
     artifact_root: str | Path | None = None,
     return_tail: int = 4000,
-    executor: "Any | None" = None,
+    executor: "Any",
 ) -> AllowedFunctionTool:
-    """创建仅允许触达指定目标的 Shell 工具。
+    """创建仅允许触达指定目标的 Shell 工具（命令在 Docker 容器内执行）。
 
     Args:
         target: 授权目标（用于命令范围校验）。
-        cwd: 命令执行目录。
+        cwd: 命令执行目录（宿主路径，内部映射为容器内 /workspace 路径）。
         timeout: 命令超时秒数。
         registry: 动态授权范围注册表（可选）。
         role: 调用方角色（recon/attack/...），用于 artifacts 子目录。
@@ -603,10 +552,9 @@ def create_scoped_shell_tool(
             启用流式 artifacts：stdout/stderr 直接写入
             ``artifacts/{role}/tool-{seq}/``，返回值只含尾部+摘要+相对引用，
             不再硬截断 20KB/6KB；同时维护 ``artifacts/manifest.jsonl``。
-            为 None 时保持旧行为（内存截断，向后兼容）。
-        return_tail: v2 模式下返回值携带的尾部字节数。
-        executor: LingshuDockerExecutor 实例。提供时命令在会话 Docker
-            容器内执行（校验仍在宿主侧完成）；None 时在宿主机执行。
+        return_tail: 返回值携带的尾部字节数。
+        executor: LingshuDockerExecutor 实例。命令在会话 Docker 容器内
+            执行（校验仍在宿主侧完成）。
     """
     workdir = str(Path(cwd).resolve())
     artifacts_root = Path(artifact_root).resolve() if artifact_root is not None else None
@@ -632,152 +580,21 @@ def create_scoped_shell_tool(
             stdout_path = tool_dir / "stdout.txt"
             stderr_path = tool_dir / "stderr.txt"
 
-        # ── docker 模式：命令在容器内执行，输出仍落盘到宿主 artifacts ──
-        if executor is not None:
-            cwd_in = executor.map_path(workdir)
-            return await _run_docker_scoped_shell(
-                executor=executor,
-                command=command,
-                cwd_in=cwd_in,
-                timeout=timeout,
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
-                artifacts_root=artifacts_root,
-                role=role,
-                seq=seq if artifacts_root is not None else 0,
-                started_at=started_at,
-                return_tail=return_tail,
-            )
-
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=workdir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
+        # 命令在容器内执行，输出落盘到宿主 artifacts。
+        cwd_in = executor.map_path(workdir)
+        return await _run_docker_scoped_shell(
+            executor=executor,
+            command=command,
+            cwd_in=cwd_in,
+            timeout=timeout,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            artifacts_root=artifacts_root,
+            role=role,
+            seq=seq if artifacts_root is not None else 0,
+            started_at=started_at,
+            return_tail=return_tail,
         )
-        tracker = _PROCESS_TRACKER.get()
-        if tracker is not None:
-            tracker.register(proc.pid)
-
-        timed_out = False
-        cancelled = False
-        try:
-            if stdout_path is not None:
-                # v2：流式落盘，内存只保留尾部与哈希
-                out_size, err_size, out_tail, err_tail, out_sha, err_sha = (
-                    await asyncio.wait_for(
-                        _stream_to_artifact(proc, stdout_path, stderr_path, return_tail),
-                        timeout=timeout,
-                    )
-                )
-                stdout_text = out_tail
-                stderr_text = err_tail
-                # drain 完成后进程可能尚未被事件循环收割，显式等待退出码
-                await proc.wait()
-                finished_at = datetime.now(timezone.utc).astimezone().isoformat()
-                returncode = proc.returncode
-                # 追加 manifest 条目
-                _append_manifest(
-                    artifacts_root,
-                    {
-                        "timestamp": finished_at,
-                        "role": role or "agent",
-                        "tool": "scoped_shell",
-                        "command": command,
-                        "started_at": started_at,
-                        "finished_at": finished_at,
-                        "returncode": returncode,
-                        "timed_out": False,
-                        "stdout": {
-                            "path": f"artifacts/{role or 'agent'}/tool-{seq:04d}/stdout.txt",
-                            "bytes": out_size,
-                            "sha256": out_sha,
-                        },
-                        "stderr": {
-                            "path": f"artifacts/{role or 'agent'}/tool-{seq:04d}/stderr.txt",
-                            "bytes": err_size,
-                            "sha256": err_sha,
-                        },
-                    },
-                )
-                relative_out = f"artifacts/{role or 'agent'}/tool-{seq:04d}/stdout.txt"
-                return (
-                    f"<returncode>{returncode}</returncode>"
-                    f"<stdout_artifact>{relative_out} bytes={out_size} sha256={out_sha[:16]}</stdout_artifact>"
-                    f"<stdout_tail>{stdout_text}</stdout_tail>"
-                    f"<stderr_tail>{stderr_text}</stderr_tail>"
-                )
-            # ── legacy：内存截断（向后兼容） ──
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            out = stdout.decode("utf-8", errors="replace")[-20000:]
-            err = stderr.decode("utf-8", errors="replace")[-6000:]
-            return (
-                f"<returncode>{proc.returncode}</returncode>"
-                f"<stdout>{out}</stdout><stderr>{err}</stderr>"
-            )
-        except asyncio.TimeoutError:
-            timed_out = True
-            if tracker is not None:
-                await tracker.terminate_group(proc.pid)
-            else:
-                os.killpg(proc.pid, signal.SIGKILL)
-            await proc.wait()
-            if artifacts_root is not None and stdout_path is not None:
-                # 超时后把剩余输出收尾落盘
-                try:
-                    out_size, err_size, out_tail, err_tail, out_sha, err_sha = (
-                        await _stream_to_artifact(proc, stdout_path, stderr_path, return_tail)
-                    )
-                except Exception:  # noqa: BLE001
-                    out_size = err_size = 0
-                    out_tail = err_tail = out_sha = err_sha = ""
-                _append_manifest(
-                    artifacts_root,
-                    {
-                        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
-                        "role": role or "agent",
-                        "tool": "scoped_shell",
-                        "command": command,
-                        "started_at": started_at,
-                        "finished_at": datetime.now(timezone.utc).astimezone().isoformat(),
-                        "returncode": -1,
-                        "timed_out": True,
-                        "stdout": {
-                            "path": f"artifacts/{role or 'agent'}/tool-{seq:04d}/stdout.txt",
-                            "bytes": out_size,
-                            "sha256": out_sha,
-                        },
-                        "stderr": {
-                            "path": f"artifacts/{role or 'agent'}/tool-{seq:04d}/stderr.txt",
-                            "bytes": err_size,
-                            "sha256": err_sha,
-                        },
-                    },
-                )
-                return (
-                    f"<returncode>-1</returncode>"
-                    f"<stdout_artifact>artifacts/{role or 'agent'}/tool-{seq:04d}/stdout.txt"
-                    f" bytes={out_size} sha256={out_sha[:16] if out_sha else ''}</stdout_artifact>"
-                    f"<stderr>命令超过 {timeout} 秒，已终止（完整输出已落盘）</stderr>"
-                    f"<stdout_tail>{out_tail}</stdout_tail>"
-                )
-            return f"<returncode>-1</returncode><stderr>命令超过 {timeout} 秒，已终止</stderr>"
-        except asyncio.CancelledError:
-            cancelled = True
-            if tracker is not None:
-                await tracker.terminate_group(proc.pid)
-            else:
-                os.killpg(proc.pid, signal.SIGKILL)
-            await proc.wait()
-            raise
-        finally:
-            if cancelled and artifacts_root is not None:
-                # 取消时尽量留痕
-                try:
-                    await _stream_to_artifact(proc, stdout_path, stderr_path, return_tail)
-                except Exception:  # noqa: BLE001
-                    pass
 
     return AllowedFunctionTool(
         scoped_shell,
@@ -818,7 +635,7 @@ async def _run_docker_scoped_shell(
     returncode = outcome.exit_code if outcome.exit_code is not None else -1
     finished_at = datetime.now(timezone.utc).astimezone().isoformat()
 
-    # 落盘完整输出（宿主路径；docker 输出先写内存再落盘，后续可再优化为流式）
+    # 落盘完整输出（宿主路径；容器内输出先写内存再落盘，后续可再优化为流式）
     out_sha = err_sha = ""
     if stdout_path is not None and stderr_path is not None and artifacts_root is not None:
         stdout_path.write_bytes(stdout_bytes)
@@ -868,59 +685,6 @@ async def _run_docker_scoped_shell(
             f"<stdout_tail>{out_text}</stdout_tail>"
             f"<stderr_tail>{err_text}</stderr_tail>"
         )
-
-    # legacy：无 artifacts 根时内存截断
-    out = stdout_bytes.decode("utf-8", errors="replace")[-20000:]
-    err = stderr_bytes.decode("utf-8", errors="replace")[-6000:]
-    return f"<returncode>{returncode}</returncode><stdout>{out}</stdout><stderr>{err}</stderr>"
-
-
-async def _stream_to_artifact(
-    proc: asyncio.subprocess.Process,
-    stdout_path: Path,
-    stderr_path: Path,
-    tail_bytes: int,
-) -> tuple[int, int, str, str, str, str]:
-    """把子进程 stdout/stderr 流式写入文件，返回 (out_size, err_size,
-    out_tail_text, err_tail_text, out_sha256, err_sha256)。
-
-    边写边维护 SHA-256 与有限尾部，避免把完整输出加载进内存。
-    """
-    out_hasher = hashlib.sha256()
-    err_hasher = hashlib.sha256()
-    out_tail = bytearray()
-    err_tail = bytearray()
-    out_size = 0
-    err_size = 0
-
-    async def _drain(stream, handle, hasher, tail, size_holder: list[int]) -> None:
-        while True:
-            chunk = await stream.read(65536)
-            if not chunk:
-                break
-            handle.write(chunk)
-            hasher.update(chunk)
-            size_holder[0] += len(chunk)
-            tail.extend(chunk)
-            if len(tail) > tail_bytes:
-                del tail[: len(tail) - tail_bytes]
-
-    with stdout_path.open("wb") as out_f, stderr_path.open("wb") as err_f:
-        size_out: list[int] = [0]
-        size_err: list[int] = [0]
-        tasks = [
-            asyncio.create_task(_drain(proc.stdout, out_f, out_hasher, out_tail, size_out)),
-            asyncio.create_task(_drain(proc.stderr, err_f, err_hasher, err_tail, size_err)),
-        ]
-        await asyncio.gather(*tasks)
-    return (
-        size_out[0],
-        size_err[0],
-        bytes(out_tail).decode("utf-8", errors="replace"),
-        bytes(err_tail).decode("utf-8", errors="replace"),
-        out_hasher.hexdigest(),
-        err_hasher.hexdigest(),
-    )
 
 
 def _append_manifest(artifacts_root: Path, entry: dict[str, Any]) -> None:
