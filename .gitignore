@@ -29,3 +29,5 @@ reasonix.toml
 */__MACOSX/
 data/*.db
 data/users.db
+data/*.db-wal
+data/*.db-shm

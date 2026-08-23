@@ -561,3 +561,34 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
   .intel-grid .plan-list{max-height:420px;overflow-y:auto;overflow-x:hidden}
   .intel-grid .agent-roster{max-height:360px;overflow-y:auto;overflow-x:hidden}
 }
+
+.mission-strip .approval-state.approved{color:var(--orchestrator)}
+.mission-strip .approval-state.pending{color:var(--analysis)}
+.mission-strip .approval-state.denied{color:var(--accent)}
+.mission-strip .approval-state.recon{color:var(--recon)}
+.mission-strip .approval-state.neutral{color:var(--dim)}
+
+/* 任务上下文不再以单行省略号作为唯一展示；摘要可读，完整原文可展开。 */
+.mission-strip .mission-context-cell{display:flex;min-width:0;flex-direction:column;justify-content:center}
+.mission-context-trigger{display:-webkit-box;width:100%;margin-top:2px;padding:0;border:0;background:transparent;color:var(--text);font-family:inherit;font-size:10px;font-weight:700;line-height:1.35;text-align:left;white-space:normal;word-break:break-word;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2;cursor:pointer}
+.mission-context-trigger:hover{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+.mission-context-trigger:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
+.mission-context-modal{width:min(760px,calc(100vw - 28px));max-height:min(82vh,820px);overflow:auto}
+.mission-context-header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding-bottom:13px;border-bottom:1px solid var(--line)}
+.mission-context-header h2{margin:0;font-size:16px}.mission-context-header p{margin:4px 0 0;color:var(--dim);font-size:10px}
+.mission-context-header .icon-button{flex:none}
+.mission-context-block{margin-top:15px}.mission-context-block>span{display:block;margin-bottom:6px;color:var(--dim);font:800 9px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1px}
+.mission-context-block pre{max-height:30vh;margin:0;padding:12px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:11px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere}
+
+/* 当前 Hypothesis 使用真实陈述，不向操作员暴露 h1/tool-0002 等内部引用。 */
+.status-card{overflow-y:auto!important;overscroll-behavior:contain}
+.hypothesis-focus{margin-top:8px;padding:9px;border:1px solid color-mix(in srgb,var(--analysis) 45%,var(--line));border-left:3px solid var(--analysis);background:color-mix(in srgb,var(--analysis) 7%,transparent)}
+.hypothesis-focus>header{display:flex;align-items:center;gap:7px;margin-bottom:6px}.hypothesis-focus>header span{color:var(--dim);font:800 8px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.8px}.hypothesis-focus>header em{margin-left:auto;color:var(--analysis);font:normal 8px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
+.hypothesis-focus>p{margin:0;color:var(--text);font-size:10px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.hypothesis-focus>small{display:block;margin-top:7px;padding-top:6px;border-top:1px solid var(--line2);color:var(--dim);font-size:9px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}.hypothesis-focus>small b{display:block;margin-bottom:2px;color:var(--text);font-size:8px;letter-spacing:.6px}
+.hypothesis-focus>footer{display:flex;flex-wrap:wrap;gap:5px 9px;margin-top:7px;color:var(--dim);font:8px ui-monospace,SFMono-Regular,Menlo,monospace}
+.hypothesis-focus.supported,.hypothesis-focus.confirmed{border-left-color:var(--orchestrator);background:color-mix(in srgb,var(--orchestrator) 7%,transparent)}.hypothesis-focus.supported>header em,.hypothesis-focus.confirmed>header em{color:var(--orchestrator)}
+.hypothesis-focus.weakened{border-left-color:var(--accent);background:var(--soft-red)}.hypothesis-focus.weakened>header em{color:var(--accent)}
+.hypothesis-empty{margin-top:8px;padding:9px;border:1px dashed var(--line);color:var(--dim)}.hypothesis-empty b,.hypothesis-empty span{display:block;font-size:9px}.hypothesis-empty span{margin-top:3px;line-height:1.45}
+@media(min-width:1021px){.intel-grid .status-card .radar{width:82px;height:82px;margin:7px auto 2px;background-size:auto}.intel-grid .status-card .radar b{font-size:8px}}
+@media(max-width:700px){.mission-strip{min-height:54px}.mission-context-trigger{-webkit-line-clamp:2}.mission-context-modal{max-height:88vh;padding:16px}.mission-context-block pre{max-height:28vh}}

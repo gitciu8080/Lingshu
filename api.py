@@ -10,6 +10,7 @@ import sys
 import subprocess
 import time
 import uuid
+from datetime import datetime
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,6 +70,7 @@ from integrations.agentscope_service import (
 from integrations.agentscope_service.account_events import publish_account_event
 from integrations.antsword_service import get_antsword_service
 from Tools.KnowledgeBase import get_rag_service
+from TaskState import infer_exploitation_approval_status
 from Tools.tool_catalog import get_tool_catalog
 from Tools.target import normalize_target
 from model_registry import (
@@ -418,6 +420,7 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                 "goal": payload.get("goal", ""),
                 "phase": "planning",
                 "exploitation_approved": False,
+                "exploitation_approval_status": "not_requested",
             }))
             publish_account_event(
                 ctx.user_id, "account_session_started",
@@ -468,18 +471,42 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
         # 审批状态持久化：approval_required 时保存完整事件数据，approval_resolved 时清除
         if event_type == "approval_required":
             ctx.approval_decision_submitted = False
+            requested_at = datetime.now().astimezone().isoformat()
             persistence_operations.append(session_update_operation(
-                session_id, pending_approval=json.dumps(payload, ensure_ascii=False),
+                session_id,
+                pending_approval=json.dumps(payload, ensure_ascii=False),
+                approval_status="pending",
+                approval_decision="",
+                approval_requested_at=requested_at,
+                approval_resolved_at="",
             ))
+            persistence_operations.append(target_info_operation(session_id, {
+                "exploitation_approval_status": "pending",
+                "exploitation_approval_decision": "",
+                "exploitation_approval_requested_at": requested_at,
+                "exploitation_approval_resolved_at": "",
+            }))
         elif event_type == "approval_resolved":
             ctx.approval_decision_submitted = True
+            decision = str(payload.get("decision") or "").strip()
+            approval_status = (
+                "approved" if payload.get("approved") else
+                "recon_requested" if "补充侦察" in decision else "denied"
+            )
+            resolved_at = datetime.now().astimezone().isoformat()
             persistence_operations.append(session_update_operation(
-                session_id, pending_approval=None,
+                session_id,
+                pending_approval=None,
+                approval_status=approval_status,
+                approval_decision=decision,
+                approval_resolved_at=resolved_at,
             ))
-            if payload.get("approved"):
-                persistence_operations.append(target_info_operation(
-                    session_id, {"exploitation_approved": True},
-                ))
+            persistence_operations.append(target_info_operation(session_id, {
+                "exploitation_approved": bool(payload.get("approved")),
+                "exploitation_approval_status": approval_status,
+                "exploitation_approval_decision": decision,
+                "exploitation_approval_resolved_at": resolved_at,
+            }))
 
         if persistence_operations:
             get_persistence_writer().submit_from_callback(persistence_operations)
@@ -775,11 +802,24 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
         if not mission_end_sent:
             callback("mission_end", message="任务已结束", status=status_val)
         await _flush_persistence()
+        terminal_fields: dict[str, Any] = {
+            "status": status_val,
+            "phase": phase,
+            "success": success,
+            "flag": flag,
+            "summary": summary,
+        }
+        stored_approval = await asyncio.to_thread(session_store.get_session, session_id) or {}
+        if stored_approval.get("pending_approval"):
+            terminal_fields["pending_approval"] = None
+            if stored_approval.get("approval_status") == "pending":
+                terminal_fields.update(
+                    approval_status="cancelled",
+                    approval_decision="任务结束前审批未完成",
+                    approval_resolved_at=datetime.now().astimezone().isoformat(),
+                )
         await get_persistence_writer().submit([
-            session_update_operation(
-                session_id, status=status_val, phase=phase,
-                success=success, flag=flag, summary=summary,
-            ),
+            session_update_operation(session_id, **terminal_fields),
         ], wait=True)
         # 保存到长期记忆
         try:
@@ -1845,6 +1885,36 @@ async def get_session_detail(session_id: str, current_user: dict = Depends(get_c
     if session.get("flag"):
         target_info["flag"] = session["flag"]
     mission_state = session.get("mission_state") or {}
+    approval_status = infer_exploitation_approval_status(
+        mission_state,
+        pending=bool(session.get("pending_approval")),
+        active=(
+            session.get("status") == "active"
+            and str(mission_state.get("phase") or session.get("phase") or "")
+            not in {"completed", "failed", "cancelled"}
+        ),
+    )
+    # 新 SQLite 投影优先于无显式状态的旧 Mission；启动校正会将推导值
+    # 写回索引，详情接口也即时兼容尚未重启服务的旧会话。
+    if not mission_state.get("exploitation_approval_status"):
+        indexed_status = str(session.get("approval_status") or "")
+        if indexed_status and indexed_status != "not_requested":
+            approval_status = indexed_status
+    mission_state["exploitation_approval_status"] = approval_status
+    mission_state.setdefault(
+        "exploitation_approval_decision", session.get("approval_decision") or "",
+    )
+    mission_state.setdefault(
+        "exploitation_approval_requested_at", session.get("approval_requested_at") or "",
+    )
+    mission_state.setdefault(
+        "exploitation_approval_resolved_at", session.get("approval_resolved_at") or "",
+    )
+    session["approval_status"] = approval_status
+    target_info["exploitation_approval_status"] = approval_status
+    target_info["exploitation_approval_decision"] = mission_state.get(
+        "exploitation_approval_decision", "",
+    )
     if mission_state.get("flag"):
         target_info["flag"] = mission_state["flag"]
     if "exploitation_approved" in mission_state:
@@ -2068,8 +2138,15 @@ async def get_pending_approval(
     if not session or not session.get("pending_approval"):
         return {"pending": False}
     if session.get("status") != "active" or session_id not in _active_sessions:
+        fields: dict[str, Any] = {"pending_approval": None}
+        if session.get("approval_status") == "pending":
+            fields.update(
+                approval_status="cancelled",
+                approval_decision="任务结束前审批未完成",
+                approval_resolved_at=datetime.now().astimezone().isoformat(),
+            )
         await get_persistence_writer().submit([
-            session_update_operation(session_id, pending_approval=None),
+            session_update_operation(session_id, **fields),
         ], wait=True)
         return {"pending": False}
     # 解析并返回完整事件数据
@@ -2084,6 +2161,15 @@ async def get_pending_approval(
         }
         return {"pending": True, "event": event}
     except (json.JSONDecodeError, TypeError):
+        await get_persistence_writer().submit([
+            session_update_operation(
+                session_id,
+                pending_approval=None,
+                approval_status="cancelled",
+                approval_decision="审批请求数据损坏，已安全取消",
+                approval_resolved_at=datetime.now().astimezone().isoformat(),
+            ),
+        ], wait=True)
         return {"pending": False}
 
 

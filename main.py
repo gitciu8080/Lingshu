@@ -1273,11 +1273,41 @@ async def run_mission(
     def _push_target_info(extra: dict | None = None) -> None:
         """向 SSE 订阅者推送靶机信息快照。"""
         if event_callback is not None:
+            active_hypotheses = [
+                item for item in mission.hypotheses
+                if item.status not in {"rejected", "confirmed"}
+            ]
+            current_hypothesis = next(
+                (item for item in reversed(active_hypotheses) if item.status == "testing"),
+                active_hypotheses[-1] if active_hypotheses else None,
+            )
+
+            def hypothesis_payload(item: Any) -> dict[str, Any]:
+                return {
+                    "id": item.id,
+                    "statement": item.statement,
+                    "status": item.status,
+                    "confidence": item.confidence,
+                    "supporting_evidence": list(item.supporting_evidence),
+                    "opposing_evidence": list(item.opposing_evidence),
+                    "related_actions": list(item.related_actions),
+                    "next_validation": item.next_validation,
+                    "updated_at": item.updated_at,
+                }
+
             payload = {
                 "target": mission.target,
                 "goal": mission.goal,
                 "phase": mission.phase.value,
                 "exploitation_approved": mission.exploitation_approved,
+                "exploitation_approval_status": mission.exploitation_approval_status,
+                "exploitation_approval_decision": mission.exploitation_approval_decision,
+                "exploitation_approval_requested_at": mission.exploitation_approval_requested_at,
+                "exploitation_approval_resolved_at": mission.exploitation_approval_resolved_at,
+                "hypotheses": [hypothesis_payload(item) for item in active_hypotheses[-12:]],
+                "active_hypothesis": (
+                    hypothesis_payload(current_hypothesis) if current_hypothesis else None
+                ),
                 "findings_count": len(mission.findings),
                 "flag": mission.flag,
             }
@@ -1405,6 +1435,7 @@ async def run_mission(
                         signature=signature, hypothesis_id=hypothesis.id,
                     )
                     store.save(mission)
+                    _push_target_info()
                     return {
                         "decision": "blocked",
                         "message": (
@@ -1445,6 +1476,7 @@ async def run_mission(
                                 action_id=cached.id,
                             )
                     store.save(mission)
+                    _push_target_info()
                     return {
                         "decision": "cached",
                         "message": (
@@ -1459,6 +1491,7 @@ async def run_mission(
                         reason="already_running",
                     )
                     store.save(mission)
+                    _push_target_info()
                     return {
                         "decision": "blocked",
                         "message": f"[Action Dedup] 相同动作 {previous.id} 仍在执行，禁止并发重放。",
@@ -1499,6 +1532,7 @@ async def run_mission(
                             resolution=resolution,
                         )
                         store.save(mission)
+                        _push_target_info()
                         return {
                             "decision": "blocked",
                             "message": (
@@ -1515,6 +1549,10 @@ async def run_mission(
                     retry_count=retry_count,
                     decision="retry" if matching_failures else "execute",
                 )
+                # running 动作和 testing 假设在工具真正开始前先持久化并推送，
+                # 页面才能实时显示“当前正在验证什么”。
+                store.save(mission)
+                _push_target_info()
                 return {"decision": "execute", "action_id": action.id}
 
             action_id = str(payload.get("action_id") or "")
@@ -1530,6 +1568,7 @@ async def run_mission(
                     result_valid=False,
                 )
                 store.save(mission)
+                _push_target_info()
                 return {}
             raised = bool(payload.get("raised") or payload.get("tool_error"))
             failure_type, reason, resolution = classify_failure(result, raised=raised)
@@ -1575,6 +1614,7 @@ async def run_mission(
                     resolution=resolution or "fallback",
                 )
             store.save(mission)
+            _push_target_info()
             return {}
 
         action_lifecycle_token = bind_action_lifecycle_handler(_action_lifecycle)

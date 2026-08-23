@@ -276,6 +276,13 @@ class MissionState:
     # 持久化后即使崩溃恢复也不会重复询问
     exploitation_approved: bool = False
 
+    # 审批展示与恢复不能只依赖布尔值：false 可能表示从未申请、等待中、
+    # 已拒绝或要求补侦。显式状态作为权威运行态随 Mission JSON 持久化。
+    exploitation_approval_status: str = "not_requested"
+    exploitation_approval_decision: str = ""
+    exploitation_approval_requested_at: str = ""
+    exploitation_approval_resolved_at: str = ""
+
     # 人工批准时选定的攻击方案及用户调整后的优先级顺序。
     approved_attack_plan: dict[str, Any] | None = None
 
@@ -823,7 +830,7 @@ class MissionState:
 
 # MissionStore 持久化 schema 版本。旧文件缺字段时由 load() 自动迁移，
 # 不回写（保持旧任务只读兼容）。
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # v1: 初始字段（target/goal/phase/plan/findings/attack_chain/flag/...）
 # v2: v0.2.0 新增 target_spec/category_decision/category_history/
@@ -836,6 +843,7 @@ SCHEMA_VERSION = 6
 #     complexity（历史 action_budget/tool_budget 字段加载时丢弃）
 # v5: 第二批执行闭环新增 hypotheses/action_history/failed_paths 及序列号
 # v6: RAG 有界 Knowledge Context、查询指纹与共享缓存状态
+# v7: 人工利用审批改为可恢复的多态状态，不再以 false 代表所有未批准情况
 
 
 class MissionStoreCorruptedError(OSError):
@@ -929,6 +937,8 @@ class MissionStore:
         defaults.pop("schema_version", None)
         data.pop("schema_version", None)
         merged = {**defaults, **data}
+        if "exploitation_approval_status" not in data:
+            merged["exploitation_approval_status"] = infer_exploitation_approval_status(data)
         # events 恢复为 AuditEvent 对象（dict 形式的事件转为带哈希的对象）
         merged["events"] = [
             ev if isinstance(ev, AuditEvent) else AuditEvent(**ev)
@@ -989,6 +999,7 @@ class MissionStore:
         except TypeError as exc:
             raise MissionStoreCorruptedError(self.path, f"字段类型不匹配: {exc}") from exc
 
+
     def checkpoint(
         self,
         state: MissionState,
@@ -1031,3 +1042,44 @@ class MissionStore:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
         return target
+
+
+_EXPLOITATION_APPROVAL_STATUSES = {
+    "not_requested", "pending", "approved", "denied", "recon_requested",
+    "unavailable", "cancelled", "legacy_unknown",
+}
+
+
+def infer_exploitation_approval_status(
+    data: dict[str, Any],
+    *,
+    pending: bool = False,
+    active: bool | None = None,
+) -> str:
+    """从新字段或旧审计记录推导审批状态，供迁移和 SQLite 投影复用。"""
+    explicit = str(data.get("exploitation_approval_status") or "").strip().lower()
+    if data.get("exploitation_approved") is True:
+        return "approved"
+    if explicit in _EXPLOITATION_APPROVAL_STATUSES:
+        if explicit == "pending" and active is False:
+            return "cancelled"
+        return explicit
+    if pending and active is not False:
+        return "pending"
+    for event in reversed(data.get("events") or []):
+        if isinstance(event, AuditEvent):
+            action, details = event.action, event.details
+        elif isinstance(event, dict):
+            action = str(event.get("action") or "")
+            details = event.get("details") or {}
+        else:
+            continue
+        if action == "exploitation_approval_unavailable":
+            return "unavailable"
+        if action != "exploitation_approval" or not isinstance(details, dict):
+            continue
+        if details.get("approved") is True:
+            return "approved"
+        decision = str(details.get("decision") or "").strip()
+        return "recon_requested" if "补充侦察" in decision else "denied"
+    return "not_requested"

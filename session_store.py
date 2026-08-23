@@ -64,6 +64,10 @@ def init_sessions_db():
                 summary TEXT DEFAULT '',
                 target_info TEXT DEFAULT NULL,
                 pending_approval TEXT DEFAULT NULL,
+                approval_status TEXT DEFAULT 'not_requested',
+                approval_decision TEXT DEFAULT '',
+                approval_requested_at TEXT DEFAULT '',
+                approval_resolved_at TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id)
@@ -121,6 +125,10 @@ def init_sessions_db():
         migrations = {
             "target_info": "TEXT DEFAULT NULL",
             "pending_approval": "TEXT DEFAULT NULL",
+            "approval_status": "TEXT DEFAULT 'not_requested'",
+            "approval_decision": "TEXT DEFAULT ''",
+            "approval_requested_at": "TEXT DEFAULT ''",
+            "approval_resolved_at": "TEXT DEFAULT ''",
             # ── v0.3.0 Workspace v2 ──
             "workspace_id": "TEXT DEFAULT ''",
             "workspace_version": "INTEGER DEFAULT 0",
@@ -197,6 +205,8 @@ def create_session(
 _UPDATABLE_FIELDS = {
     'phase', 'status', 'success', 'flag', 'summary', 'title', 'target_info',
     'pending_approval', 'updated_at',
+    'approval_status', 'approval_decision', 'approval_requested_at',
+    'approval_resolved_at',
     # v0.3.0 Workspace v2
     'workspace_id', 'workspace_version', 'resume_status', 'checkpoint_seq',
 }

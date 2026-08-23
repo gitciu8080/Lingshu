@@ -17,6 +17,7 @@ from typing import Any
 from pathlib import Path
 
 import session_store
+from TaskState import infer_exploitation_approval_status
 
 logger = logging.getLogger(__name__)
 
@@ -466,6 +467,14 @@ class PersistenceWriter:
                 "title": data.get("title") or session.get("title"),
                 "checkpoint_seq": int(data.get("checkpoint_seq") or 0),
                 "resume_status": data.get("resume_status") or session.get("resume_status") or "fresh",
+                "approval_status": infer_exploitation_approval_status(
+                    data,
+                    pending=bool(session.get("pending_approval")),
+                    active=not terminal,
+                ),
+                "approval_decision": data.get("exploitation_approval_decision") or "",
+                "approval_requested_at": data.get("exploitation_approval_requested_at") or "",
+                "approval_resolved_at": data.get("exploitation_approval_resolved_at") or "",
             }
             changed = {key: value for key, value in fields.items() if session.get(key) != value}
             if changed:

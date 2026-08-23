@@ -178,6 +178,10 @@ type Mission = Record<string, unknown> & {
   goal?: string;
   phase?: string;
   exploitation_approved?: boolean;
+  exploitation_approval_status?: string;
+  exploitation_approval_decision?: string;
+  exploitation_approval_requested_at?: string;
+  exploitation_approval_resolved_at?: string;
   report_available?: boolean;
   report_url?: string;
   markdown_available?: boolean;
@@ -186,6 +190,25 @@ type Mission = Record<string, unknown> & {
   model?: string;
   model_level?: string;
   model_name?: string;
+  hypotheses?: HypothesisView[];
+  active_hypothesis?: HypothesisView | null;
+};
+type HypothesisView = {
+  id?: string;
+  statement?: string;
+  status?: string;
+  confidence?: number;
+  supporting_evidence?: string[];
+  opposing_evidence?: string[];
+  related_actions?: string[];
+  next_validation?: string;
+  updated_at?: string;
+};
+type ReportReferenceIndex = {
+  hypotheses: Record<string, string>;
+  evidence: Record<string, string>;
+  actions: Record<string, string>;
+  tools: Record<string, string[]>;
 };
 type AttackOption = {
   id: string;
@@ -208,6 +231,29 @@ type PlanItem = {
   expert?: string;
   origin?: string;
 };
+
+const HYPOTHESIS_STATUS: Record<string, string> = {
+  proposed: "待验证",
+  testing: "验证中",
+  supported: "证据支持",
+  weakened: "证据减弱",
+  rejected: "已排除",
+  confirmed: "已确认",
+};
+
+function activeHypothesisOf(mission: Mission): HypothesisView | null {
+  if (mission.active_hypothesis && typeof mission.active_hypothesis === "object")
+    return mission.active_hypothesis;
+  const hypotheses = Array.isArray(mission.hypotheses) ? mission.hypotheses : [];
+  const active = hypotheses.filter(
+    (item) => !["rejected", "confirmed"].includes(String(item.status || "")),
+  );
+  return (
+    [...active].reverse().find((item) => item.status === "testing") ||
+    active[active.length - 1] ||
+    null
+  );
+}
 const AGENTS: Record<
   string,
   {
@@ -643,6 +689,75 @@ const MarkdownContent = memo(function MarkdownContent({ children }: { children: 
   );
 });
 
+function referenceCommand(action: Record<string, unknown>): string {
+  const command = String(action.command || "").trim();
+  if (command) return command.replace(/\s+/g, " ");
+  const tool = String(action.tool || "未知工具");
+  const parameters = action.parameters && typeof action.parameters === "object"
+    ? JSON.stringify(action.parameters)
+    : "{}";
+  return `${tool} ${parameters}`;
+}
+
+function buildReportReferenceIndex(mission: Mission): ReportReferenceIndex {
+  const index: ReportReferenceIndex = { hypotheses: {}, evidence: {}, actions: {}, tools: {} };
+  const hypotheses = Array.isArray(mission.hypotheses) ? mission.hypotheses : [];
+  hypotheses.forEach((value) => {
+    if (!value || typeof value !== "object") return;
+    const item = value as Record<string, unknown>;
+    if (item.id && item.statement) index.hypotheses[String(item.id).toLowerCase()] = String(item.statement);
+  });
+  const evidence = Array.isArray(mission.evidence_records) ? mission.evidence_records : [];
+  evidence.forEach((value) => {
+    if (!value || typeof value !== "object") return;
+    const item = value as Record<string, unknown>;
+    if (item.id && item.summary) index.evidence[String(item.id).toLowerCase()] = String(item.summary);
+  });
+  const actions = Array.isArray(mission.action_history) ? mission.action_history : [];
+  actions.forEach((value) => {
+    if (!value || typeof value !== "object") return;
+    const item = value as Record<string, unknown>;
+    const command = referenceCommand(item);
+    if (item.id) index.actions[String(item.id).toLowerCase()] = command;
+    const result = String(item.result_summary || "");
+    for (const match of result.matchAll(/artifacts\/[^<\s]*\/(tool-\d+)\/stdout\.txt/gi)) {
+      const key = match[1].toLowerCase();
+      const commands = index.tools[key] || (index.tools[key] = []);
+      if (!commands.includes(command)) commands.push(command);
+    }
+  });
+  return index;
+}
+
+function markdownCodeSpan(value: string): string {
+  const runs = value.match(/`+/g) || [];
+  const longest = runs.reduce((size, run) => Math.max(size, run.length), 0);
+  const fence = "`".repeat(Math.max(1, longest + 1));
+  return `${fence}${value.replaceAll("|", "\\|")}${fence}`;
+}
+
+function resolveReadableReferences(text: string, index: ReportReferenceIndex): string {
+  return text.replace(
+    /(?<![\w-])`?(tool-\d+|h\d+|e\d+|x\d+)`?(?![\w-])/gi,
+    (_original, raw: string) => {
+      const key = raw.toLowerCase();
+      if (key.startsWith("tool-")) {
+        const commands = index.tools[key] || [];
+        return commands.length
+          ? commands.map((command) => `执行命令：${markdownCodeSpan(command)}`).join("；")
+          : "未找到对应的原始执行命令";
+      }
+      if (key.startsWith("h"))
+        return index.hypotheses[key] ? `假设“${index.hypotheses[key]}”` : "未找到正文的历史假设";
+      if (key.startsWith("e"))
+        return index.evidence[key] ? `证据“${index.evidence[key]}”` : "未找到正文的历史证据";
+      return index.actions[key]
+        ? `执行命令：${markdownCodeSpan(index.actions[key])}`
+        : "未找到对应的历史动作";
+    },
+  );
+}
+
 const StreamingMarkdown = memo(function StreamingMarkdown({ children }: { children: string }) {
   const latestText = useRef(children);
   const timerRef = useRef(0);
@@ -894,7 +1009,9 @@ function systemNoticeText(event: Event) {
   if (kind === "approval_resolved")
     return data.approved === true
       ? "✅ 审批已通过，进入攻击阶段"
-      : "❌ 审批已拒绝";
+      : String(data.decision || "").includes("补充侦察")
+        ? "🔎 审批决定：先补充侦察"
+        : "❌ 审批已拒绝";
   if (kind === "phase_change")
     return `阶段切换 → ${phaseLabel(String(data.phase || event.content || ""))}`;
   if (kind === "mission_start") return `🚀 ${eventText(event)}`;
@@ -925,6 +1042,24 @@ function phaseLabel(phase?: string) {
     phase ||
     "--"
   );
+}
+
+function approvalStatusMeta(mission: Mission) {
+  const status = String(
+    mission.exploitation_approval_status ||
+    (mission.exploitation_approved ? "approved" : "not_requested"),
+  );
+  const values: Record<string, { label: string; tone: string }> = {
+    not_requested: { label: "未触发", tone: "neutral" },
+    pending: { label: "待审批", tone: "pending" },
+    approved: { label: "已批准", tone: "approved" },
+    denied: { label: "已拒绝", tone: "denied" },
+    recon_requested: { label: "补充侦察", tone: "recon" },
+    unavailable: { label: "通道不可用", tone: "denied" },
+    cancelled: { label: "审批已取消", tone: "neutral" },
+    legacy_unknown: { label: "历史状态未知", tone: "neutral" },
+  };
+  return values[status] || values.legacy_unknown;
 }
 
 function Login({ onReady }: { onReady: () => void }) {
@@ -1364,6 +1499,45 @@ function RerunMission({
   );
 }
 
+function MissionContextDialog({
+  open,
+  onOpenChange,
+  target,
+  goal,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  target: string;
+  goal: string;
+}) {
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="overlay" />
+        <Dialog.Content className="modal mission-context-modal">
+          <header className="mission-context-header">
+            <div>
+              <Dialog.Title>完整任务信息</Dialog.Title>
+              <Dialog.Description>当前会话保存的授权目标与任务要求</Dialog.Description>
+            </div>
+            <Dialog.Close className="icon-button" aria-label="关闭完整任务信息">
+              <X size={17} />
+            </Dialog.Close>
+          </header>
+          <section className="mission-context-block">
+            <span>授权目标</span>
+            <pre>{target}</pre>
+          </section>
+          <section className="mission-context-block">
+            <span>任务要求</span>
+            <pre>{goal}</pre>
+          </section>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 function ApprovalDialog({
   request,
   onDecision,
@@ -1578,16 +1752,25 @@ function ApprovalDialog({
   );
 }
 
-const AgentCard = memo(function AgentCard({ event: value }: { event: Event }) {
+const AgentCard = memo(function AgentCard({
+  event: value,
+  referenceIndex,
+}: {
+  event: Event;
+  referenceIndex: ReportReferenceIndex;
+}) {
   const event = safeEvent(value),
     info = agentOf(event),
     Icon = info.icon,
-    text = eventText(event),
+    rawText = eventText(event),
     kind = kindOf(event),
     data = dataOf(event),
     displayName = info.name.includes(" - ") ? info.name : info.expert;
   const isUserMessage = kind === "user_message" || info.agentKey === "user";
   const isStreaming = kind === "text_stream" || kind === "thinking_stream";
+  const text = isUserMessage || kind.includes("thinking")
+    ? rawText
+    : resolveReadableReferences(rawText, referenceIndex);
   if (kind === "expert_joined") {
     const expertName = String(
       data.expert_name || data.agent || "安全专家",
@@ -1977,6 +2160,7 @@ function ConsoleApp() {
     [search, setSearch] = useState(""),
     [knowledge, setKnowledge] = useState(false),
     [mobileIntel, setMobileIntel] = useState(false),
+    [missionContextOpen, setMissionContextOpen] = useState(false),
     [rerunOpen, setRerunOpen] = useState(false),
     [rerunSource, setRerunSource] = useState<
       (Session & Record<string, unknown>) | null
@@ -2010,6 +2194,15 @@ function ConsoleApp() {
   const events = eventsForSession(eventStore, active);
   const toolEvents = eventStore.sessionId === active ? eventStore.toolItems : [];
   const phase = String(detail.phase || current?.phase || "");
+  const reportReferenceIndex = useMemo(() => buildReportReferenceIndex(detail), [detail]);
+  const approvalMeta = approvalStatusMeta(detail);
+  const activeHypothesis = activeHypothesisOf(detail);
+  const hypothesisStatus = String(activeHypothesis?.status || "proposed");
+  const hypothesisConfidence = Math.round(
+    Math.max(0, Math.min(1, Number(activeHypothesis?.confidence ?? 0))) * 100,
+  );
+  const fullTarget = String(detail.target || current?.target || "--");
+  const fullGoal = String(detail.goal || current?.goal || "--");
   const modelLevel = String(
     detail.model_level || detail.model || current?.model_level || current?.model || "Min",
   );
@@ -2255,9 +2448,27 @@ function ConsoleApp() {
             }
             continue;
           }
-          if (eventKind === "approval_required")
+          if (eventKind === "approval_required") {
             setPendingApproval(payload);
-          if (eventKind === "approval_resolved") setPendingApproval(null);
+            setDetail((value) => ({
+              ...value,
+              exploitation_approved: false,
+              exploitation_approval_status: "pending",
+              exploitation_approval_decision: "",
+            }));
+          }
+          if (eventKind === "approval_resolved") {
+            setPendingApproval(null);
+            const decision = String(payload.decision || "");
+            setDetail((value) => ({
+              ...value,
+              exploitation_approved: payload.approved === true,
+              exploitation_approval_status: payload.approved === true
+                ? "approved"
+                : decision.includes("补充侦察") ? "recon_requested" : "denied",
+              exploitation_approval_decision: decision,
+            }));
+          }
           if (eventKind === "report_ready")
             setDetail((value) => ({
               ...value,
@@ -2665,6 +2876,16 @@ function ConsoleApp() {
             </div>
             <span className={`phase-chip ${phase}`}>{phaseLabel(phase)}</span>
             <div className="header-actions">
+              {active && (
+                <button
+                  className="icon-button mission-context-open"
+                  onClick={() => setMissionContextOpen(true)}
+                  title="查看完整授权目标与任务要求"
+                  aria-label="查看完整授权目标与任务要求"
+                >
+                  <FileText size={16} />
+                </button>
+              )}
               <button
                 className={`icon-button mobile-intel-toggle ${mobileIntel ? "active" : ""}`}
                 onClick={() => setMobileIntel((open) => !open)}
@@ -2761,18 +2982,35 @@ function ConsoleApp() {
             </div>
           </header>
           <section className="mission-strip">
-            <div>
+            <div className="mission-context-cell">
               <span>目标</span>
-              <b>{current?.target || (detail.target as string) || "--"}</b>
+              <button
+                type="button"
+                className="mission-context-trigger"
+                onClick={() => setMissionContextOpen(true)}
+                title="查看完整授权目标与任务要求"
+              >
+                {fullTarget}
+              </button>
             </div>
-            <div>
+            <div className="mission-context-cell">
               <span>任务</span>
-              <b>{String(detail.goal || current?.goal || "--")}</b>
+              <button
+                type="button"
+                className="mission-context-trigger"
+                onClick={() => setMissionContextOpen(true)}
+                title="查看完整授权目标与任务要求"
+              >
+                {fullGoal}
+              </button>
             </div>
             <div>
               <span>审批</span>
-              <b className={detail.exploitation_approved ? "good" : ""}>
-                {detail.exploitation_approved ? "已批准" : "待审批"}
+              <b
+                className={`approval-state ${approvalMeta.tone}`}
+                title={String(detail.exploitation_approval_decision || approvalMeta.label)}
+              >
+                {approvalMeta.label}
               </b>
             </div>
             <div>
@@ -2801,7 +3039,11 @@ function ConsoleApp() {
             )}
             {renderedEvents.length ? (
               renderedEvents.map((event, i) => (
-                <AgentCard key={eventRenderKey(event, i)} event={event} />
+                <AgentCard
+                  key={eventRenderKey(event, i)}
+                  event={event}
+                  referenceIndex={reportReferenceIndex}
+                />
               ))
             ) : (
               <div className="empty-feed">
@@ -2865,6 +3107,33 @@ function ConsoleApp() {
                 <i />
                 <b>{phaseLabel(phase)}</b>
               </div>
+              {activeHypothesis ? (
+                <article className={`hypothesis-focus ${hypothesisStatus}`}>
+                  <header>
+                    <span>当前验证假设</span>
+                    <em>
+                      {HYPOTHESIS_STATUS[hypothesisStatus] || hypothesisStatus}
+                      {hypothesisConfidence > 0 ? ` · ${hypothesisConfidence}%` : ""}
+                    </em>
+                  </header>
+                  <p>{String(activeHypothesis.statement || "假设内容尚未写入")}</p>
+                  {activeHypothesis.next_validation && (
+                    <small>
+                      <b>下一步验证</b>
+                      {String(activeHypothesis.next_validation)}
+                    </small>
+                  )}
+                  <footer>
+                    <span>支持证据 {activeHypothesis.supporting_evidence?.length || 0}</span>
+                    <span>反对证据 {activeHypothesis.opposing_evidence?.length || 0}</span>
+                  </footer>
+                </article>
+              ) : (
+                <div className="hypothesis-empty">
+                  <b>当前没有待验证假设</b>
+                  <span>智能体提出或更新假设后将在此实时显示具体内容。</span>
+                </div>
+              )}
               {detail.flag && (
                 <div className="flag-box">
                   FLAG<code>{detail.flag}</code>
@@ -2913,6 +3182,12 @@ function ConsoleApp() {
         )}
       </div>
       <Knowledge open={knowledge} onClose={() => setKnowledge(false)} />
+      <MissionContextDialog
+        open={missionContextOpen}
+        onOpenChange={setMissionContextOpen}
+        target={fullTarget}
+        goal={fullGoal}
+      />
       <RerunMission
         open={rerunOpen}
         source={rerunSource}

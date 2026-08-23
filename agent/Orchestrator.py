@@ -474,6 +474,9 @@ def create_orchestrator_agent(
         if mission.exploitation_approved:
             return "[已批准] 本次任务的攻击阶段已获人工批准，无需重复申请，可直接 dispatch_attack。"
         if approval_callback is None:
+            mission.exploitation_approval_status = "unavailable"
+            mission.exploitation_approval_decision = "审批通道不可用"
+            mission.exploitation_approval_resolved_at = datetime.now().astimezone().isoformat()
             mission.record(
                 "Orchestrator", "exploitation_approval_unavailable", reason=reason,
             )
@@ -531,6 +534,11 @@ def create_orchestrator_agent(
             "approval_options": approval_options,
         }
 
+        mission.exploitation_approval_status = "pending"
+        mission.exploitation_approval_decision = ""
+        mission.exploitation_approval_requested_at = datetime.now().astimezone().isoformat()
+        mission.exploitation_approval_resolved_at = ""
+        store.save(mission)
         approval_result = await approval_callback(reason, scan_summary)
         if isinstance(approval_result, dict):
             approved = bool(approval_result.get("approved"))
@@ -561,8 +569,11 @@ def create_orchestrator_agent(
             selected_plan_id=selected_option["id"],
             priority_order=priority_order,
         )
+        mission.exploitation_approval_decision = decision
+        mission.exploitation_approval_resolved_at = datetime.now().astimezone().isoformat()
         if approved:
             mission.exploitation_approved = True
+            mission.exploitation_approval_status = "approved"
             mission.approved_attack_plan = {
                 "selected": selected_option,
                 "priority_order": priority_order,
@@ -576,6 +587,10 @@ def create_orchestrator_agent(
                 f"方案优先级：{' > '.join(priority_order)}\n"
                 "后续 dispatch_attack 必须优先遵循选定方案及用户调整后的顺序。"
             )
+        mission.exploitation_approved = False
+        mission.exploitation_approval_status = (
+            "recon_requested" if "补充侦察" in decision else "denied"
+        )
         store.save(mission)
         return (
             "[拒绝] 人工拒绝了本次攻击阶段授权。你可以选择：补充侦察收集更多依据、"
@@ -702,6 +717,41 @@ def create_orchestrator_agent(
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
         store.save(mission)
+        if event_callback is not None:
+            active = [
+                value for value in mission.hypotheses
+                if value.status not in {"rejected", "confirmed"}
+            ]
+            current = next(
+                (value for value in reversed(active) if value.status == "testing"),
+                active[-1] if active else None,
+            )
+            event_callback(
+                "target_info",
+                hypotheses=[{
+                    "id": value.id,
+                    "statement": value.statement,
+                    "status": value.status,
+                    "confidence": value.confidence,
+                    "supporting_evidence": list(value.supporting_evidence),
+                    "opposing_evidence": list(value.opposing_evidence),
+                    "related_actions": list(value.related_actions),
+                    "next_validation": value.next_validation,
+                    "updated_at": value.updated_at,
+                } for value in active[-12:]],
+                active_hypothesis=({
+                    "id": current.id,
+                    "statement": current.statement,
+                    "status": current.status,
+                    "confidence": current.confidence,
+                    "supporting_evidence": list(current.supporting_evidence),
+                    "opposing_evidence": list(current.opposing_evidence),
+                    "related_actions": list(current.related_actions),
+                    "next_validation": current.next_validation,
+                    "updated_at": current.updated_at,
+                } if current else None),
+                agent="Orchestrator",
+            )
         return {"ok": True, "hypothesis": {
             "id": item.id, "statement": item.statement, "status": item.status,
             "confidence": item.confidence,
