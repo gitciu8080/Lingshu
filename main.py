@@ -635,6 +635,9 @@ async def run_summary_report(
     if store is not None:
         store.save(mission)
         mission_data = mission.to_dict()
+        # 报告属于 Workspace 管理的数据写入；磁盘到达安全水位后不得继续
+        # 生成大文件，Mission JSON 终态仍已在上方原子保存。
+        await asyncio.to_thread(get_workspace_service().ensure_capacity)
         report_path = await asyncio.to_thread(
             generate_mission_pdf,
             report_key,

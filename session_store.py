@@ -6,6 +6,7 @@ session_store.py — SQLite 会话存储层
 """
 
 import os
+import json
 import sqlite3
 import threading
 import time
@@ -138,6 +139,14 @@ def init_sessions_db():
             conn.execute(
                 "ALTER TABLE session_messages ADD COLUMN source_id TEXT DEFAULT ''"
             )
+        if "operation_id" not in message_columns:
+            conn.execute(
+                "ALTER TABLE session_messages ADD COLUMN operation_id TEXT DEFAULT ''"
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_operation "
+            "ON session_messages(operation_id) WHERE operation_id <> ''"
+        )
         # 会话列表按用户/状态和创建时间分页，显式复合索引避免用户与
         # 历史会话增长后重复扫描、排序整张 sessions 表。
         conn.execute(
@@ -236,6 +245,30 @@ def list_sessions(
                 (user_id, limit, offset),
             ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def list_session_targets() -> list[str]:
+    """Return all target paths/addresses used to protect live upload staging."""
+    conn = get_db()
+    try:
+        return [str(row[0]) for row in conn.execute("SELECT target FROM sessions").fetchall()]
+    finally:
+        conn.close()
+
+
+def sqlite_health() -> dict:
+    conn = get_db()
+    try:
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        synchronous = conn.execute("PRAGMA synchronous").fetchone()[0]
+        return {
+            "journal_mode": str(journal_mode).lower(),
+            "busy_timeout_ms": int(busy_timeout),
+            "synchronous": int(synchronous),
+        }
     finally:
         conn.close()
 
@@ -371,7 +404,29 @@ def apply_persistence_batch(operations: list[dict]) -> list[int | None]:
         for operation in operations:
             operation_type = operation.get("type")
             session_id = str(operation.get("session_id") or "")
-            if operation_type == "message":
+            if operation_type == "session_create":
+                fields = dict(operation.get("fields") or {})
+                conn.execute(
+                    """INSERT OR IGNORE INTO sessions
+                       (id, user_id, title, target, goal, provider, model)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id, fields["user_id"], fields.get("title") or fields["target"],
+                        fields["target"], fields.get("goal", ""),
+                        fields.get("provider", "deepseek"), fields.get("model", "Min"),
+                    ),
+                )
+                results.append(None)
+            elif operation_type == "message":
+                operation_id = str(operation.get("operation_id") or "")
+                if operation_id:
+                    existing = conn.execute(
+                        "SELECT seq FROM session_messages WHERE operation_id = ?",
+                        (operation_id,),
+                    ).fetchone()
+                    if existing is not None:
+                        results.append(int(existing[0]))
+                        continue
                 if session_id not in next_sequences:
                     row = conn.execute(
                         "SELECT COALESCE(MAX(seq), 0) FROM session_messages "
@@ -383,8 +438,8 @@ def apply_persistence_batch(operations: list[dict]) -> list[int | None]:
                 seq = next_sequences[session_id]
                 conn.execute(
                     """INSERT INTO session_messages
-                       (session_id, seq, role, content, event_type, agent_name, source_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       (session_id, seq, role, content, event_type, agent_name, source_id, operation_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         seq,
@@ -393,6 +448,7 @@ def apply_persistence_batch(operations: list[dict]) -> list[int | None]:
                         operation.get("event_type", ""),
                         operation.get("agent_name", ""),
                         operation.get("source_id", ""),
+                        operation_id,
                     ),
                 )
                 results.append(seq)
@@ -423,6 +479,38 @@ def apply_persistence_batch(operations: list[dict]) -> list[int | None]:
                     "DELETE FROM session_stream_snapshots "
                     "WHERE session_id = ? AND block_id = ?",
                     (session_id, operation.get("block_id", "")),
+                )
+                results.append(None)
+            elif operation_type == "session_update":
+                updates = {
+                    key: value for key, value in dict(operation.get("fields") or {}).items()
+                    if key in _UPDATABLE_FIELDS
+                }
+                if updates:
+                    updates["updated_at"] = datetime.now().isoformat()
+                    set_clause = ", ".join(f"{key} = ?" for key in updates)
+                    conn.execute(
+                        f"UPDATE sessions SET {set_clause} WHERE id = ?",
+                        [*updates.values(), session_id],
+                    )
+                results.append(None)
+            elif operation_type == "target_info_merge":
+                row = conn.execute(
+                    "SELECT target_info FROM sessions WHERE id = ?", (session_id,),
+                ).fetchone()
+                current_info = {}
+                if row and row[0]:
+                    try:
+                        current_info = json.loads(row[0])
+                    except (json.JSONDecodeError, TypeError):
+                        current_info = {}
+                nested_target = current_info.pop("target_info", None)
+                if isinstance(nested_target, dict):
+                    current_info.update(nested_target)
+                current_info.update(dict(operation.get("values") or {}))
+                conn.execute(
+                    "UPDATE sessions SET target_info = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(current_info, ensure_ascii=False), datetime.now().isoformat(), session_id),
                 )
                 results.append(None)
             else:

@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-import sqlite3
 import sys
 import subprocess
 import time
@@ -45,7 +44,7 @@ from auth import (
 
 from main import run_mission
 from config import RuntimeConfig
-from workspace_service import get_workspace_service
+from workspace_service import get_workspace_service, WorkspaceCapacityError
 from api_workspace import (
     list_artifacts as _list_workspace_artifacts,
     resolve_artifact_path as _resolve_artifact_path,
@@ -55,6 +54,13 @@ from Tools.tooling import (
     interrupt_agent_tasks,
 )
 import session_store
+from persistence_service import get_persistence_writer
+from session_events import (
+    message_operation as _event_persistence_operation,
+    session_create_operation,
+    session_update_operation,
+    target_info_operation,
+)
 from integrations.agentscope_service import (
     agentscope_app,
     agentscope_lifespan,
@@ -127,6 +133,42 @@ _upload_dir = _PROJECT_ROOT / "WorkDir" / "uploads"
 _upload_dir.mkdir(parents=True, exist_ok=True)
 _reports_dir = _PROJECT_ROOT / ".Reports"
 _reports_dir.mkdir(parents=True, exist_ok=True)
+_workspace_janitor_task: asyncio.Task[None] | None = None
+
+
+def _protected_upload_paths() -> set[Path]:
+    protected: set[Path] = set()
+    upload_root = _upload_dir.resolve()
+    for value in session_store.list_session_targets():
+        try:
+            candidate = Path(value).resolve()
+        except (OSError, ValueError):
+            continue
+        if candidate == upload_root or upload_root in candidate.parents:
+            protected.add(candidate)
+    return protected
+
+
+async def _workspace_janitor_loop() -> None:
+    interval = max(
+        30.0,
+        float(os.getenv("LINGSHU_WORKSPACE_JANITOR_INTERVAL_SECONDS", "300")),
+    )
+    service = get_workspace_service()
+    while True:
+        try:
+            protected = await asyncio.to_thread(_protected_upload_paths)
+            result = await service.run_janitor(
+                upload_root=_upload_dir,
+                protected_uploads=protected,
+            )
+            if result["closed_workspaces"] or result["removed_files"] or result["failures"]:
+                logger.info("Workspace janitor 完成: %s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Workspace janitor 执行失败")
+        await asyncio.sleep(interval)
 
 
 # ── 旧版全局 SSE（deprecated，保留兼容） ──
@@ -154,232 +196,28 @@ async def _event_generator():
             yield ": heartbeat\n\n"
 
 
-# ── 需持久化到 session_messages 的事件类型 ──
-_PERSIST_EVENT_TYPES = frozenset({
-    "mission_start", "mission_end", "mission_cancelled",
-    "phase_change", "message", "error",
-    "approval_required", "approval_resolved",
-    "expert_joined",
-    "plan_updated",
-    # Agent 流式输出事件
-    "text_start", "text_end",
-    "thinking_start", "thinking_end",
-    # 工具调用事件
-    "tool_call_start", "tool_call_end",
-    # 靶机信息事件
-    "target_info", "flag_found",
-    # NSSCTF 在线提交结果
-    "nss_submit",
-    # slab-match 在线提交结果
-    "slab_submit",
-    "report_ready",
-})
-
-# 系统级事件（role="system"），其余持久化事件 role="agent"
-_SYSTEM_ROLE_EVENTS = frozenset({
-    "mission_start", "mission_end", "mission_cancelled",
-    "phase_change", "error",
-    "approval_required", "approval_resolved",
-    "expert_joined",
-    "report_ready",
-})
-
-_persistence_queue: asyncio.Queue[list[dict]] | None = None
-_persistence_task: asyncio.Task | None = None
-
-
-def _event_persistence_operation(
-    session_id: str,
-    event_type: str,
-    payload: dict,
-) -> dict | None:
-    """将事件转换为可批量写入的纯数据操作。"""
-    if event_type not in _PERSIST_EVENT_TYPES:
-        return None
-    agent_name = payload.get("agent", "")
-    # 根据事件类型提取内容和确定 role
-    if event_type == "mission_start":
-        content = f"目标: {payload.get('target', '')} | 任务: {payload.get('goal', '')}"
-    elif event_type == "mission_end":
-        content = f"状态: {payload.get('status', '未知')}"
-    elif event_type == "mission_cancelled":
-        content = payload.get("message", "任务已被取消")
-    elif event_type == "phase_change":
-        content = payload.get("phase", "")
-        agent_name = "system"
-    elif event_type == "expert_joined":
-        content = json.dumps({
-            "expert_name": payload.get("expert_name") or agent_name,
-            "specialty": payload.get("specialty", ""),
-        }, ensure_ascii=False)
-        agent_name = "system"
-    elif event_type == "error":
-        content = payload.get("message", "")
-    elif event_type in ("text_end", "thinking_end"):
-        # block_id 与正文必须一起存储；只存纯正文会使刷新回放无法区分
-        # 同一 Agent 的多段推理/输出，最终被前端覆盖为一条。
-        content = json.dumps({
-            "block_id": payload.get("block_id", ""),
-            "full_text": payload.get("full_text", payload.get("content", "")),
-        }, ensure_ascii=False)
-    elif event_type in ("text_start", "thinking_start"):
-        content = json.dumps({"block_id": payload.get("block_id", "")}, ensure_ascii=False)
-    elif event_type == "plan_updated":
-        # 将计划条目和阶段序列化为 JSON 存入 content，供历史回放
-        content = json.dumps({
-            "items": payload.get("items", []),
-            "phase": payload.get("phase", ""),
-        }, ensure_ascii=False)
-    elif event_type == "tool_call_start":
-        content = json.dumps({
-            "tool_call_id": payload.get("tool_call_id", ""),
-            "tool_name": payload.get("tool_name", ""),
-        }, ensure_ascii=False)
-    elif event_type == "tool_call_end":
-        content = json.dumps({
-            "tool_call_id": payload.get("tool_call_id", ""),
-            "tool_name": payload.get("tool_name", ""),
-            "full_args": payload.get("full_args", ""),
-            "output": payload.get("output", ""),
-        }, ensure_ascii=False)
-    elif event_type == "approval_required":
-        # 保存完整事件数据（含 scan_summary、plan_items、reason），供断线重连时恢复审批弹窗
-        content = json.dumps(payload, ensure_ascii=False)
-    elif event_type == "approval_resolved":
-        # 保存审批结果，供前端恢复时判断是否已审批
-        content = json.dumps({
-            "approved": payload.get("approved", False),
-            "decision": payload.get("decision", ""),
-            "selected_plan_id": payload.get("selected_plan_id", ""),
-            "priority_order": payload.get("priority_order", []),
-        }, ensure_ascii=False)
-    elif event_type == "nss_submit":
-        # 保存 NSSCTF 提交结果，供历史回放
-        content = json.dumps(payload, ensure_ascii=False)
-    elif event_type == "slab_submit":
-        # 保存 slab-match 提交结果，供历史回放
-        content = json.dumps(payload, ensure_ascii=False)
-    elif event_type == "report_ready":
-        content = json.dumps(payload, ensure_ascii=False)
-    else:
-        content = payload.get("content", payload.get("message", ""))
-    # 系统事件 role="system"，Agent 流式/消息事件 role="agent"
-    role = "system" if event_type in _SYSTEM_ROLE_EVENTS else "agent"
-    return {
-        "type": "message",
-        "session_id": session_id,
-        "role": role,
-        "content": content,
-        "event_type": event_type,
-        "agent_name": agent_name,
-        "source_id": "",
-    }
-
-
-def _persist_event(session_id: str, event_type: str, payload: dict) -> int | None:
-    """同步持久化兼容入口；API lifespan 内实时路径使用批量队列。"""
-    operation = _event_persistence_operation(session_id, event_type, payload)
-    if operation is None:
-        return None
-    return session_store.apply_persistence_batch([operation])[0]
-
-
-def _queue_persistence_operations(operations: list[dict]) -> bool:
-    """将操作加入批量队列；测试或队列满时由调用方同步回退。"""
-    if not operations or _persistence_queue is None:
-        return False
-    try:
-        _persistence_queue.put_nowait(operations)
-        return True
-    except asyncio.QueueFull:
-        logger.warning("持久化队列已满，回退同步写入")
-        return False
-
-
-async def _persistence_worker() -> None:
-    """聚合短时间内的会话事件，以单个 SQLite 事务批量提交。"""
-    assert _persistence_queue is not None
-    queue = _persistence_queue
-    while True:
-        first = await queue.get()
-        groups = [first]
-        operation_count = len(first)
-        deadline = asyncio.get_running_loop().time() + 0.02
-        while operation_count < 128:
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                break
-            try:
-                group = await asyncio.wait_for(queue.get(), timeout=remaining)
-            except asyncio.TimeoutError:
-                break
-            groups.append(group)
-            operation_count += len(group)
-        operations = [operation for group in groups for operation in group]
-        try:
-            await asyncio.to_thread(session_store.apply_persistence_batch, operations)
-        except Exception:
-            logger.exception("批量持久化失败，正在重试")
-            await asyncio.sleep(0.05)
-            try:
-                await asyncio.to_thread(session_store.apply_persistence_batch, operations)
-            except Exception:
-                logger.exception("批量持久化重试失败")
-        finally:
-            for _ in groups:
-                queue.task_done()
-
-
 async def _flush_persistence() -> None:
     """等待此前排队的持久化操作完成，用于报告、删除和关闭边界。"""
-    if _persistence_queue is not None:
-        await _persistence_queue.join()
+    await get_persistence_writer().flush()
 
 
-# ── 靶机信息持久化 ──
-
-def _persist_target_info(session_id: str, payload: dict) -> None:
-    """将靶机信息持久化到 sessions 表的 target_info 列。"""
-    try:
-        existing = session_store.get_session(session_id)
-        current_info = {}
-        if existing and existing.get("target_info"):
-            try:
-                current_info = json.loads(existing["target_info"])
-            except (json.JSONDecodeError, TypeError):
-                current_info = {}
-        # 兼容早期错误写入的嵌套结构。
-        nested_target = current_info.pop("target_info", None)
-        if isinstance(nested_target, dict):
-            current_info.update(nested_target)
-        nested_phase = current_info.pop("phase_change", None)
-        if isinstance(nested_phase, dict) and nested_phase.get("phase"):
-            current_info["phase"] = nested_phase["phase"]
-        nested_flag = current_info.pop("flag_found", None)
-        if isinstance(nested_flag, dict):
-            flag = nested_flag.get("flag") or nested_flag.get("content")
-            if flag:
-                current_info["flag"] = flag
-        current_info.update(payload)
-        session_store.update_session(
-            session_id, target_info=json.dumps(current_info, ensure_ascii=False),
-        )
-    except Exception:
-        pass
-
-
-def _safe_update_session(session_id: str, **fields: Any) -> bool:
-    """更新会话索引；SQLite 暂时不可用时不得中断权威 Mission 工作流。"""
-    try:
-        session_store.update_session(session_id, **fields)
-        return True
-    except sqlite3.Error:
-        logger.exception(
-            "会话索引更新失败，Mission JSON 与运行任务保持继续: session_id=%s fields=%s",
-            session_id,
-            sorted(fields),
-        )
-        return False
+async def _write_session_message(
+    session_id: str,
+    role: str,
+    content: str,
+    event_type: str = "message",
+    agent_name: str = "",
+) -> int:
+    operation = _event_persistence_operation(
+        session_id,
+        event_type,
+        {"agent": agent_name, "_content_override": content},
+        role=role,
+    )
+    if operation is None:
+        raise ValueError(f"不支持持久化的事件类型: {event_type}")
+    results = await get_persistence_writer().submit([operation], wait=True)
+    return int((results or [0])[0] or 0)
 
 
 # ── Session-aware 事件回调工厂 ──
@@ -399,7 +237,6 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
     def callback(event_type: str, **payload: Any) -> None:
         stream_key = ""
         persistence_operations: list[dict] = []
-        queued_persistence = _persistence_queue is not None
         # 全文缓冲：text_delta / thinking_delta → 累积
         if event_type in ("text_delta", "thinking_delta"):
             agent = payload.get("agent", "")
@@ -420,21 +257,15 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                 # 写一次；大块输出累计 512 字符时提前落盘。首个非空
                 # delta 会立即写入，崩溃恢复能力不受影响。
                 if now - last_write >= 0.2 or len(full_text) - last_size >= 512:
-                    if queued_persistence:
-                        persistence_operations.append({
-                            "type": "snapshot_upsert",
-                            "session_id": session_id,
-                            "reply_id": "",
-                            "block_id": block_id,
-                            "agent_name": agent,
-                            "stream_type": event_type.removesuffix("_delta"),
-                            "content": full_text,
-                        })
-                    else:
-                        session_store.upsert_stream_snapshot(
-                            session_id, "", block_id, agent,
-                            event_type.removesuffix("_delta"), full_text,
-                        )
+                    persistence_operations.append({
+                        "type": "snapshot_upsert",
+                        "session_id": session_id,
+                        "reply_id": "",
+                        "block_id": block_id,
+                        "agent_name": agent,
+                        "stream_type": event_type.removesuffix("_delta"),
+                        "content": full_text,
+                    })
                     ctx.stream_snapshot_writes[stream_key] = (now, len(full_text))
         # 全文终结：text_end → 注入 full_text 并清除缓冲区
         elif event_type in ("text_end", "thinking_end"):
@@ -443,14 +274,11 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             block_id = ctx.stream_blocks.pop(stream_key, "")
             if block_id:
                 payload["block_id"] = block_id
-                if queued_persistence:
-                    persistence_operations.append({
-                        "type": "snapshot_delete",
-                        "session_id": session_id,
-                        "block_id": block_id,
-                    })
-                else:
-                    session_store.delete_stream_snapshot(session_id, block_id)
+                persistence_operations.append({
+                    "type": "snapshot_delete",
+                    "session_id": session_id,
+                    "block_id": block_id,
+                })
             full = ctx.stream_buffers.pop(stream_key, "")
             ctx.stream_snapshot_writes.pop(stream_key, None)
             if full:
@@ -500,45 +328,32 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             payload["output"] = payload.get("output", "") or (tool or {}).get("output", "")
 
         payload["session_id"] = session_id
-        # API 正常运行时交给后台队列批量提交；未启动 lifespan 的单元测试、
-        # 脚本调用以及队列满载时保留同步可靠回退。
-        seq = None
+        # 实时路径只提交结构化操作；队列满载时由 writer 异步背压，绝不
+        # 回退到事件循环中的同步 SQLite 写入。
         message_operation = _event_persistence_operation(
             session_id, event_type, payload,
         )
-        if queued_persistence:
-            if message_operation is not None:
-                persistence_operations.append(message_operation)
-            if persistence_operations and not _queue_persistence_operations(
-                persistence_operations,
-            ):
-                results = session_store.apply_persistence_batch(persistence_operations)
-                if message_operation is not None:
-                    seq = results[-1]
-        else:
-            seq = _persist_event(session_id, event_type, payload)
+        if message_operation is not None:
+            persistence_operations.append(message_operation)
         event = {"type": event_type, **payload}
-        if seq is not None:
-            event["seq"] = seq
         # 靶机信息采用扁平增量结构持久化，前端可直接恢复。
         if event_type == "mission_start":
-            _persist_target_info(session_id, {
+            persistence_operations.append(target_info_operation(session_id, {
                 "target": payload.get("target", ""),
                 "goal": payload.get("goal", ""),
                 "phase": "planning",
                 "exploitation_approved": False,
-            })
+            }))
         elif event_type == "target_info":
-            _persist_target_info(session_id, {
+            persistence_operations.append(target_info_operation(session_id, {
                 key: value for key, value in payload.items()
                 if key not in {"session_id", "agent", "type"}
-            })
+            }))
         elif event_type == "phase_change":
-            _persist_target_info(session_id, {"phase": payload.get("phase", "")})
-            _safe_update_session(
-                session_id,
-                phase=payload.get("phase", ""),
-            )
+            persistence_operations.extend([
+                target_info_operation(session_id, {"phase": payload.get("phase", "")}),
+                session_update_operation(session_id, phase=payload.get("phase", "")),
+            ])
             publish_account_event(
                 ctx.user_id,
                 "account_phase_change",
@@ -546,34 +361,40 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                 phase=payload.get("phase", ""),
                 previous_phase=payload.get("previous_phase", ""),
                 reason=payload.get("reason", ""),
-                source_id=str(seq or ""),
+                source_id=str(payload.get("source_id") or ""),
             )
         elif event_type == "session_title":
             title = str(payload.get("title") or "安全测试任务")
-            _safe_update_session(session_id, title=title)
+            persistence_operations.append(session_update_operation(session_id, title=title))
             publish_account_event(
                 ctx.user_id,
                 "account_session_title",
                 session_id=session_id,
                 title=title,
-                source_id=str(seq or ""),
+                source_id=str(payload.get("source_id") or ""),
             )
         elif event_type == "flag_found":
             flag = payload.get("flag") or payload.get("content")
             if flag:
-                _persist_target_info(session_id, {"flag": flag})
+                persistence_operations.append(target_info_operation(session_id, {"flag": flag}))
         # 审批状态持久化：approval_required 时保存完整事件数据，approval_resolved 时清除
         if event_type == "approval_required":
             ctx.approval_decision_submitted = False
-            _safe_update_session(
-                session_id,
-                pending_approval=json.dumps(payload, ensure_ascii=False),
-            )
+            persistence_operations.append(session_update_operation(
+                session_id, pending_approval=json.dumps(payload, ensure_ascii=False),
+            ))
         elif event_type == "approval_resolved":
             ctx.approval_decision_submitted = True
-            _safe_update_session(session_id, pending_approval=None)
+            persistence_operations.append(session_update_operation(
+                session_id, pending_approval=None,
+            ))
             if payload.get("approved"):
-                _persist_target_info(session_id, {"exploitation_approved": True})
+                persistence_operations.append(target_info_operation(
+                    session_id, {"exploitation_approved": True},
+                ))
+
+        if persistence_operations:
+            get_persistence_writer().submit_from_callback(persistence_operations)
 
         # 每个浏览器连接拥有独立队列，所有订阅者收到完全相同的事件。
         for subscriber in tuple(ctx.subscribers):
@@ -792,15 +613,12 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                 status_val = "failed"
             # Summary 报告已由 run_mission 收尾阶段生成（含 PDF 落盘与 report_ready
             # 事件），此处仅落库并通知前端任务结束。
-            await asyncio.to_thread(
-                _safe_update_session,
-                session_id,
-                status=status_val,
-                phase=phase,
-                success=success,
-                flag=flag,
-                summary=summary,
-            )
+            await get_persistence_writer().submit([
+                session_update_operation(
+                    session_id, status=status_val, phase=phase, success=success,
+                    flag=flag, summary=summary,
+                ),
+            ], wait=True)
             callback(
                 "mission_end",
                 message="任务执行已结束",
@@ -836,7 +654,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
         callback("error", message=f"任务异常：{exc}", agent="system")
     finally:
         if mission_state is None or status_val == "cancelled":
-            existing = session_store.get_session(session_id) or {}
+            existing = await asyncio.to_thread(session_store.get_session, session_id) or {}
             current_title = str(existing.get("title") or "安全测试任务")
             if current_title == str(existing.get("target") or ""):
                 current_title = "安全测试任务"
@@ -860,12 +678,12 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
         if not mission_end_sent:
             callback("mission_end", message="任务已结束", status=status_val)
         await _flush_persistence()
-        await asyncio.to_thread(
-            lambda: _safe_update_session(
+        await get_persistence_writer().submit([
+            session_update_operation(
                 session_id, status=status_val, phase=phase,
                 success=success, flag=flag, summary=summary,
-            )
-        )
+            ),
+        ], wait=True)
         # 保存到长期记忆
         try:
             _save_long_term_memory(session_id, target, goal, phase, success, flag, summary)
@@ -880,11 +698,14 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
 
 @asynccontextmanager
 async def _app_lifespan(_: FastAPI):
-    global _persistence_queue, _persistence_task
-    _persistence_queue = asyncio.Queue(maxsize=10000)
-    _persistence_task = asyncio.create_task(
-        _persistence_worker(),
-        name="lingshu-sqlite-persistence",
+    global _workspace_janitor_task
+    writer = get_persistence_writer()
+    await writer.start()
+    repaired = await writer.reconcile_mission_states(_sessions_dir)
+    if repaired:
+        logger.info("启动时已从 Mission JSON 校正 %d 条会话索引", repaired)
+    _workspace_janitor_task = asyncio.create_task(
+        _workspace_janitor_loop(), name="lingshu-workspace-janitor",
     )
     antsword = get_antsword_service()
     try:
@@ -916,19 +737,18 @@ async def _app_lifespan(_: FastAPI):
             try:
                 yield
             finally:
+                if _workspace_janitor_task is not None:
+                    _workspace_janitor_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await _workspace_janitor_task
+                    _workspace_janitor_task = None
+                await get_workspace_service().close_all()
                 if not rag_start_task.done():
                     rag_start_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await rag_start_task
                 await rag.close()
-                if _persistence_queue is not None:
-                    await _persistence_queue.join()
-                if _persistence_task is not None:
-                    _persistence_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await _persistence_task
-                _persistence_task = None
-                _persistence_queue = None
+                await writer.stop()
     finally:
         await antsword.stop()
 
@@ -1311,6 +1131,27 @@ async def superadmin_tooling_status(
     return {"tools": items, "counts": counts, "manifest_schema_version": 1}
 
 
+@app.get("/api/superadmin/runtime-health")
+async def superadmin_runtime_health(current_user: dict = Depends(get_current_user)):
+    """Expose persistence backlog, SQLite mode and workspace/disk lifecycle metrics."""
+    _require_superadmin(current_user)
+    workspace = get_workspace_service()
+    workspace_health, sqlite_status = await asyncio.gather(
+        workspace.health(
+            extra_paths={"uploads": _upload_dir, "reports": _reports_dir, "task_memory": _sessions_dir},
+        ),
+        asyncio.to_thread(session_store.sqlite_health),
+    )
+    return {
+        "status": "degraded" if (
+            get_persistence_writer().degraded
+            or workspace_health["disk"]["waterline_reached"]
+        ) else "ok",
+        "persistence": {**sqlite_status, **get_persistence_writer().health()},
+        "workspace": workspace_health,
+    }
+
+
 @app.put("/api/superadmin/users/{user_id}/password")
 async def superadmin_reset_password(
     user_id: int,
@@ -1555,6 +1396,13 @@ async def knowledge_reindex(current_user: dict = Depends(get_current_user)):
 @app.post("/api/session/start")
 async def session_start(req: MissionStartRequest, current_user: dict = Depends(get_current_user)):
     """创建并启动新会话。"""
+    writer = get_persistence_writer()
+    if writer.degraded or writer.health()["queue_depth"] >= writer.capacity:
+        raise HTTPException(status_code=503, detail="会话持久化暂时拥塞，请稍后重试")
+    try:
+        get_workspace_service().ensure_capacity()
+    except WorkspaceCapacityError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
     fields_set = getattr(req, "model_fields_set", set())
     model_level = "Max" if req.provider == "zhipu" and "model" not in fields_set else req.model
     enabled_providers = {
@@ -1605,25 +1453,17 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
 
     # 持久化到 DB（传入 API 层生成的 session_id）
     workspace_id = get_workspace_service().workspace_id(current_user["id"], session_id)
-    await asyncio.to_thread(
-        session_store.create_session,
-        user_id=current_user["id"],
-        target=authorized_target,
-        goal=req.goal,
-        provider=req.provider,
-        model=model_level,
-        title=f"[{session_id[:8]}] 安全测试任务",
-        session_id=session_id,
-    )
-    # v0.3.0：登记 Workspace v2 标识与恢复状态（fresh=新建）
-    await asyncio.to_thread(
-        session_store.update_session,
-        session_id,
-        workspace_id=workspace_id,
-        workspace_version=2,
-        resume_status="fresh",
-        checkpoint_seq=0,
-    )
+    await writer.submit([
+        session_create_operation(
+            session_id, user_id=current_user["id"], target=authorized_target,
+            goal=req.goal, provider=req.provider, model=model_level,
+            title=f"[{session_id[:8]}] 安全测试任务",
+        ),
+        session_update_operation(
+            session_id, workspace_id=workspace_id, workspace_version=2,
+            resume_status="fresh", checkpoint_seq=0,
+        ),
+    ], wait=True)
 
     # 构建 session-aware callback
     callback = _make_session_callback(session_id, ctx)
@@ -1693,9 +1533,7 @@ async def send_message(session_id: str, msg: ChatMessage, current_user: dict = D
         ctx.last_user_content = content
 
     # 持久化消息
-    seq = await asyncio.to_thread(
-        session_store.add_message, session_id, "user", content,
-    )
+    seq = await _write_session_message(session_id, "user", content, "user_message", "user")
     event = {
         "type": "user_message",
         "session_id": session_id,
@@ -1735,13 +1573,9 @@ async def send_message(session_id: str, msg: ChatMessage, current_user: dict = D
         # 不在 HTTP 请求中等待嵌套 Agent/工具完全收尾，避免下一条情报被卡住。
         # run_mission 的 finally 仍会在任务结束时等待并回收全部 task/进程组。
         interrupted = interrupt_agent_tasks(ctx.agent_tasks)
-        ack_seq = await asyncio.to_thread(
-            session_store.add_message,
-            session_id,
-            "system",
-            "新情报已接收：正在中断当前步骤并交给行动指挥处理。",
-            "steering_received",
-            "system",
+        ack_seq = await _write_session_message(
+            session_id, "system", "新情报已接收：正在中断当前步骤并交给行动指挥处理。",
+            "steering_received", "system",
         )
         ack = {
             "type": "steering_received",
@@ -1754,13 +1588,10 @@ async def send_message(session_id: str, msg: ChatMessage, current_user: dict = D
         # 这不是伪造模型推理，而是执行层对“当前实际工作者已接收中断”的
         # 明确回执；每条同样持久化，刷新会话后仍可辨认情报交给了谁。
         for agent_name in acknowledgement_agents:
-            agent_seq = await asyncio.to_thread(
-                session_store.add_message,
-                session_id,
-                "agent",
+            agent_seq = await _write_session_message(
+                session_id, "agent",
                 "已接收操作员的新情报，当前步骤已中断；正在将上下文交回行动指挥重新规划。",
-                "agent_acknowledged",
-                agent_name,
+                "agent_acknowledged", agent_name,
             )
             agent_ack = {
                 "type": "agent_acknowledged",
@@ -2091,9 +1922,9 @@ async def get_pending_approval(
     if not session or not session.get("pending_approval"):
         return {"pending": False}
     if session.get("status") != "active" or session_id not in _active_sessions:
-        await asyncio.to_thread(
-            session_store.update_session, session_id, pending_approval=None,
-        )
+        await get_persistence_writer().submit([
+            session_update_operation(session_id, pending_approval=None),
+        ], wait=True)
         return {"pending": False}
     # 解析并返回完整事件数据
     try:
@@ -2136,8 +1967,9 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
             pass
     # v0.3.0：关闭并原子移动 Workspace 到 trash（MCP 随 close 释放）
     svc = get_workspace_service()
+    trash_path: Path | None = None
     try:
-        await svc.delete(current_user["id"], session_id)
+        trash_path = await svc.delete(current_user["id"], session_id)
     except FileNotFoundError:
         pass  # 工作区不存在不阻塞删除
     # 删除 DB 记录（返回孤儿 blob：最后引用被移除的共享 blob）
@@ -2156,7 +1988,12 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
         session_file.unlink()
     report_file = _reports_dir / f"{session_id}.pdf"
     if report_file.is_file():
-        report_file.unlink()
+        if trash_path is None:
+            trash_path = svc.root / "trash" / f"{session_id}-{int(time.time())}"
+            trash_path.mkdir(parents=True, exist_ok=True)
+        report_trash = trash_path / "reports"
+        report_trash.mkdir(parents=True, exist_ok=True)
+        os.replace(report_file, report_trash / report_file.name)
     return {"status": "deleted"}
 
 
@@ -2240,9 +2077,9 @@ async def resume_session(
             "phase": session.get("phase"),
         }
     # 登记恢复状态并重新启动任务
-    await asyncio.to_thread(
-        session_store.update_session, session_id, resume_status="running",
-    )
+    await get_persistence_writer().submit([
+        session_update_operation(session_id, resume_status="running"),
+    ], wait=True)
     goal = session.get("goal") or ""
     provider = session.get("provider") or "deepseek"
     model = session.get("model") or "Min"
@@ -2298,13 +2135,11 @@ async def cancel_session(session_id: str, current_user: dict = Depends(get_curre
     ctx.task.cancel()
 
     # 3) 先落库为已取消；保留 ctx 直到 finally 完成，这样 SSE 能收到终态。
-    await asyncio.to_thread(
-        session_store.update_session,
-        session_id,
-        status="cancelled",
-        phase="cancelled",
-        pending_approval=None,
-    )
+    await get_persistence_writer().submit([
+        session_update_operation(
+            session_id, status="cancelled", phase="cancelled", pending_approval=None,
+        ),
+    ], wait=True)
     # 4) 等待 run_mission finally 完成 Agent task、逆向服务和 shell 进程组清理。
     # 接口成功返回即表示本会话后台执行已经真正结束。
     try:
@@ -2414,13 +2249,23 @@ async def upload_target(
 ):
     """批量上传目标文件；多文件返回独立批次目录作为任务目标。"""
     del current_user
-    max_file_size = 100 * 1024 * 1024
-    max_total_size = 300 * 1024 * 1024
+    max_file_size = max(
+        1, int(os.getenv("LINGSHU_UPLOAD_MAX_FILE_BYTES", str(100 * 1024 * 1024))),
+    )
+    max_total_size = max(
+        max_file_size,
+        int(os.getenv("LINGSHU_UPLOAD_MAX_BATCH_BYTES", str(300 * 1024 * 1024))),
+    )
     if not files:
         raise HTTPException(status_code=400, detail="至少选择一个文件")
     if len(files) > 20:
         raise HTTPException(status_code=413, detail="单次最多上传 20 个文件")
 
+    workspace = get_workspace_service()
+    try:
+        workspace.ensure_capacity()
+    except WorkspaceCapacityError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
     batch_dir = _upload_dir / uuid.uuid4().hex[:16]
     batch_dir.mkdir(parents=True, exist_ok=False)
     uploaded: list[dict[str, Any]] = []
@@ -2439,9 +2284,16 @@ async def upload_target(
                     file_size += len(chunk)
                     total_size += len(chunk)
                     if file_size > max_file_size:
-                        raise HTTPException(status_code=413, detail=f"文件 {safe_name} 超过 100MB")
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"文件 {safe_name} 超过配置上限 {max_file_size} 字节",
+                        )
                     if total_size > max_total_size:
-                        raise HTTPException(status_code=413, detail="文件总大小超过 300MB")
+                        raise HTTPException(status_code=413, detail="文件总大小超过配置上限")
+                    try:
+                        workspace.ensure_capacity(len(chunk))
+                    except WorkspaceCapacityError as exc:
+                        raise HTTPException(status_code=507, detail=str(exc)) from exc
                     handle.write(chunk)
             uploaded.append({"filename": safe_name, "path": str(destination), "size": file_size})
     except Exception:

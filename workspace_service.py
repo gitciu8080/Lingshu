@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import shutil
 import tempfile
@@ -48,6 +49,8 @@ from pathlib import Path
 from typing import Any
 
 from agentscope.workspace import LocalWorkspace
+
+logger = logging.getLogger(__name__)
 
 # 默认工作区根目录固定在项目内，不依赖启动命令的当前目录。
 _PROJECT_ROOT = Path(__file__).resolve().parent
@@ -64,6 +67,11 @@ class _CachedWorkspace:
 
     workspace: LocalWorkspace
     last_used: float = field(default_factory=time.monotonic)
+    generation: int = 0
+
+
+class WorkspaceCapacityError(OSError):
+    """The configured free-disk safety waterline would be crossed."""
 
 
 class WorkspaceService:
@@ -80,8 +88,28 @@ class WorkspaceService:
             candidate if candidate.is_absolute() else _PROJECT_ROOT / candidate
         ).resolve()
         self.idle_ttl_seconds = idle_ttl_seconds
+        self.min_free_disk_bytes = max(
+            0, int(os.getenv("LINGSHU_MIN_FREE_DISK_BYTES", str(10 * 1024**3))),
+        )
         self._cache: dict[str, _CachedWorkspace] = {}
         self._lock = asyncio.Lock()
+        self._deleting: set[str] = set()
+        self._generation = 0
+        self.last_cleanup_at: float | None = None
+        self.cleanup_runs = 0
+        self.cleanup_failures = 0
+        self.cleaned_files = 0
+        self.cleaned_bytes = 0
+
+    def ensure_capacity(self, required_bytes: int = 0) -> None:
+        """Reject managed writes before the global free-space waterline is crossed."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(self.root).free
+        if free - max(0, required_bytes) < self.min_free_disk_bytes:
+            raise WorkspaceCapacityError(
+                f"磁盘可用空间不足，系统要求至少保留 "
+                f"{self.min_free_disk_bytes // (1024**3)} GiB",
+            )
 
     # ── 路径与 ID 推导（确定性） ──
 
@@ -129,11 +157,14 @@ class WorkspaceService:
         """
         key = self.workspace_id(user_id, session_id)
         async with self._lock:
+            if key in self._deleting:
+                raise RuntimeError(f"工作区正在删除: {key}")
             cached = self._cache.get(key)
             if cached is not None:
                 cached.last_used = time.monotonic()
                 return cached.workspace
 
+            self.ensure_capacity()
             workdir = self.workspace_dir(user_id, session_id)
             workdir.mkdir(parents=True, exist_ok=True)
             # 业务目录（LocalWorkspace 只管理 .mcp/skills/data/sessions）
@@ -147,15 +178,17 @@ class WorkspaceService:
                 skill_paths=[str(p) for p in (skill_paths or [])],
             )
             await workspace.initialize()
-            self._cache[key] = _CachedWorkspace(workspace)
+            self._generation += 1
+            self._cache[key] = _CachedWorkspace(workspace, generation=self._generation)
             return workspace
 
-    def touch(self, user_id: int | None, session_id: str) -> None:
-        """刷新缓存条目的 TTL（同步调用，供非 async 路径使用）。"""
+    async def touch(self, user_id: int | None, session_id: str) -> None:
+        """刷新缓存条目的 TTL。"""
         key = self.workspace_id(user_id, session_id)
-        cached = self._cache.get(key)
-        if cached is not None:
-            cached.last_used = time.monotonic()
+        async with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                cached.last_used = time.monotonic()
 
     async def close_idle(self, *, ttl_seconds: float | None = None) -> int:
         """关闭并移除超过 TTL 未使用的工作区缓存条目。
@@ -164,40 +197,35 @@ class WorkspaceService:
         """
         ttl = ttl_seconds if ttl_seconds is not None else self.idle_ttl_seconds
         now = time.monotonic()
-        stale_keys = [
-            key
-            for key, entry in self._cache.items()
-            if now - entry.last_used > ttl
-        ]
-        for key in stale_keys:
-            entry = self._cache.pop(key, None)
-            if entry is not None:
-                try:
-                    await entry.workspace.close()
-                except Exception:  # noqa: BLE001 - 关闭失败不阻断其他清理
-                    pass
-        return len(stale_keys)
+        async with self._lock:
+            stale = [
+                self._cache.pop(key)
+                for key, entry in tuple(self._cache.items())
+                if key not in self._deleting and now - entry.last_used > ttl
+            ]
+        await self._close_entries(stale)
+        return len(stale)
 
     async def close_all(self) -> None:
         """关闭全部缓存工作区（服务停机时调用，不删磁盘数据）。"""
-        keys = list(self._cache.keys())
-        for key in keys:
-            entry = self._cache.pop(key, None)
-            if entry is not None:
-                try:
-                    await entry.workspace.close()
-                except Exception:  # noqa: BLE001
-                    pass
+        async with self._lock:
+            entries = list(self._cache.values())
+            self._cache.clear()
+        await self._close_entries(entries)
 
     async def close_one(self, user_id: int | None, session_id: str) -> None:
         """只关闭指定会话的工作区并移除缓存条目（不删除磁盘数据）。"""
         key = self.workspace_id(user_id, session_id)
-        entry = self._cache.pop(key, None)
-        if entry is not None:
+        async with self._lock:
+            entry = self._cache.pop(key, None)
+        await self._close_entries([entry] if entry is not None else [])
+
+    async def _close_entries(self, entries: list[_CachedWorkspace]) -> None:
+        for entry in entries:
             try:
                 await entry.workspace.close()
             except Exception:  # noqa: BLE001
-                pass
+                logger.exception("关闭 Workspace 失败")
 
     async def delete(self, user_id: int | None, session_id: str) -> Path:
         """删除会话工作区：关闭缓存 → 原子移动到 trash → 返回 trash 路径。
@@ -207,23 +235,23 @@ class WorkspaceService:
         """
         key = self.workspace_id(user_id, session_id)
         async with self._lock:
+            if key in self._deleting:
+                raise RuntimeError(f"工作区已在删除: {key}")
+            self._deleting.add(key)
             entry = self._cache.pop(key, None)
-            if entry is not None:
-                try:
-                    await entry.workspace.close()
-                except Exception:  # noqa: BLE001
-                    pass
-
-        src = self.workspace_dir(user_id, session_id)
-        if not src.exists():
-            raise FileNotFoundError(f"工作区不存在: {src}")
-
-        trash_root = self.root / "trash"
-        trash_root.mkdir(parents=True, exist_ok=True)
-        # 原子移动：同文件系统 rename，避免半删除状态
-        dst = trash_root / f"{src.name}-{int(time.time())}"
-        os.replace(src, dst)
-        return dst
+        try:
+            await self._close_entries([entry] if entry is not None else [])
+            src = self.workspace_dir(user_id, session_id)
+            if not src.exists():
+                raise FileNotFoundError(f"工作区不存在: {src}")
+            trash_root = self.root / "trash"
+            trash_root.mkdir(parents=True, exist_ok=True)
+            dst = trash_root / f"{src.name}-{int(time.time())}"
+            os.replace(src, dst)
+            return dst
+        finally:
+            async with self._lock:
+                self._deleting.discard(key)
 
     # ── blob store（内容寻址 + 会话 input 链接） ──
 
@@ -232,6 +260,7 @@ class WorkspaceService:
 
         相同内容只落盘一次；引用计数由调用方（SQLite blob 引用表）维护。
         """
+        self.ensure_capacity(len(data))
         digest = _sha256_bytes(data)
         target = self.root / "blobs" / digest / "source"
         if target.exists():
@@ -277,6 +306,7 @@ class WorkspaceService:
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             return target
+        self.ensure_capacity(source.stat().st_size)
 
         # reflink（同文件系统 CoW）→ 失败回退 copy
         try:
@@ -295,6 +325,118 @@ class WorkspaceService:
                 target.unlink()
         except FileNotFoundError:
             pass
+
+    async def run_janitor(
+        self,
+        *,
+        upload_root: str | Path | None = None,
+        protected_uploads: set[Path] | None = None,
+    ) -> dict[str, int]:
+        """Close idle objects and purge expired trash/unclaimed upload staging."""
+        closed = await self.close_idle()
+        trash_retention = max(0, int(os.getenv("LINGSHU_TRASH_RETENTION_SECONDS", "604800")))
+        upload_retention = max(0, int(os.getenv("LINGSHU_UPLOAD_RETENTION_SECONDS", "86400")))
+        protected = {path.resolve() for path in (protected_uploads or set())}
+        candidates: list[tuple[Path, int]] = [(self.root / "trash", trash_retention)]
+        if upload_root is not None:
+            candidates.append((Path(upload_root), upload_retention))
+        removed_files, removed_bytes, failures = await asyncio.to_thread(
+            _purge_expired, candidates, protected,
+        )
+        now = time.time()
+        self.last_cleanup_at = now
+        self.cleanup_runs += 1
+        self.cleanup_failures += failures
+        self.cleaned_files += removed_files
+        self.cleaned_bytes += removed_bytes
+        return {
+            "closed_workspaces": closed, "removed_files": removed_files,
+            "removed_bytes": removed_bytes, "failures": failures,
+        }
+
+    async def health(self, *, extra_paths: dict[str, Path] | None = None) -> dict[str, Any]:
+        async with self._lock:
+            active_workspaces = len(self._cache)
+            deleting_workspaces = len(self._deleting)
+        return await asyncio.to_thread(
+            self._health_sync, active_workspaces, deleting_workspaces, extra_paths,
+        )
+
+    def _health_sync(
+        self,
+        active_workspaces: int,
+        deleting_workspaces: int,
+        extra_paths: dict[str, Path] | None,
+    ) -> dict[str, Any]:
+        usage = shutil.disk_usage(self.root)
+        paths = {
+            "workspace_sessions": self.root / "sessions",
+            "workspace_blobs": self.root / "blobs",
+            "workspace_trash": self.root / "trash",
+            **(extra_paths or {}),
+        }
+        return {
+            "active_workspaces": active_workspaces,
+            "deleting_workspaces": deleting_workspaces,
+            "idle_ttl_seconds": self.idle_ttl_seconds,
+            "disk": {
+                "total": usage.total, "used": usage.used, "free": usage.free,
+                "minimum_free": self.min_free_disk_bytes,
+                "waterline_reached": usage.free < self.min_free_disk_bytes,
+            },
+            "path_bytes": {name: _path_size(path) for name, path in paths.items()},
+            "janitor": {
+                "last_cleanup_at": self.last_cleanup_at, "runs": self.cleanup_runs,
+                "failures": self.cleanup_failures, "removed_files": self.cleaned_files,
+                "removed_bytes": self.cleaned_bytes,
+            },
+        }
+
+
+def _path_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except FileNotFoundError:
+                continue
+    return total
+
+
+def _purge_expired(
+    candidates: list[tuple[Path, int]],
+    protected: set[Path],
+) -> tuple[int, int, int]:
+    removed_files = removed_bytes = failures = 0
+    now = time.time()
+    for directory, retention in candidates:
+        if not directory.is_dir():
+            continue
+        for child in tuple(directory.iterdir()):
+            try:
+                resolved = child.resolve()
+                if any(resolved == item or resolved in item.parents for item in protected):
+                    continue
+                if now - child.stat().st_mtime < retention:
+                    continue
+                size = _path_size(child)
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+                removed_files += 1
+                removed_bytes += size
+            except FileNotFoundError:
+                continue
+            except Exception:  # noqa: BLE001
+                failures += 1
+                logger.exception("Workspace janitor 清理失败: %s", child)
+    return removed_files, removed_bytes, failures
 
 
 def _reflink(source: Path, target: Path) -> None:
@@ -324,5 +466,9 @@ def get_workspace_service(
         kwargs: dict[str, Any] = {}
         if idle_ttl_seconds is not None:
             kwargs["idle_ttl_seconds"] = idle_ttl_seconds
+        else:
+            kwargs["idle_ttl_seconds"] = float(
+                _os.getenv("LINGSHU_WORKSPACE_IDLE_TTL_SECONDS", "3600"),
+            )
         _service = WorkspaceService(effective_root, **kwargs)
     return _service
