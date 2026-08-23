@@ -4,7 +4,7 @@ import httpx
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
-import datetime
+from datetime import datetime
 from agentscope.agent import Agent, ReActConfig
 from agentscope.message import UserMsg
 
