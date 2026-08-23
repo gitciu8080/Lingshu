@@ -12,9 +12,11 @@ from pathlib import Path
 from agentscope.agent import Agent, ReActConfig
 from Tools.CVE_Search import create_cve_search_tool
 from Tools.OCR import create_tesseract_ocr_tool
+from Tools.Plan import create_submit_plan_tool
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.TonyDec import create_tonydec_tool
 from Tools.tooling import StrictJSONToolkit, create_scoped_shell_tool
+from core.TaskState import MissionState, MissionStore  # noqa: F401 (类型标注)
 from agent.experts import ARTIFACT_TRIAGE_EXPERT, NETWORK_RECON_EXPERT
 
 # ---------------------------------------------------------------------------
@@ -37,17 +39,26 @@ def create_network_recon_agent(
     state=None,
     artifact_root: str | Path | None = None,
     executor: "Any | None" = None,
+    mission: MissionState | None = None,
+    store: MissionStore | None = None,
+    event_callback=None,
 ) -> Agent:
-    toolkit = StrictJSONToolkit(
-        tools=[
-            create_scoped_shell_tool(
-                target, project_dir, timeout,
-                registry=scope_registry, role="recon",
-                artifact_root=artifact_root, executor=executor,
-            ),
-            create_cve_search_tool(),
-        ],
-    )
+    recon_tools = [
+        create_scoped_shell_tool(
+            target, project_dir, timeout,
+            registry=scope_registry, role="recon",
+            artifact_root=artifact_root, executor=executor,
+        ),
+        create_cve_search_tool(),
+    ]
+    # 把原 Brain 的「制定作战计划」职责并入首次 Recon：
+    # Recon 在完成侦察后直接用 SubmitPlan 登记结构化计划，省去单独的
+    # Brain 往返，并让计划与题型识别基于真实侦察证据。
+    if mission is not None and store is not None:
+        recon_tools.append(
+            create_submit_plan_tool(mission, store, event_callback)
+        )
+    toolkit = StrictJSONToolkit(tools=recon_tools)
     return Agent(
         name=NETWORK_RECON_EXPERT,
         system_prompt=NETWORK_RECON_SYS_PROMPT,
@@ -79,15 +90,22 @@ def create_artifact_triage_agent(
     state=None,
     artifact_root: str | Path | None = None,
     executor: "Any | None" = None,
+    mission: MissionState | None = None,
+    store: MissionStore | None = None,
+    event_callback=None,
 ) -> Agent:
     """创建文件分析 Agent，工作目录约束在 workdir 内。"""
-    toolkit = StrictJSONToolkit(
-        tools=[
-            create_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root, executor=executor),
-            create_tesseract_ocr_tool(workdir, timeout=min(timeout, 90), executor=executor),
-            create_tonydec_tool(workdir, executor=executor),
-        ],
-    )
+    recon_tools = [
+        create_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root, executor=executor),
+        create_tesseract_ocr_tool(workdir, timeout=min(timeout, 90), executor=executor),
+        create_tonydec_tool(workdir, executor=executor),
+    ]
+    # 把原 Brain 的「制定作战计划」职责并入首次 Recon（同上）。
+    if mission is not None and store is not None:
+        recon_tools.append(
+            create_submit_plan_tool(mission, store, event_callback)
+        )
+    toolkit = StrictJSONToolkit(tools=recon_tools)
     return Agent(
         name=ARTIFACT_TRIAGE_EXPERT,
         system_prompt=ARTIFACT_TRIAGE_SYS_PROMPT,

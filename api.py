@@ -672,27 +672,24 @@ def _attach_model_metadata(
     session: dict,
     runtime: RuntimeConfig | None = None,
 ) -> None:
-    """为会话补充前端可直接展示的思考强度和实际模型名称。"""
+    """为会话补充前端可直接展示的思考强度与实际模型名称。
+
+    选型已剔除 Low/Min/Max 固定层级：``model`` 存具体模型名（空时用
+    提供商默认），``thinking_intensity`` 存思考强度。
+    """
     provider = str(session.get("provider") or "deepseek").strip().lower()
-    stored_model = str(session.get("model") or "Min").strip()
-    canonical_levels = {"low": "Low", "min": "Min", "max": "Max"}
-    model_level = canonical_levels.get(stored_model.lower())
-
-    if model_level is None:
-        # 兼容早期直接将真实模型名写入 model 字段的会话。
-        model_level = str(session.get("model_level") or "自定义")
-        model_name = stored_model
-    else:
+    stored_model = str(session.get("model") or "").strip()
+    thinking_intensity = str(session.get("thinking_intensity") or "medium").strip()
+    if not stored_model:
+        runtime = runtime or RuntimeConfig.from_env()
         try:
-            model_name = (runtime or RuntimeConfig.from_env()).model_name(
-                model_level,
-                provider=provider,
-            )
+            stored_model = runtime.default_model(provider)
         except (TypeError, ValueError):
-            model_name = stored_model
+            stored_model = "未指定"
 
-    session["model_level"] = model_level
-    session["model_name"] = model_name
+    session["model_level"] = thinking_intensity
+    session["thinking_intensity"] = thinking_intensity
+    session["model_name"] = stored_model
 
 
 # ── 长期记忆保存辅助函数 ──
@@ -719,11 +716,16 @@ def _save_long_term_memory(session_id, target, goal, phase, success, flag, summa
 # ── 运行并清理 ──
 
 async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, goal: str,
-                           model_ver: str, provider: str, callback, initial_context: str | None = None,
+                           model: str, thinking_intensity: str, provider: str, callback, initial_context: str | None = None,
                            nss_context: dict | None = None, resume: bool = False,
+                           vision: bool = False,
                            qwen_tool_call_mode: str | None = None,
                            auto_approve: bool = False):
-    """运行任务并处理清理逻辑。"""
+    """运行任务并处理清理逻辑。
+
+    ``model`` 为具体模型名称（空时用提供商默认），
+    ``thinking_intensity`` 为思考强度（off/low/medium/high）。
+    """
     status_val = "completed"
     phase = "completed"
     summary = ""
@@ -733,8 +735,10 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
     mission_end_sent = False
     try:
         mission_state = await run_mission(
-            target=target, goal=goal, model_ver=model_ver,
+            target=target, goal=goal, model=model or None,
+            thinking_intensity=thinking_intensity,
             provider=provider, event_callback=callback,
+            vision=vision,
             qwen_tool_call_mode=qwen_tool_call_mode,
             session_id=session_id, input_queue=ctx.input_queue,
             initial_context=initial_context,
@@ -1030,7 +1034,9 @@ class MissionStartRequest(BaseModel):
     target: str = Field(..., description="授权目标 IP / IP:端口 / 主机名 / 文件路径")
     goal: str = Field(default="获取 Flag", description="任务目标描述")
     provider: str = Field(default="deepseek", pattern="^[a-z][a-z0-9_-]{1,31}$", description="模型提供商标识")
-    model: str = Field(default="Min", pattern="^(Low|Min|Max)$", description="思考级别: Low | Min | Max；Zhipu 未显式指定时默认 Max")
+    model: str = Field(default="", max_length=300, description="具体模型名称；为空时使用该提供商默认模型")
+    thinking_intensity: str = Field(default="medium", pattern="^(off|low|medium|high)$", description="思考强度: off | low | medium | high")
+    vision: str = Field(default="", max_length=1, description="是否启用视觉: 1=是；为空表示否")
     qwen_tool_call_mode: str | None = Field(
         default=None, pattern="^(simple|standard)$",
         description="Qwen 工具调用难度: simple（扁平兼容）| standard（批量嵌套）",
@@ -1093,6 +1099,7 @@ class ModelAPIConfigPayload(BaseModel):
     dimensions: int = Field(default=0, ge=0, le=65536)
     pass_dimensions: bool = True
     enabled: bool = False
+    vision_enabled: bool = False
     settings: ModelRuntimeSettingsPayload = Field(default_factory=ModelRuntimeSettingsPayload)
 
 
@@ -1502,8 +1509,9 @@ async def knowledge_reindex(current_user: dict = Depends(get_current_user)):
 @app.post("/api/session/start")
 async def session_start(req: MissionStartRequest, current_user: dict = Depends(get_current_user)):
     """创建并启动新会话。"""
-    fields_set = getattr(req, "model_fields_set", set())
-    model_level = "Max" if req.provider == "zhipu" and "model" not in fields_set else req.model
+    model = req.model or ""
+    thinking_intensity = req.thinking_intensity
+    vision = req.vision == "1"
     enabled_providers = {
         item["provider"] for item in await asyncio.to_thread(active_llm_providers)
     }
@@ -1518,7 +1526,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     async with _session_creation_lock:
         fingerprint = (
             current_user["id"], authorized_target, req.goal.strip(),
-            req.provider, model_level, req.source_session_id or "",
+            req.provider, model, req.source_session_id or "",
         )
         now = time.monotonic()
         # 清除过期请求指纹，限制内存增长。
@@ -1558,7 +1566,9 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         target=authorized_target,
         goal=req.goal,
         provider=req.provider,
-        model=model_level,
+        model=model,
+        thinking_intensity=thinking_intensity,
+        vision=req.vision,
         title=f"[{session_id[:8]}] 安全测试任务",
         session_id=session_id,
     )
@@ -1584,11 +1594,13 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
 
     # 推送启动事件
     callback("mission_start", target=authorized_target, goal=req.goal,
-             provider=req.provider, model=model_level, qwen_tool_call_mode=req.qwen_tool_call_mode)
+             provider=req.provider, model=model, model_level=thinking_intensity,
+             thinking_intensity=thinking_intensity, model_name=model or "使用默认模型",
+             vision=vision)
 
     # 创建后台任务
     task = asyncio.create_task(
-        _run_and_cleanup(session_id, ctx, authorized_target, req.goal, model_level, req.provider, callback,
+        _run_and_cleanup(session_id, ctx, authorized_target, req.goal, model, thinking_intensity, req.provider, callback,
                          initial_context=initial_context, nss_context=req.nss_context,
                          qwen_tool_call_mode=req.qwen_tool_call_mode,
                          auto_approve=req.auto_approve)
@@ -2192,7 +2204,9 @@ async def resume_session(
     )
     goal = session.get("goal") or ""
     provider = session.get("provider") or "deepseek"
-    model = session.get("model") or "Min"
+    model = session.get("model") or ""
+    thinking_intensity = session.get("thinking_intensity") or "medium"
+    vision = bool(session.get("vision"))
     target = session.get("target") or ""
     ctx = SessionContext(
         session_id=session_id,
@@ -2203,8 +2217,8 @@ async def resume_session(
     callback = _make_session_callback(session_id, ctx)
     callback("mission_resume", target=target, goal=goal)
     task = asyncio.create_task(
-        _run_and_cleanup(session_id, ctx, target, goal, model, provider, callback,
-                         resume=True),
+        _run_and_cleanup(session_id, ctx, target, goal, model, thinking_intensity, provider, callback,
+                         resume=True, vision=vision),
     )
     ctx.task = task
     return {"session_id": session_id, "status": "resumed"}

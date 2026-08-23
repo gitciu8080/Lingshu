@@ -1015,6 +1015,50 @@ function useModelProviders() {
   useEffect(() => { void api.modelProviders().then((data) => setProviders(data.providers || [])).catch(() => setProviders([])); }, []);
   return providers;
 }
+function useModelConfigs() {
+  const [configs, setConfigs] = useState<ModelApiConfig[]>([]);
+  useEffect(() => { void api.modelConfigs("llm").then((data) => setConfigs((data?.configs as ModelApiConfig[]) || [])).catch(() => setConfigs([])); }, []);
+  return configs;
+}
+// 按提供商聚合可用模型名（剔除旧 Low/Min/Max 层级，改用具体模型名）。
+function useModelConfigOptions(provider: string) {
+  const configs = useModelConfigs();
+  return useMemo(() => {
+    if (!provider) return [];
+    const items = configs
+      .filter((c) => c.provider === provider && c.category === "llm")
+      .flatMap((c) => [c.model_name, c.model_min, c.model_max].filter(Boolean) as string[]);
+    const ordered = Array.from(new Set(items.map((m) => m.trim()))).filter((m) => m);
+    if (ordered.length) return ordered;
+    // 未配置具体模型时回退到占位提示（后端将使用提供商默认模型）
+    return [`未为 ${provider} 配置具体模型`];
+  }, [provider, configs]);
+}
+
+// 思考强度：off / low / medium / high，滑块索引 0~3 横向滑动，中等为默认。
+const INTENSITY_LEVELS: readonly string[] = ["off", "low", "medium", "high"];
+const INTENSITY_LABELS: Record<string, string> = { off: "关闭", low: "低", medium: "中", high: "高" };
+
+/** 思考强度进度条滑块（横向，底色跟随主题强调色）。
+ *  默认中等，拖动即切换 off/low/medium/high 并回调给父组件。 */
+function ThinkingIntensitySlider({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const idx = Math.max(0, Math.min(INTENSITY_LEVELS.length - 1, INTENSITY_LEVELS.indexOf(value)));
+  return (
+    <label className="intensity-slider">
+      <span className="intensity-title">思考强度 <b>{INTENSITY_LABELS[value] ?? value}</b></span>
+      <input
+        type="range"
+        className="intensity-range"
+        min="0"
+        max={INTENSITY_LEVELS.length - 1}
+        step="1"
+        value={idx}
+        onChange={(e) => onChange(INTENSITY_LEVELS[Number(e.target.value)])}
+        style={{ accentColor: "var(--accent)" }}
+      />
+    </label>
+  );
+}
 
 function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
   const providers = useModelProviders();
@@ -1024,14 +1068,16 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
     [submitting, setSubmitting] = useState(false),
     [goal, setGoal] = useState("获取 Flag"),
     [provider, setProvider] = useState(""),
-    [model, setModel] = useState("Min"),
+    [model, setModel] = useState(""),
+    [thinkingIntensity, setThinkingIntensity] = useState("medium"),
+    [vision, setVision] = useState(false),
     [qwenToolMode, setQwenToolMode] = useState("simple");
+  const modelOptions = useModelConfigOptions(provider);
   const submitLock = useRef(false);
   useEffect(() => {
     if (providers.length && !providers.some((item) => item.id === provider)) {
       const defaultProvider = providers[0].id;
       setProvider(defaultProvider);
-      setModel(defaultProvider === "zhipu" ? "Max" : "Min");
     }
   }, [providers, provider]);
   const submit = async (e: FormEvent) => {
@@ -1054,6 +1100,8 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
         goal,
         provider,
         model,
+        thinking_intensity: thinkingIntensity,
+        ...(vision ? { vision: "1" } : {}),
         ...(provider === "qwen" ? { qwen_tool_call_mode: qwenToolMode } : {}),
       });
       setOpen(false);
@@ -1127,7 +1175,7 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
                 模型提供商
                 <select
                   value={provider}
-                  onChange={(e) => { const next = e.target.value; setProvider(next); setModel(next === "zhipu" ? "Max" : "Min"); }}
+                  onChange={(e) => { const next = e.target.value; setProvider(next); }}
                   disabled={!providers.length}
                 >
                   {!providers.length && <option value="">未配置可用模型</option>}
@@ -1136,17 +1184,25 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
                 {!providers.length && <small>请先前往 /superadmin 启用一个大模型 API</small>}
               </label>
               <label>
-                思考级别
-                <select
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                >
-                  {["Low", "Min", "Max"].map((x) => (
-                    <option key={x}>{x}</option>
-                  ))}
+                模型
+                <select value={model} onChange={(e) => setModel(e.target.value)} disabled={!provider}>
+                  {provider && modelOptions.length === 1 && modelOptions[0].startsWith("未为") ? (
+                    <option value="">使用提供商默认模型</option>
+                  ) : (
+                    <option value="">未选择（使用默认模型）</option>
+                  )}
+                  {modelOptions.map((m) => m.startsWith("未为") ? null : <option key={m} value={m}>{m}</option>)}
                 </select>
+                {!model.length && provider && <small>未配置具体模型时，后端使用该提供商默认模型</small>}
               </label>
             </div>
+            <div className="select-row">
+              <ThinkingIntensitySlider value={thinkingIntensity} onChange={setThinkingIntensity} />
+            </div>
+            <label className="checkbox-row vision-row">
+              <input type="checkbox" checked={vision} onChange={(e) => setVision(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
+              启用视觉（允许图片输入，需提供商支持）
+            </label>
             {provider === "qwen" && <label>
               工具调用难度
               <select value={qwenToolMode} onChange={(e) => setQwenToolMode(e.target.value)}>
@@ -1184,10 +1240,13 @@ function RerunMission({
   const [target, setTarget] = useState(""),
     [goal, setGoal] = useState("获取 Flag"),
     [provider, setProvider] = useState("deepseek"),
-    [model, setModel] = useState("Min"),
+    [model, setModel] = useState(""),
+    [thinkingIntensity, setThinkingIntensity] = useState("medium"),
+    [vision, setVision] = useState(false),
     [qwenToolMode, setQwenToolMode] = useState("simple"),
     [withContext, setWithContext] = useState(true),
     [submitting, setSubmitting] = useState(false);
+  const modelOptions = useModelConfigOptions(provider);
   const submitLock = useRef(false);
 
   useEffect(() => {
@@ -1195,7 +1254,8 @@ function RerunMission({
     setTarget(String(source.target || ""));
     setGoal(String(source.goal || "获取 Flag"));
     setProvider(String(source.provider || "deepseek"));
-    setModel(String(source.model || "Min"));
+    setModel(String((source as Session).model || ""));
+    setThinkingIntensity(String((source as Session).model_level || "medium"));
     setWithContext(true);
   }, [open, source]);
 
@@ -1203,7 +1263,6 @@ function RerunMission({
     if (open && providers.length && !providers.some((item) => item.id === provider)) {
       const defaultProvider = providers[0].id;
       setProvider(defaultProvider);
-      setModel(defaultProvider === "zhipu" ? "Max" : "Min");
     }
   }, [open, providers, provider]);
 
@@ -1242,6 +1301,8 @@ function RerunMission({
         goal: goal.trim() || "获取 Flag",
         provider,
         model,
+        thinking_intensity: thinkingIntensity,
+        ...(vision ? { vision: "1" } : {}),
         ...(provider === "qwen" ? { qwen_tool_call_mode: qwenToolMode } : {}),
         ...(withContext ? { source_session_id: source.id } : {}),
       });
@@ -1304,7 +1365,7 @@ function RerunMission({
                 模型提供商
                 <select
                   value={provider}
-                  onChange={(event) => { const next = event.target.value; setProvider(next); setModel(next === "zhipu" ? "Max" : "Min"); }}
+                  onChange={(event) => { const next = event.target.value; setProvider(next); }}
                   disabled={!providers.length}
                 >
                   {!providers.length && <option value="">未配置可用模型</option>}
@@ -1313,16 +1374,20 @@ function RerunMission({
                 {!providers.length && <small>请先前往 /superadmin 启用一个大模型 API</small>}
               </label>
               <label>
-                思考级别
-                <select
-                  value={model}
-                  onChange={(event) => setModel(event.target.value)}
-                >
-                  {["Low", "Min", "Max"].map((value) => (
-                    <option key={value}>{value}</option>
-                  ))}
+                模型
+                <select value={model} onChange={(event) => setModel(event.target.value)} disabled={!provider}>
+                  {provider && modelOptions.length === 1 && modelOptions[0].startsWith("未为") ? (
+                    <option value="">使用提供商默认模型</option>
+                  ) : (
+                    <option value="">未选择（使用默认模型）</option>
+                  )}
+                  {modelOptions.map((m) => m.startsWith("未为") ? null : <option key={m} value={m}>{m}</option>)}
                 </select>
+                {!model.length && provider && <small>未配置具体模型时，后端使用该提供商默认模型</small>}
               </label>
+            </div>
+            <div className="select-row">
+              <ThinkingIntensitySlider value={thinkingIntensity} onChange={setThinkingIntensity} />
             </div>
             {provider === "qwen" && <label>
               工具调用难度
@@ -1341,6 +1406,10 @@ function RerunMission({
                 <b>携带前次任务上下文</b>
                 <small>复用已发现的服务、漏洞证据和攻击路径，避免重复侦察。</small>
               </span>
+            </label>
+            <label className="checkbox-row">
+              <input type="checkbox" checked={vision} onChange={(e) => setVision(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
+              启用视觉（允许图片输入，需提供商支持）
             </label>
             </fieldset>
             <div className="modal-actions">
@@ -1847,8 +1916,9 @@ type ModelDraft = ModelApiConfigInput & { clear_api_key?: boolean };
 function blankModelDraft(category: "llm" | "embedding"): ModelDraft {
   return category === "llm" ? {
     name: "", category, provider: "deepseek", api_style: "responses", base_url: "https://api.deepseek.com", gateway_mode: "base_url", native_tools: [],
-    api_key: "", model_low: "deepseek-v4-flash", model_min: "deepseek-v4-flash", model_max: "deepseek-v4-pro",
-    model_name: "", dimensions: 0, pass_dimensions: true, enabled: true,
+    api_key: "", model_low: "", model_min: "", model_max: "",
+    model_name: "deepseek-v4-flash", vision_model: "deepseek-v4-flash-vision-exp",
+    dimensions: 0, pass_dimensions: true, enabled: true,
     settings: { temperature: 0.7, top_p: 0.95, max_tokens: 0, max_retries: 3, context_size: 200000, timeout_seconds: 600, thinking_enabled: true },
   } : {
     name: "", category, provider: "openai-compatible", api_style: "embeddings", base_url: "",
@@ -1907,9 +1977,9 @@ function ModelConfigDialog({ editing, category, onClose, onSaved }: {
           <label>API Key<small>{editing?.has_api_key ? `当前 ${editing.api_key_masked}；留空则保持不变` : "将使用 Fernet 加密后保存"}</small><input type="password" value={draft.api_key || ""} onChange={(e) => change("api_key", e.target.value)} placeholder={editing?.has_api_key ? "留空保持现有密钥" : "sk-…"} autoComplete="new-password" disabled={!!draft.clear_api_key} /></label>
           {editing?.has_api_key && <label className="inline-danger"><input type="checkbox" checked={!!draft.clear_api_key} onChange={(e) => change("clear_api_key", e.target.checked)} /> 删除已保存 API Key</label>}
         </fieldset>
-        <fieldset className="model-form-section"><legend><i>03</i> Model</legend>{!embedding ? <><p className="field-help">灵枢按任务强度映射模型；Qwen 单模型端点仍会以 Min 名称作为服务端模型标识。</p><div className="model-form-grid three"><label>Low / 快速<input value={draft.model_low} onChange={(e) => change("model_low", e.target.value)} required /></label><label>Min / 平衡<input value={draft.model_min} onChange={(e) => change("model_min", e.target.value)} required /></label><label>Max / 深度<input value={draft.model_max} onChange={(e) => change("model_max", e.target.value)} required /></label></div></>
+        <fieldset className="model-form-section"><legend><i>03</i> Model</legend>{!embedding ? <><p className="field-help">指定该提供商的默认模型名；前端创建任务时可从中选择具体模型并单独指定思考强度（off/low/medium/high）。Qwen 单模型端点以 model_name 作为服务端模型标识。</p><div className="model-form-grid"><label>模型名称<input list={`model-presets-${category}`} value={draft.model_name} onChange={(e) => change("model_name", e.target.value)} required /></label></div><div className="model-form-grid three"><label>备用模型 1<small>前端可选</small><input value={draft.model_min} onChange={(e) => change("model_min", e.target.value)} placeholder="可选" /></label><label>备用模型 2<small>前端可选</small><input value={draft.model_max} onChange={(e) => change("model_max", e.target.value)} placeholder="可选" /></label><label>视觉模型<small>允许图片输入时回退</small><input value={draft.vision_model || ""} onChange={(e) => change("vision_model", e.target.value)} placeholder="可选" /></label></div></>
           : <div className="model-form-grid"><label>Embedding 模型<input value={draft.model_name} onChange={(e) => change("model_name", e.target.value)} required /></label><label>输出向量维度<small>必须与模型真实输出一致</small><input type="number" min={1} max={65536} value={draft.dimensions} onChange={(e) => change("dimensions", Number(e.target.value))} required /></label></div>}</fieldset>
-        <fieldset className="model-form-section"><legend><i>04</i> Parameters</legend>{!embedding && <><div className="model-form-grid three"><label>Temperature<small>0 稳定 · 2 发散</small><input type="number" min={0} max={2} step={0.05} value={draft.settings.temperature} onChange={(e) => changeSetting("temperature", Number(e.target.value))} /></label><label>Top P<small>核采样范围</small><input type="number" min={0.01} max={1} step={0.01} value={draft.settings.top_p} onChange={(e) => changeSetting("top_p", Number(e.target.value))} /></label><label>Max Tokens<small>0 使用服务端默认值</small><input type="number" min={0} max={1048576} value={draft.settings.max_tokens} onChange={(e) => changeSetting("max_tokens", Number(e.target.value))} /></label></div><label className="inline-toggle"><input type="checkbox" checked={draft.settings.thinking_enabled} onChange={(e) => changeSetting("thinking_enabled", e.target.checked)} /><span><b>启用推理能力</b><small>Low 始终关闭；Min/Max 纯文本开启；带 tools 的调用强制关闭</small></span></label></>}
+        <fieldset className="model-form-section"><legend><i>04</i> Parameters</legend>{!embedding && <><div className="model-form-grid three"><label>Temperature<small>0 稳定 · 2 发散</small><input type="number" min={0} max={2} step={0.05} value={draft.settings.temperature} onChange={(e) => changeSetting("temperature", Number(e.target.value))} /></label><label>Top P<small>核采样范围</small><input type="number" min={0.01} max={1} step={0.01} value={draft.settings.top_p} onChange={(e) => changeSetting("top_p", Number(e.target.value))} /></label><label>Max Tokens<small>0 使用服务端默认值</small><input type="number" min={0} max={1048576} value={draft.settings.max_tokens} onChange={(e) => changeSetting("max_tokens", Number(e.target.value))} /></label></div><label className="inline-toggle"><input type="checkbox" checked={draft.settings.thinking_enabled} onChange={(e) => changeSetting("thinking_enabled", e.target.checked)} /><span><b>启用推理能力</b><small>off 关闭推理；文本模式开启；带 tools 的调用强制关闭</small></span></label></>}
           <details className="model-advanced"><summary>高级运行参数</summary><div className="model-form-grid three"><label>Max Retries<input type="number" min={0} max={10} value={draft.settings.max_retries} onChange={(e) => changeSetting("max_retries", Number(e.target.value))} /></label><label>Context Size<input type="number" min={1024} max={10485760} value={draft.settings.context_size} onChange={(e) => changeSetting("context_size", Number(e.target.value))} /></label><label>Timeout / 秒<input type="number" min={1} max={3600} value={draft.settings.timeout_seconds} onChange={(e) => changeSetting("timeout_seconds", Number(e.target.value))} disabled={embedding} /></label></div></details>
         </fieldset>
         <section className="model-policy"><b>灵枢运行策略</b><span>Streaming {embedding ? "—" : "ON"}</span><span>TOOLS STATE-GUARDED</span><span>Formatter PROVIDER DEFAULT</span><small>为保证实时消息、状态机顺序和 DeepSeek reasoning_item_id 一致性，这些参数由系统锁定。</small></section>
@@ -1945,7 +2015,7 @@ function SuperAdminPage() {
       {tab === "users" ? <><section className="superadmin-stats"><article><span>USERS_TOTAL</span><b>{users.length}</b><i /></article><article><span>SUPERADMIN</span><b>{users.filter((user) => user.role === "superadmin").length}</b><i /></article><article><span>LOGGED_IN</span><b>{users.filter((user) => user.last_login).length}</b><i /></article><article className="danger"><span>FILTERED_VIEW</span><b>{filteredUsers.length}</b><i /></article></section>
         <section className="superadmin-database"><header><div><h2>USER_DATABASE</h2><em>共 {users.length} 条账户记录</em></div><div className="superadmin-toolbar"><label><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索 UID / 用户名 / 邮箱…" /></label><button type="button" className="quiet-button" onClick={() => void loadData()} disabled={loading}>{loading ? "刷新中…" : "刷新"}</button></div></header><div className="superadmin-table-wrap"><table className="superadmin-table"><thead><tr><th>UID</th><th>用户 / USER</th><th>联系方式</th><th>角色权限</th><th>创建时间</th><th>最近登录</th><th>操作</th></tr></thead><tbody>{filteredUsers.map((user) => <tr key={user.id}><td><code>#{user.id}</code></td><td><div className="superadmin-user"><span>{user.username.slice(0, 1).toUpperCase()}</span><div><b>{user.username}</b><small>{user.role === "superadmin" ? "ROOT ACCESS" : "STANDARD ACCOUNT"}</small></div></div></td><td>{user.email || "--"}</td><td><span className={`role-badge ${user.role}`}>{user.role}</span></td><td>{user.created_at || "--"}</td><td><span className={user.last_login ? "login-state online" : "login-state"}><i />{user.last_login || "从未登录"}</span></td><td className="user-actions"><button type="button" className="quiet-button" onClick={() => { setTarget(user); setNewPassword(""); }}>重置密码</button>{user.role !== "superadmin" && <button type="button" className="danger-button compact" onClick={() => void removeUser(user)}><Trash2 size={13} /> 删除</button>}</td></tr>)}</tbody></table>{!loading && !filteredUsers.length && <p className="empty-note">未找到匹配的用户记录</p>}</div><footer><span>DATABASE STATUS: {loading ? "SYNCING" : "READY"}</span><span>DISPLAYING {filteredUsers.length} / {users.length}</span></footer></section></>
         : <><section className="superadmin-stats"><article><span>{category.toUpperCase()}_TOTAL</span><b>{configs.filter((item) => item.category === category).length}</b><i /></article><article><span>ENABLED</span><b>{configs.filter((item) => item.category === category && item.enabled).length}</b><i /></article><article><span>WITH_API_KEY</span><b>{configs.filter((item) => item.category === category && item.has_api_key).length}</b><i /></article><article className="danger"><span>PROVIDERS</span><b>{new Set(configs.filter((item) => item.category === category).map((item) => item.provider)).size}</b><i /></article></section>
-          <section className="superadmin-database"><header><div><h2>{category === "llm" ? "LLM_ENDPOINTS" : "EMBEDDING_ENDPOINTS"}</h2><em>启用项优先覆盖服务器 .env</em></div><div className="superadmin-toolbar"><label><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索名称 / 类型 / 地址…" /></label><button className="danger-button compact add-model" onClick={() => setEditor({ category, config: null })}><Plus size={14} /> 添加配置</button></div></header><div className="superadmin-table-wrap"><table className="superadmin-table model-config-table"><thead><tr><th>状态</th><th>配置 / PROVIDER</th><th>API 地址</th><th>模型</th><th>API Key</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{visibleConfigs.map((item) => <tr key={item.id}><td><span className={item.enabled ? "endpoint-state enabled" : "endpoint-state"}><i />{item.enabled ? "启用" : "停用"}</span></td><td><div className="superadmin-user"><span>{item.category === "llm" ? "AI" : "E"}</span><div><b>{item.name}</b><small>{item.provider} · {item.api_style}</small></div></div></td><td><code className="endpoint-url">{item.base_url}</code></td><td>{item.category === "llm" ? <small className="model-stack">LOW {item.model_low}<br />MIN {item.model_min}<br />MAX {item.model_max}</small> : <small className="model-stack">{item.model_name}<br />DIM {item.dimensions}</small>}</td><td><code>{item.api_key_masked}</code></td><td>{item.updated_at || "--"}</td><td className="user-actions"><button className="quiet-button" onClick={() => setEditor({ category: item.category, config: item })}>修改</button><button className="danger-button compact" onClick={() => void removeConfig(item)}><Trash2 size={13} /> 删除</button></td></tr>)}</tbody></table>{!loading && !visibleConfigs.length && <p className="empty-note">尚无模型 API 配置，请点击“添加配置”</p>}</div><footer><span>SECRETS: ENCRYPTED AT REST</span><span>DISPLAYING {visibleConfigs.length}</span></footer></section></>}
+          <section className="superadmin-database"><header><div><h2>{category === "llm" ? "LLM_ENDPOINTS" : "EMBEDDING_ENDPOINTS"}</h2><em>启用项优先覆盖服务器 .env</em></div><div className="superadmin-toolbar"><label><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索名称 / 类型 / 地址…" /></label><button className="danger-button compact add-model" onClick={() => setEditor({ category, config: null })}><Plus size={14} /> 添加配置</button></div></header><div className="superadmin-table-wrap"><table className="superadmin-table model-config-table"><thead><tr><th>状态</th><th>配置 / PROVIDER</th><th>API 地址</th><th>模型</th><th>API Key</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{visibleConfigs.map((item) => <tr key={item.id}><td><span className={item.enabled ? "endpoint-state enabled" : "endpoint-state"}><i />{item.enabled ? "启用" : "停用"}</span></td><td><div className="superadmin-user"><span>{item.category === "llm" ? "AI" : "E"}</span><div><b>{item.name}</b><small>{item.provider} · {item.api_style}</small></div></div></td><td><code className="endpoint-url">{item.base_url}</code></td><td>{item.category === "llm" ? <small className="model-stack">{item.model_name}</small> : <small className="model-stack">{item.model_name}<br />DIM {item.dimensions}</small>}</td><td><code>{item.api_key_masked}</code></td><td>{item.updated_at || "--"}</td><td className="user-actions"><button className="quiet-button" onClick={() => setEditor({ category: item.category, config: item })}>修改</button><button className="danger-button compact" onClick={() => void removeConfig(item)}><Trash2 size={13} /> 删除</button></td></tr>)}</tbody></table>{!loading && !visibleConfigs.length && <p className="empty-note">尚无模型 API 配置，请点击“添加配置”</p>}</div><footer><span>SECRETS: ENCRYPTED AT REST</span><span>DISPLAYING {visibleConfigs.length}</span></footer></section></>}
     </section>
     <Dialog.Root open={!!target} onOpenChange={(open) => !open && setTarget(null)}><Dialog.Portal><Dialog.Overlay className="overlay superadmin-reset-overlay" /><Dialog.Content className="modal superadmin-reset-modal"><Dialog.Title>重置用户密码</Dialog.Title><Dialog.Description>将立即使该用户当前所有登录状态失效。</Dialog.Description><form onSubmit={resetPassword}><label>用户<input value={target?.username || ""} disabled /></label><label>新密码（至少 8 位）<input value={newPassword} type="password" minLength={8} onChange={(e) => setNewPassword(e.target.value)} required autoFocus /></label><div className="modal-actions"><button type="button" className="quiet-button" onClick={() => setTarget(null)}>取消</button><button type="submit" className="danger-button">确认重置</button></div></form></Dialog.Content></Dialog.Portal></Dialog.Root>
     {editor && <ModelConfigDialog editing={editor.config} category={editor.category} onClose={() => setEditor(null)} onSaved={() => void loadData()} />}
@@ -2006,14 +2076,18 @@ function ConsoleApp() {
   const toolEvents = eventStore.sessionId === active ? eventStore.toolItems : [];
   const phase = String(detail.phase || current?.phase || "");
   const modelLevel = String(
-    detail.model_level || detail.model || current?.model_level || current?.model || "Min",
+    detail.model_level || detail.model || current?.model_level || current?.model || "medium",
   );
+  const MODEL_INTENSITY_LABEL: Record<string, string> = {
+    off: "关闭推理", low: "低强度", medium: "中强度", high: "高强度",
+  };
+  const intensityLabel = MODEL_INTENSITY_LABEL[modelLevel] ?? modelLevel;
   const modelName = String(detail.model_name || current?.model_name || "--");
   const modelDisplay =
-    modelName && modelName !== "--" && modelName !== modelLevel
-      ? `${modelLevel} · ${modelName}`
+    modelName && modelName !== "--"
+      ? `${intensityLabel} · ${modelName}`
       : modelName === "--"
-        ? modelLevel
+        ? intensityLabel
         : modelName;
   const isLive = current?.is_live === true;
   activeSessionRef.current = active;

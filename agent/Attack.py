@@ -18,7 +18,7 @@ from agentscope.permission import PermissionBehavior, PermissionDecision
 
 from Tools.CVE_Search import cve_search
 from Tools.OCR import create_tesseract_ocr_tool
-from Tools.SageMath import execute_sagemath        
+from Tools.SageMath import create_sagemath_tool
 from Tools.ScopeRegistry import ScopeRegistry
 from Tools.TonyDec import create_tonydec_tool
 from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool
@@ -247,7 +247,7 @@ async def create_attack_agent(
     toolkit = StrictJSONToolkit(
         tools=[
             AllowedFunctionTool(cve_search, is_read_only=True),
-            AllowedFunctionTool(execute_sagemath, is_read_only=True), 
+            create_sagemath_tool(project_dir, timeout=min(timeout, 300), executor=executor),
             create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="attack", artifact_root=artifact_root, executor=executor),
             create_tesseract_ocr_tool(project_dir, timeout=min(timeout, 90), executor=executor),
             create_tonydec_tool(project_dir, executor=executor),

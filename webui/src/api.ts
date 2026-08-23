@@ -54,6 +54,7 @@ export type ModelApiConfig = {
   model_min: string;
   model_max: string;
   model_name: string;
+  vision_model?: string;
   dimensions: number;
   pass_dimensions: boolean;
   enabled: boolean;

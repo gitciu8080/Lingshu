@@ -561,3 +561,10 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
   .intel-grid .plan-list{max-height:420px;overflow-y:auto;overflow-x:hidden}
   .intel-grid .agent-roster{max-height:360px;overflow-y:auto;overflow-x:hidden}
 }
+
+/* 思考强度进度条滑块：横向，底色跟随主题强调色(--accent)，中等为默认 */
+.intensity-slider{display:flex;flex-direction:column;gap:6px}
+.intensity-title{font-size:10px;color:var(--dim);display:flex;align-items:baseline;gap:8px}
+.intensity-title b{color:var(--accent);font-weight:700}
+.intensity-range{width:100%;height:6px;cursor:pointer;accent-color:var(--accent)}
+.vision-row{margin-top:10px}

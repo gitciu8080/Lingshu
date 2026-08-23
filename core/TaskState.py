@@ -75,7 +75,9 @@ class Phase(str, Enum):
 
 
 _ALLOWED_TRANSITIONS = {
-    Phase.PLANNING: {Phase.RECON, Phase.FAILED, Phase.CANCELLED},
+    # 首次侦察已合并进规划步骤（Recon 在制定计划的同时完成初始侦察），
+    # 故允许 PLANNING 直接转入 ANALYSIS，避免冗余复派侦察。
+    Phase.PLANNING: {Phase.ANALYSIS, Phase.RECON, Phase.FAILED, Phase.CANCELLED},
     Phase.RECON: {Phase.RECON, Phase.ANALYSIS, Phase.FAILED, Phase.CANCELLED},
     Phase.ANALYSIS: {
         Phase.RECON,

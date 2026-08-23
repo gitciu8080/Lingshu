@@ -66,39 +66,19 @@ class RuntimeConfig:
     # base_url: AgentScope 自动请求 /responses；full_endpoint: 平台把完整
     # /responses 端点注册为网关，实际请求网关根路径以避免重复追加。
     deepseek_gateway_mode: str = "base_url"
-    deepseek_model_low: str = "deepseek-v4-flash"       # 低推理（chat 已弃用合并为 flash）
-    deepseek_model_min: str = "deepseek-v4-flash"       # 默认
-    deepseek_model_max: str = "deepseek-v4-pro"         # 深度推理
+    deepseek_model_low: str = "deepseek-v4-flash"       # 可选模型之一
+    deepseek_model_min: str = "deepseek-v4-flash"       # 默认模型
+    deepseek_model_max: str = "deepseek-v4-pro"         # 可选模型之一
+    deepseek_model_default: str = "deepseek-v4-flash"   # 未指定模型时的回退
+    # 视觉模型；vision 请求未显式指定模型时回退到它。
+    deepseek_vision_model: str = "deepseek-v4-flash-vision-exp"
     deepseek_web_search: bool = False                   # Responses API 服务端联网搜索开关
-    # V4 Flash / Pro 均走 OpenAI Responses 协议；可由环境变量覆盖，兼容
+    # V4 Flash / Pro / 视觉均走 OpenAI Responses 协议；可由环境变量覆盖，兼容
     # 尚未提供 Responses 端点的私有网关。
     deepseek_responses_models: tuple[str, ...] = ("deepseek-v4-flash", "deepseek-v4-pro")
     deepseek_native_tools: tuple[str, ...] = ()
     deepseek_model_settings: dict[str, object] = field(default_factory=dict)
 
-    # ── 智谱 GLM（OpenAI 兼容 API）──
-    zhipu_api_key: str = ""
-    zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
-    zhipu_model_low: str = "glm-5.3"
-    zhipu_model_min: str = "glm-5.3"
-    zhipu_model_max: str = "glm-5.3"
-    # 兼容旧配置字段；内置 Zhipu 工厂现已固定使用 Responses。
-    zhipu_responses_models: tuple[str, ...] = ("glm-5.3",)
-    zhipu_native_tools: tuple[str, ...] = ()
-    zhipu_gateway_mode: str = "base_url"
-    zhipu_model_settings: dict[str, object] = field(default_factory=dict)
-
-    # ── Qwen (llama.cpp OpenAI 兼容) ──
-    qwen_api_key: str = ""
-    qwen_base_url: str = "http://10.8.128.100:8200/v1"
-    qwen_model: str = "/mnt/nvme0n1p1/llama.cppModels/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
-    # llama.cpp repeat_penalty：>1.0 惩罚重复 token，越高抑制越强。
-    # 默认保持温和惩罚；显式配置超过 1.2 仅告警，不静默篡改操作员配置。
-    qwen_repeat_penalty: float = 1.08
-    # simple 使用扁平、逐条工具参数，适配 AgentWorld 等本地 Qwen；
-    # standard 使用当前的批量嵌套参数协议，适合工具 JSON 能力更强的模型。
-    qwen_tool_call_mode: str = "simple"
-    qwen_model_settings: dict[str, object] = field(default_factory=dict)
     # Superadmin 注册的其它 OpenAI-compatible Provider。
     custom_llm_configs: dict[str, dict[str, object]] = field(default_factory=dict)
 
@@ -157,6 +137,12 @@ class RuntimeConfig:
             deepseek_model_low=os.getenv("DEEPSEEK_MODEL_LOW", "deepseek-v4-flash"),
             deepseek_model_min=os.getenv("DEEPSEEK_MODEL_MIN", "deepseek-v4-flash"),
             deepseek_model_max=os.getenv("DEEPSEEK_MODEL_MAX", "deepseek-v4-pro"),
+            deepseek_model_default=os.getenv(
+                "DEEPSEEK_MODEL_DEFAULT", "deepseek-v4-flash",
+            ),
+            deepseek_vision_model=os.getenv(
+                "DEEPSEEK_VISION_MODEL", "deepseek-v4-flash-vision-exp",
+            ),
             deepseek_web_search=os.getenv("DEEPSEEK_WEB_SEARCH", "0").strip().lower()
             in ("1", "true", "yes", "on"),
             deepseek_responses_models=tuple(
@@ -166,30 +152,6 @@ class RuntimeConfig:
                 ).split(",")
                 if m.strip()
             ),
-            # 智谱 GLM
-            zhipu_api_key=os.getenv("ZHIPU_API_KEY", os.getenv("ZAI_API_KEY", "")).strip(),
-            zhipu_base_url=os.getenv(
-                "ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4",
-            ).rstrip("/"),
-            zhipu_model_low=os.getenv("ZHIPU_MODEL_LOW", "glm-5.3"),
-            zhipu_model_min=os.getenv("ZHIPU_MODEL_MIN", "glm-5.3"),
-            zhipu_model_max=os.getenv("ZHIPU_MODEL_MAX", "glm-5.3"),
-            zhipu_responses_models=tuple(
-                m.strip() for m in os.getenv("ZHIPU_RESPONSES_MODELS", "glm-5.3").split(",") if m.strip()
-            ),
-            zhipu_native_tools=tuple(
-                m.strip().lower() for m in os.getenv("ZHIPU_NATIVE_TOOLS", "").split(",") if m.strip()
-            ),
-            zhipu_gateway_mode=os.getenv("ZHIPU_GATEWAY_MODE", "base_url").strip().lower(),
-            # Qwen
-            qwen_api_key=os.getenv("QWEN_API_KEY", "sk-placeholder").strip(),
-            qwen_base_url=os.getenv("QWEN_BASE_URL", "http://10.8.128.108:8200/v1").rstrip("/"),
-            qwen_model=os.getenv(
-                "QWEN_MODEL",
-                "/mnt/nvme0n1p1/llama.cppModels/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
-            ),
-            qwen_repeat_penalty=qwen_repeat_penalty,
-            qwen_tool_call_mode=qwen_tool_call_mode,
             embedding_api_key=os.getenv("LINGSHU_EMBEDDING_API_KEY", "").strip(),
             embedding_base_url=os.getenv("LINGSHU_EMBEDDING_BASE_URL", "").strip().rstrip("/"),
             embedding_model=os.getenv("LINGSHU_EMBEDDING_MODEL", "").strip(),
@@ -236,64 +198,35 @@ class RuntimeConfig:
             return "LINGSHU_EMBEDDING_DIMENSIONS 必须为正整数"
         return None
 
-    def model_name(self, version: str, provider: str = "deepseek") -> str:
-        """根据提供商和思考级别返回模型名称。"""
-        if provider == "qwen":
-            return self.qwen_model  # 单一模型，不随级别变化
-        if provider == "zhipu":
-            mapping = {
-                "Low": self.zhipu_model_low,
-                "Min": self.zhipu_model_min,
-                "Max": self.zhipu_model_max,
-            }
-            try:
-                return mapping[version]
-            except KeyError as exc:
-                raise ValueError(f"不支持的思考级别: {version}，可选 Low/Min/Max") from exc
-        if provider != "deepseek":
-            config = self.custom_llm_configs.get(provider)
-            if not config:
-                raise ValueError(f"模型提供商未启用或不存在: {provider}")
-            key = {"Low": "model_low", "Min": "model_min", "Max": "model_max"}.get(version)
-            if key is None:
-                raise ValueError(f"不支持的思考级别: {version}，可选 Low/Min/Max")
-            return str(config.get(key) or "")
-        mapping = {
-            "Low": self.deepseek_model_low,
-            "Min": self.deepseek_model_min,
-            "Max": self.deepseek_model_max,
-        }
-        try:
-            return mapping[version]
-        except KeyError as exc:
-            raise ValueError(f"不支持的思考级别: {version}，可选 Low/Min/Max") from exc
+    def default_model(self, provider: str) -> str:
+        """返回提供商未指定模型时的回退模型名。"""
+        if provider == "deepseek":
+            return self.deepseek_model_default
+        config = self.custom_llm_configs.get(provider)
+        if not config:
+            raise ValueError(f"模型提供商未启用或不存在: {provider}")
+        return str(config.get("model_name") or "")
+
+    def vision_model(self, provider: str) -> str:
+        """返回提供商的视觉模型名（未指定 vision 模型时回退）。"""
+        if provider == "deepseek":
+            return self.deepseek_vision_model
+        return ""
 
     def model_settings(self, provider: str) -> dict[str, object]:
         """返回管理员为对应提供商启用的 AgentScope 构造/生成参数。"""
-        if provider == "qwen":
-            return self.qwen_model_settings
         if provider == "deepseek":
             return self.deepseek_model_settings
-        if provider == "zhipu":
-            return self.zhipu_model_settings
         return dict(self.custom_llm_configs.get(provider, {}).get("settings") or {})
 
     def get_api_key(self, provider: str) -> str:
         """返回对应提供商的 API Key。"""
-        if provider == "qwen":
-            return self.qwen_api_key
-        if provider == "zhipu":
-            return self.zhipu_api_key
-        if provider != "deepseek":
-            return str(self.custom_llm_configs.get(provider, {}).get("api_key") or "")
-        return self.deepseek_api_key
+        if provider == "deepseek":
+            return self.deepseek_api_key
+        return str(self.custom_llm_configs.get(provider, {}).get("api_key") or "")
 
     def get_base_url(self, provider: str) -> str:
         """返回对应提供商的 Base URL。"""
-        if provider == "qwen":
-            return self.qwen_base_url
-        if provider == "zhipu":
-            return self.zhipu_base_url
-        if provider != "deepseek":
-            return str(self.custom_llm_configs.get(provider, {}).get("base_url") or "")
-        return self.deepseek_base_url
+        if provider == "deepseek":
+            return self.deepseek_base_url
+        return str(self.custom_llm_configs.get(provider, {}).get("base_url") or "")

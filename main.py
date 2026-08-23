@@ -3,7 +3,8 @@
 
 v0.2.0 数据流:
   parse_target() → prepare_workspace() → initial_classify()
-  → Brain(含分类结果) → Orchestrator(根据 kind 路由 Recon/Triage)
+  → Recon(先侦察后制定计划，合并原 Brain 职责)（含分类结果）
+  → Orchestrator(根据 kind 路由 Recon/Triage)
   → post_recon_classify() → 创建 Attack(动态加载 Skill) → Writeup
 """
 from __future__ import annotations
@@ -31,17 +32,14 @@ from agentscope.message import UserMsg  # AgentScope 用户消息封装
 from agentscope.types import ReplyFinishedReason
 
 from core.config import RuntimeConfig  # 运行时配置（API Key、超时等，从环境变量读取）
-from LLM.model import (  # 创建 LLM 模型实例（deepseek / qwen）
-    QwenModelUnavailableError,
+from LLM.model import (  # 创建 LLM 模型实例（deepseek）
     create_model,
-    resolve_qwen_model,
 )
 from core.TaskState import MissionState, MissionStore, Phase  # 任务状态、持久化存储、阶段枚举
 from agent.Analysis import create_analysis_agent  # 漏洞研判专家（纯推理）
 from Tools.archive import safe_extract, SafeExtractError  # 安全解压（防路径穿越等）
 from agent.Attack import close_attack_agent, create_attack_agent  # 攻击手 Agent（分析 + 利用）
-from agent.Brain import create_brain_agent  # 战略规划 Agent
-from agent.categorize import classify  # 题型自动分类（CTF 题型识别）
+from agent.categorize import classify, reclassify  # 题型自动分类（initial / post_recon）
 from agent.Orchestrator import create_orchestrator_agent  # 战术调度核心 Agent
 from agent.Recon import (
     create_artifact_triage_agent,  # 文件/归档目标的侦察（triage）Agent
@@ -51,11 +49,7 @@ from agent.Summary import SUMMARY_EXPERT, create_summary_agent  # 对话总结�
 from agent.Reserve import close_reverse_agent, create_reverse_agent  # 逆向分析 Agent（IDA MCP）
 from agent.ScopeAuditor import create_scope_auditor_agent  # IP 授权审核 Agent
 from agent.experts import build_expert_assignments
-from Tools.Plan import (  # Brain 计划登记工具
-    create_add_plan_tool,
-    create_submit_plan_tool,
-    push_plan_update,
-)
+from Tools.Plan import push_plan_update  # 计划变更推送前端（SSE）
 from Tools.Report import generate_mission_pdf  # 任务总结 PDF 报告生成
 from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
 from Tools.KnowledgeBase import get_rag_service
@@ -307,9 +301,9 @@ def _iter_budget(
 
     Args:
         kind: 目标类型（network/archive/single_file/directory）。
-        role: 角色（recon/attack/reserve/brain）。
+        role: 角色（recon/attack/reserve）。
         model_ver: 思考级别（Low/Min/Max）。
-        plan_items: 已登记的结构化计划条目数（Brain 运行前为 0）。
+        plan_items: 已登记的结构化计划条目数（未登记时为 0）。
     """
     base = _ROLE_BASE_BUDGET.get(kind, _ROLE_BASE_BUDGET["directory"])[role]
     # 计划越复杂给越多迭代（每 2 条计划 +2 轮，封顶 +8）
@@ -443,7 +437,9 @@ async def run_summary_report(
     mission: MissionState,
     *,
     provider: str,
-    model_ver: str,
+    model: str = "",
+    thinking_intensity: str = "medium",
+    model_ver: str = "",
     messages: list[dict],
     event_callback: Callable[[str, dict[str, Any]], None] | None,
     reports_dir: Path,
@@ -490,7 +486,8 @@ async def run_summary_report(
         runtime = RuntimeConfig.from_env()
         model = create_model(
             provider=provider,
-            Ver=model_ver,
+            model=model or None,
+            thinking_intensity=thinking_intensity,
             temperature=0.2,
             web_search=False,
             config=runtime,
@@ -569,7 +566,9 @@ async def _finalize_summary_report(
     mission: MissionState,
     *,
     provider: str,
-    model_ver: str,
+    model: str = "",
+    thinking_intensity: str = "medium",
+    model_ver: str = "",
     messages: list[dict],
     event_callback: Callable[[str, dict[str, Any]], None] | None,
     reports_dir: Path,
@@ -593,6 +592,8 @@ async def _finalize_summary_report(
         await run_summary_report(
             mission,
             provider=provider,
+            model=model or None,
+            thinking_intensity=thinking_intensity,
             model_ver=model_ver,
             messages=messages,
             event_callback=event_callback,
@@ -904,7 +905,9 @@ def _extract_declared_network_targets(text: str) -> list[str]:
 async def run_mission(
     target: str,
     goal: str,
-    model_ver: str = "Min",
+    model: str = "",
+    thinking_intensity: str = "medium",
+    model_ver: str = "",
     provider: str = "deepseek",
     qwen_tool_call_mode: str | None = None,
     event_callback: Callable[[str, dict[str, Any]], None] | None = None,
@@ -918,18 +921,20 @@ async def run_mission(
     resume: bool = False,
     user_id: int | None = None,
     auto_approve: bool = False,
+    vision: bool = False,
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
     整体流程（详见各阶段注释）:
       1. 解析并规范化目标（normalize_target）
       2. 准备工作目录（归档目标安全解压）
-      3. 初始题型分类（classify，供 Brain 与 Attack 参考）
+      3. 初始题型分类（classify，供 Attack 参考）
       4. 初始化运行时配置与任务状态，持久化到 .TaskMemory/
-      5. 创建模型与基础 Agent（Brain / Analysis）
-      6. 按目标类型路由创建 Recon（网络侦察 或 文件 triage）
-      7. Brain 制定战略计划（可提出题型修正建议，但无权修改）
-      8. 延迟创建 Attack（等待可能的 reclassify 结果）
+      5. 创建模型与基础 Agent（Analysis）
+      6. 按目标类型路由创建 Recon（网络侦察 或 文件 triage，携带 SubmitPlan）
+      7. Recon 先侦察后制定战略计划（合并原 Brain 职责；可提出题型修正建议，
+         并由侦察证据触发 reclassify 提升初始题目识别准确性）
+      8. 延迟创建 Attack（携带分类结果，动态加载 Skill）
       9. Orchestrator 主循环调度，直至任务进入终态
 
     Args:
@@ -950,7 +955,7 @@ async def run_mission(
     Returns:
         最终任务状态 MissionState（含 plan / flag / success 等）
     """
-    model_ver = model_ver or ("Max" if provider == "zhipu" else "Min")
+    model_ver = model_ver or ({"low": "Low", "medium": "Min", "high": "Max"}.get(thinking_intensity.strip().lower(), "Min"))
     # ── 1. 解析目标 ──
     # normalize_target 负责把原始输入规范化为 TargetSpec，
     # 自动识别类型（network/archive/single_file/directory）并校验授权范围。
@@ -994,11 +999,6 @@ async def run_mission(
     # ── 4. 运行时配置与任务状态初始化 ──
     # RuntimeConfig 从环境变量读取（API Key、命令超时等）
     runtime = RuntimeConfig.from_env()
-    if qwen_tool_call_mode is not None:
-        selected_mode = qwen_tool_call_mode.strip().lower()
-        if selected_mode not in {"simple", "standard"}:
-            raise ValueError("Qwen 工具调用模式仅支持 simple 或 standard")
-        runtime = replace(runtime, qwen_tool_call_mode=selected_mode)
     project_dir = Path(__file__).resolve().parent
     # 任务状态持久化：有 session_id 时使用独立会话路径，否则使用默认路径
     if session_id:
@@ -1080,8 +1080,8 @@ async def run_mission(
         )
         # 记录任务创建事件并立即持久化（防止后续异常丢失状态）
         mission.record(
-            "system", "mission_created", model=f"{provider}/{model_ver}",
-            qwen_tool_call_mode=(runtime.qwen_tool_call_mode if provider == "qwen" else None),
+            "system", "mission_created", model=f"{provider}/{model or model_ver}",
+            thinking_intensity=thinking_intensity,
         )
         if event_callback is not None:
             mission.bind_phase_callback(
@@ -1324,63 +1324,24 @@ async def run_mission(
                     )
 
         # ── 5. 模型与基础 Agent ──
-        # Qwen 启动前必须核对 llama.cpp 实际加载的模型。只有服务端唯一模型
-        # 才允许替代不存在的配置别名，并将解析结果写入审计链。
-        if provider == "qwen":
-            resolved_model, alias_resolved = await resolve_qwen_model(runtime)
-            if alias_resolved:
-                configured_model = runtime.qwen_model
-                runtime = replace(runtime, qwen_model=resolved_model)
-                mission.record(
-                    "system",
-                    "model_alias_resolved",
-                    provider="qwen",
-                    configured_model=configured_model,
-                    resolved_model=resolved_model,
-                )
-                store.save(mission)
-                if event_callback is not None:
-                    event_callback(
-                        "model_alias_resolved",
-                        provider="qwen",
-                        configured_model=configured_model,
-                        resolved_model=resolved_model,
-                        agent="system",
-                    )
-
-        # 创建混合模型策略：主模型用于 Attack/Reserve/Orchestrator 等核心角色，
-        # 轻量模型（固定 Low 级别）用于 Brain/Recon/Summary/Analysis/ScopeAuditor，
-        # 在保持关键决策质量的同时加速辅助角色。Qwen 的纯文本温度沿用这里的配置，
-        # 工具调用由模型适配层固定为 0.1。
-        main_model = create_model(provider=provider, Ver=model_ver, temperature=None, config=runtime)
-        light_model = create_model(provider=provider, Ver="Low", temperature=None, config=runtime)
-        # Brain 通过 SubmitPlan 一次原子提交完整计划，避免 Qwen 长工具参数
-        # 被拆成多次 AddPlan 后留下半份持久化状态。
+        # 混合模型策略：主模型用于 Attack/Reserve/Orchestrator 等核心角色，
+        # 轻量模型（低思考强度）用于 Recon/Summary/Analysis/ScopeAuditor，
+        # 在保持关键决策质量的同时加速辅助角色。
+        main_model = create_model(
+            provider=provider, model=model or None,
+            thinking_intensity=thinking_intensity, temperature=None, vision=vision,
+            config=runtime,
+        )
+        light_model = create_model(
+            provider=provider, model=model or None,
+            thinking_intensity="low", temperature=None, vision=vision,
+            config=runtime,
+        )
+        # 规划职责已并入 Recon（见第 7 步的首次侦察规划）：Recon 在侦察
+        # 后直接用 SubmitPlan 登记计划，省去单独的 Brain 往返。rag_service
+        # 仍被后续的 Attack / Reserve 用作 RAG 检索中间件。
         rag_service = get_rag_service(project_dir)
         await rag_service.start()
-        # AgentWorld 等本地 Qwen 对扁平参数工具更可靠；标准模式用于验证
-        # 嵌套批量工具协议。DeepSeek 始终保持原子 SubmitPlan。
-        qwen_flat_plan_tools = (
-            provider == "qwen" and runtime.qwen_tool_call_mode == "simple"
-        )
-        brain_tools = (
-            [create_add_plan_tool(mission, store, event_callback, default_origin="brain")]
-            if qwen_flat_plan_tools
-            else [create_submit_plan_tool(mission, store, event_callback)]
-        )
-        brain = create_brain_agent(
-            light_model,
-            tools=brain_tools,
-            # Qwen 的逐条 AddPlan 通常需要 4~8 次登记加一次正文输出。
-            max_iters=(15 if qwen_flat_plan_tools else _iter_budget(
-                target_spec.kind, "brain", model_ver,
-            )),
-            rag_middleware=rag_service.middleware(),
-            plan_tool_mode="item" if qwen_flat_plan_tools else "batch",
-            offloader=workspace,
-            context_config=context_config,
-            state=build_role_agent_state(mission_id, "brain") if use_v2_workspace else None,
-        )
         analysis = create_analysis_agent(
             light_model,
             offloader=workspace,
@@ -1402,6 +1363,9 @@ async def run_mission(
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
                 artifact_root=ws_root,
                 executor=executor,
+                mission=mission,
+                store=store,
+                event_callback=event_callback,
             )
         else:
             recon = create_artifact_triage_agent(
@@ -1412,13 +1376,21 @@ async def run_mission(
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
                 artifact_root=ws_root,
                 executor=executor,
+                mission=mission,
+                store=store,
+                event_callback=event_callback,
             )
 
-        # ── 7. Brain 战略规划（包含分类结果）──
-        # 把授权目标、任务目标与初始分类打包成提示词，交给 Brain 制定阶段计划。
-        # 设计要点：Brain 只能「建议」修正题型（proposed_category + reason），
-        # 最终修正需由 Orchestrator 审批，防止单一 Agent 越权篡改任务类型。
-        plan_prompt = (
+        # ── 7. Recon 与规划合并：先侦察后制定计划 ──
+        # 把原 Brain 的战略规划职责并入 Recon（Recon 现已携带 SubmitPlan 工具，
+        # 见第 6 步传入 mission/store）：首次侦察中，Recon 基于真实侦察证据
+        # 同时输出侦察报告与结构化作战计划。这样做两件事：
+        #   1) 省去单独的 Brain 往返，加速任务启动；
+        #   2) 计划与题型识别建立在真实侦察证据之上，提升初始题目识别准确性。
+        # 计划项由 Recon 经 SubmitPlan 原子登记（一次持久化并推送前端）。
+        # 规划阶段同样允许操作员插话：不能因为此时尚未进入 Orchestrator
+        # 循环，就让新情报被取消事件吞掉。
+        planning_recon_prompt = (
             f"授权目标：{mission.target}\n"
             f"任务目标：{mission.goal}\n\n"
             f"## 题型分析（系统初步分类）\n"
@@ -1428,50 +1400,51 @@ async def run_mission(
             f"证据：{'; '.join(category_decision.evidence)}\n"
         )
         if declared_network_targets:
-            plan_prompt += (
+            planning_recon_prompt += (
                 "用户任务说明中明确声明并已自动授权的网络目标："
                 f"{', '.join(declared_network_targets)}\n"
             )
         if category_decision.secondary:
-            plan_prompt += f"候选题型：{', '.join(category_decision.secondary)}\n"
+            planning_recon_prompt += f"候选题型：{', '.join(category_decision.secondary)}\n"
         if initial_context:
-            plan_prompt += (
+            planning_recon_prompt += (
                 f"\n## 前次任务上下文（同一目标重跑，供参考以避开失败路径）\n"
                 f"{initial_context}\n"
             )
-        plan_prompt += (
+        planning_recon_prompt += (
             "\n你的任务：\n"
-            "基于上述事实制定可审计的阶段计划。\n"
-            "先用 SubmitPlan 工具一次性提交 4~8 条结构化计划，再输出计划正文。\n"
-            "若证据不足，请在计划中加入「重新分类检查点」。\n"
-            "若你认为题型需要修正，请输出结构化建议（proposed_category + reason）。\n"
-            "不得擅自修改正式题型，修正需由 Orchestrator 审批。"
+            "① 先对授权目标做浅层信息收集：识别目标类型与关键线索即可，只做浅层分析（文件/服务类型、高层线索），不要在此阶段深入逆向、反编译、详细反汇编、完整漏洞挖掘或全面加密分析；\n"
+            "② 收集到足够信息后立即输出最终中文侦察报告并停止所有操作；\n"
+            "③ 然后使用 SubmitPlan 工具一次性提交 4~8 笼统的结构化计划，"
+            "再输出人类可读的计划正文；\n"
+            "④ 若证据不足，请在计划中加入「重新分类检查点」；\n"
+            "⑤ 若认为题型需要修正，请在计划正文末尾输出结构化建议"
+            "（proposed_category + reason），最终修正由 Orchestrator 审批。\n"
+            "不要编造服务、漏洞、凭据或 Flag；计划必须基于真实侦察证据。"
         )
 
-        # 流式调用 Brain，实时打印前缀 [Brain] 并转发事件。
-        # Brain 通过 SubmitPlan 原子登记 plan_items（一次持久化并推送前端）。
-        # 规划阶段同样允许操作员插话：不能因为此时尚未进入 Orchestrator
-        # 循环，就让新情报被取消事件吞掉。
+        recon_report_evidence: list[str] = []
         plan_text = ""
         while True:
             try:
                 plan_result = await run_interruptible_agent_reply(
-                    brain,
-                    UserMsg(name="user", content=plan_prompt),
-                    prefix="[Brain] ",
+                    recon,
+                    UserMsg(name="user", content=planning_recon_prompt),
+                    prefix="[Recon] ",
                     on_event=event_callback,
                 )
                 plan_text = plan_result.get_text_content() or ""
+                recon_report_evidence = [plan_text]
                 break
             except AgentMaxIterationsError:
                 if not mission.plan_items:
                     raise
                 # Qwen 在系统已登记降级计划后仍可能继续空调用。计划本身已
-                # 持久化且不包含任何攻击动作，可以安全进入 Recon。
+                # 持久化且不包含任何攻击动作，可以安全进入下一阶段。
                 plan_text = "模型未能输出计划正文，已使用系统登记的保守阶段计划。"
                 mission.record(
                     "system",
-                    "brain_max_iters_after_plan_fallback",
+                    "recon_max_iters_after_plan_fallback",
                     provider=provider,
                 )
                 store.save(mission)
@@ -1482,18 +1455,46 @@ async def run_mission(
                 new_intel = _next_steering_input()
                 if not new_intel:
                     raise
-                plan_prompt += (
+                planning_recon_prompt += (
                     "\n\n## 操作员中途补充的新情报\n"
                     f"{new_intel}\n"
-                    "请立即基于此情报更新后续计划；已有计划条目无需重复登记。"
+                    "请基于此情报补齐侦察并更新后续计划；已有计划条目无需重复登记。"
                 )
                 if event_callback is not None:
                     event_callback(
                         "message",
-                        content="已接收操作员新情报，正在据此更新战略计划。",
-                        agent=brain.name,
+                        content="已接收操作员新情报，正在据此更新侦察与计划。",
+                        agent=recon.name,
                         event_type="agent_acknowledged",
                     )
+        # 用真实侦察证据对初始题型做二次分类，提升识别准确性。
+        # reclassify 基于侦察文本中的关键词与文件类型信号重评分；当证据充分
+        # 且更有把握地指向另一种题型时，采用新的正式题型（stage=post_recon），
+        # 并同步更新 mission.category_decision，使后续 Attack/Reserve 加载正确 Skill。
+        post_recon_category = reclassify(category_decision, recon_report_evidence)
+        if (
+            post_recon_category.primary != "unknown"
+            and post_recon_category.primary != category_decision.primary
+            and post_recon_category.confidence >= 0.6
+        ):
+            category_decision = post_recon_category
+            mission.category_decision = {
+                "primary": category_decision.primary,
+                "secondary": category_decision.secondary,
+                "confidence": category_decision.confidence,
+                "scores": category_decision.scores,
+                "evidence": category_decision.evidence,
+                "stage": category_decision.stage,
+            }
+            mission.record(
+                "recon",
+                "reclassify_post_recon",
+                from_category=category_decision.primary,
+            )
+            print(
+                f"[系统] 侦察后重分类: {post_recon_category.primary} "
+                f"(置信度={post_recon_category.confidence:.0%})"
+            )
         # 保存计划文本（无输出时回退到内置四阶段计划）
         mission.plan = plan_text or "使用内置四阶段计划"
         phase_experts, expert_section = build_expert_assignments(
@@ -1517,19 +1518,23 @@ async def run_mission(
                 mission.plan,
             ),
         )
-        mission.record("Brain", "plan_created", plan_items_count=len(mission.plan_items))
-        mission.record("Brain", "session_title_created", title=mission.title)
+        mission.record("recon", "plan_created", plan_items_count=len(mission.plan_items))
+        mission.record("recon", "session_title_created", title=mission.title)
         if event_callback is not None:
-            event_callback("session_title", title=mission.title, agent="Brain")
-            event_callback("message", content=expert_section, agent=brain.name)
+            event_callback("session_title", title=mission.title, agent=recon.name)
+            event_callback("message", content=expert_section, agent=recon.name)
             push_plan_update(mission, event_callback)
-        # Brain 完成作战计划后再启用专家名册；后续角色首次调用时加入专家团。
+        # 将首次侦察报告作为第一条发现入库，供后续分析与 Orchestrator 证据
+        # 核验使用。Recon 只在开始时执行一次，之后不再冗余复派。
+        mission.add_finding("Recon", plan_text)
+        # 侦察与计划后再启用专家名册；后续角色首次调用时加入专家团。
         expert_roster_token = bind_expert_roster()
-        # 状态机：PLANNING → RECON（非法转型会被状态机拒绝）
-        mission.transition(Phase.RECON, "战略计划已制定")
+        # 状态机：PLANNING → ANALYSIS（首次侦察已并入规划步骤，直接分析，
+        # 避免冗余复派侦察；非法转型会被状态机拒绝）。
+        mission.transition(Phase.ANALYSIS, "首次侦察与计划已完成")
         store.save(mission)  # 每步都持久化，保证崩溃可恢复
         _push_target_info()   # 首次推送靶机信息
-        print(f"[Brain] 作战计划\n{mission.plan}\n")
+        print(f"[Recon] 作战计划\n{mission.plan}\n")
 
         # ── 8. Attack 延迟创建（Recon 后可能会 reclassify）──
         # 传入当前任务携带的分类结果；若后续 Recon 触发重分类，
@@ -1603,7 +1608,7 @@ async def run_mission(
         plan_items_text = "\n".join(
             f"  {item['id']} [{item['phase']}] {item['content']}"
             for item in mission.plan_items
-        ) or "  （Brain 未登记结构化计划，可用 AddPlan 自行建立清单）"
+        ) or "  （Recon 未登记结构化计划，可用 AddPlan 自行建立清单）"
         orch_context = ""
         if initial_context:
             orch_context = (
@@ -1616,9 +1621,11 @@ async def run_mission(
         # ── Orchestrator 主循环（steering 由 dispatcher 层 + 此处兜底处理） ──
         orch_content = (
             f"执行以下已授权任务。\n目标：{mission.target}\n目标要求：{mission.goal}\n\n"
-            f"Brain 计划：\n{mission.plan}\n\n"
+            f"作战计划：\n{mission.plan}\n\n"
             f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
-            "从侦察开始，以工具证据推进；结束时必须调用 complete_mission。"
+            "初始侦察已在任务开始时执行一次，侦察报告已作为第一条安全发现入库。"
+            "请基于已有侦察证据直接开始分析研判，无需再次复派侦察；仅在确有信息缺口"
+            "时才聚焦复侦。结束时必须调用 complete_mission。"
             f"{orch_context}"
         )
         # P5 熔断重试预算：Orchestrator 输出残缺 <tool_call>/空回答时重新注入
@@ -1761,8 +1768,8 @@ async def run_mission(
         )
         return mission
 
-    except (ToolJSONValidationError, QwenModelUnavailableError) as exc:
-        # 严格工具 JSON 二次失败或 Qwen 无可用模型都采用确定性安全收尾；
+    except ToolJSONValidationError as exc:
+        # 严格工具 JSON 二次失败采用确定性安全收尾；
         # 不执行损坏工具参数，也不让任务停留在 running。
         mission.success = False
         mission.summary = str(exc)
@@ -1871,8 +1878,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model", "-m",
         default=None,
-        choices=["Low", "Min", "Max"],
-        help="思考级别：Low/Min/Max；Zhipu 默认 Max，其它 Provider 默认 Min",
+        help="具体模型名称；留空使用该提供商默认模型",
     )
     parser.add_argument(
         "--qwen-tool-mode",
@@ -1893,7 +1899,10 @@ def main() -> None:
     try:
         asyncio.run(
             run_mission(
-                args.target, args.goal, args.model, args.provider,
+                args.target, args.goal,
+                model=args.model,
+                thinking_intensity="medium",
+                provider=args.provider,
                 qwen_tool_call_mode=args.qwen_tool_mode,
             ),
         )

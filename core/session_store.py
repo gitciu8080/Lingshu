@@ -93,6 +93,10 @@ def init_sessions_db():
             "workspace_version": "INTEGER DEFAULT 0",
             "resume_status": "TEXT DEFAULT 'fresh'",
             "checkpoint_seq": "INTEGER DEFAULT 0",
+            # ── 模型选型：剔除 Low/Min/Max 固定层级 ──
+            "thinking_intensity": "TEXT DEFAULT 'medium'",
+            # ── 视觉输入开关（vision）──
+            "vision": "INTEGER DEFAULT 0",
         }
         for column, definition in migrations.items():
             if column not in session_columns:
@@ -126,9 +130,11 @@ def create_session(
     target: str,
     goal: str = '',
     provider: str = 'deepseek',
-    model: str = 'Min',
+    model: str = '',
     title: str = '',
     session_id: str = '',
+    thinking_intensity: str = 'medium',
+    vision: str = '',
 ) -> str:
     """创建一条新会话记录，返回 session_id。
     
@@ -141,9 +147,9 @@ def create_session(
     conn = get_db()
     try:
         conn.execute(
-            """INSERT INTO sessions (id, user_id, title, target, goal, provider, model)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, user_id, title, target, goal, provider, model),
+            """INSERT INTO sessions (id, user_id, title, target, goal, provider, model, thinking_intensity, vision)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, user_id, title, target, goal, provider, model, thinking_intensity, vision or ''),
         )
         conn.commit()
     finally:

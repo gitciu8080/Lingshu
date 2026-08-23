@@ -5,36 +5,6 @@ description: kali-full:latest Docker 镜像的完整工具清单与使用方法�
 
 # kali-full 镜像工具清单与使用
 
-## 镜像概况
-
-- 镜像: `kali-full:latest` (约 33GB, 基于 `kalilinux/kali-rolling:latest`)
-- 构建目录: `/home/gitciu/kali_Workspace/kali-full/` (Dockerfile + build.log)
-- 容器内工作目录: `/root/workspace`
-- apt 源: `mirrors.ustc.edu.cn` | pip/uv 源: `pypi.tuna.tsinghua.edu.cn` | GitHub 加速前缀: `https://gh-proxy.org/`
-- 已启用 i386 架构 (wine32); 系统 pip 已配置 `break-system-packages=true` + 清华源, 容器内可直接 `pip install`
-- apt lists 已保留, 容器内 `apt install` 新包很快
-
-## 启动容器
-
-```bash
-# 普通使用
-docker run -it --name kali-ws --net=host \
-  --cap-add=NET_RAW --cap-add=NET_ADMIN --cap-add=SYS_ADMIN \
-  -v /home/gitciu/kali_Workspace/kali-full/data:/root/workspace \
-  kali-full:latest
-
-# 需要完整权限 (aircrack 注入、DoS 工具等)
-docker run -it --privileged --net=host \
-  -v /home/gitciu/kali_Workspace/kali-full/data:/root/workspace \
-  kali-full:latest
-
-# 长期后台 (智能体工作区)
-docker run -d --name kali-ws --net=host \
-  --cap-add=NET_RAW --cap-add=NET_ADMIN \
-  -v kali-ws-data:/root/workspace \
-  kali-full:latest sleep infinity
-```
-
 ## 重点工具 (本次新增)
 
 | 工具 | 版本/来源 | 用途 |
@@ -42,12 +12,13 @@ docker run -d --name kali-ws --net=host \
 | `checksec` | 3.2.0 (slimm609, 官方 .deb) | 检查二进制安全特性 (PIE/RELRO/Canary/NX) |
 | `gdb` + `pwndbg` | gdb 17.2 + pwndbg (git dev) | 调试 + PWN 增强 |
 | `ropper` | 1.13.8 (sashs/Ropper) | ROP gadgets 搜索 |
+| `ROPGadget` | pip (Nick D'Andrea/ROPGadget) | ROP gadgets 搜索 (带 Web UI) |
 | `pwntools` | pip 最新 (Gallopsled) | CTF 开发框架 |
 | `volatility` | **2.6.1 (volatilityfoundation v2, 按需提供)** | 内存取证 (Python 2.7 环境) |
 | `vol` | volatility3 (同一官方项目现行维护版) | 内存取证 (Python 3, 自动识别 profile) |
 | `steghide` | 0.6.0 (StegHigh fork) | JPEG/音频隐写 |
 | `apktool` | 2.7.0 (iBotPeaches) | APK 反编译/重打包 |
-| `sage` | 10.9 (conda-forge, /opt/miniforge3) | 数学/密码学符号计算 |
+| `sage` | 10.7 (conda-forge, /opt/miniconda3 env `sage`) | 数学/密码学符号计算 |
 | `python3-sympy` | 1.14 (apt) | 符号计算 (轻量) |
 | `pycryptodome` | pip 最新 (Legrandin) | 密码学库 |
 | `distorm3` | 3.5.2 (pip 源码编译) | 高性能反汇编 |
@@ -80,6 +51,15 @@ gdb ./pwn                              # 启动, pwndbg 自动加载
 ropper --file ./pwn --searchable       # 可搜索的 gadgets 列表
 ropper --file ./pwn --only pop,rsp     # 只找 pop rsp
 ropper --file ./pwn --depth 3          # 组合链深度
+
+### ROPGadget — ROP 搜索 (带 Web UI)
+
+```bash
+ROPGadget --file ./pwn --searchable     # 可搜索的 gadgets 列表
+ROPGadget --file ./pwn --only pop,rsp   # 只找 pop rsp
+ROPGadget --file ./pwn --idx 5          # 只看第 5 类 gadget
+ROPGadget --file ./pwn --web 8080       # 启动 Web UI (浏览器访问 http://localhost:8080)
+
 ```
 
 ### pwntools — CTF 框架
@@ -149,12 +129,12 @@ apktool b app_src -o new.apk     # 重新打包 (需先装 zipalign/apksigner)
 
 ### sage — 数学 (conda-forge 环境)
 
-入口: `/usr/local/bin/sage` → `/opt/miniforge3/envs/sage/bin/sage` (conda 环境, 自带 Python 3.13)。
+入口: `/usr/local/bin/sage` → `/opt/miniconda3/envs/sage/bin/sage` (conda 环境, 自带 Python 3.11)。`sage-py` / `python-sage` 为同环境软链。
 
 ```bash
 sage                                 # 进入 REPL
 sage -python script.py               # 用 sage 的 python 跑脚本
-sage -v                             # 版本 (SageMath 10.9)
+sage -v                             # 版本 (SageMath 10.7)
 ```
 
 REPL 示例: `solve(x^2 == 4, x)`、`Factorization(1024)`、椭圆曲线/格密码等。
@@ -217,8 +197,9 @@ WINEPREFIX=/root/.wine32 wine ./x.exe   # 隔离环境
 - `--net=host` 或 `--privileged` 是 nmap 嗅探、无线工具正常工作的关键
 - **volatility v2** 跑在独立 Python 2.7.18 环境 (`/opt/miniconda2/bin/python`), 不要用系统 python3 跑 `/opt/volatility2/vol.py`; 需要 py2 环境时也可直接 `/opt/miniconda2/bin/python`
 - volatility v2 的 `--profile` 必须与内存镜像操作系统/架构匹配, 选错 profile 会报 "No suitable address space mapping found"
-- pwndbg 依赖 GDB 内嵌 Python; 若 `gdb` 报 pwndbg 加载错误, 检查 `/root/.pwndbg/.venv` 是否存在
-- sage 是独立 conda 环境, 不要与系统 python 混用 (`/opt/miniforge3/envs/sage/bin/python` 自带全部依赖)
+- pwndbg 通过 `pip install` 装进**系统 Python 3.14**, `gdb` 内置同版本 Python 自动加载; 若加载失败, 用 `python3 -c "import pwndbg"` 确认模块存在
+- ROPGadget 控制台脚本为 `ropgadget` (`pip install` 安装); 另 `ropper` 是 apt 版, 两者都可用
+- sage 是独立 conda 环境, 不要与系统 python 混用 (`/opt/miniconda3/envs/sage/bin/python` 自带全部依赖); `sage-py` 已指向该环境 python
 - `seclists` 字典包 (1.9GB) 未预装, rockyou 已含; 需要时 `apt install -y seclists`
 - 容器内新增工具: `apt install` (USTC 源) 或 `pip install` (清华源, 已配好) 或 `git clone https://gh-proxy.org/https://github.com/...`
-- 重新构建: `cd /home/gitciu/kali_Workspace/kali-full && docker build -t kali-full:latest .`
+- 重新构建: `cd /home/gitciu/Lingshu/Docker/kali_Workspace/kali-full && docker build -t kali-full:latest .`

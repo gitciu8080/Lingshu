@@ -178,10 +178,6 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
         raise ModelRegistryError("Provider 标识必须以小写字母开头，仅含字母、数字、_ 或 -")
     if category == "llm" and api_style not in _LLM_STYLES:
         raise ModelRegistryError("大模型 API 协议仅支持 chat_completions 或 responses")
-    if category == "llm" and provider == "qwen" and api_style != "chat_completions":
-        raise ModelRegistryError("内置 Qwen 适配器使用 Chat Completions 协议")
-    if category == "llm" and provider == "zhipu" and api_style != "responses":
-        raise ModelRegistryError("内置 Zhipu 适配器固定使用 Responses 协议")
     if category == "embedding" and api_style != "embeddings":
         raise ModelRegistryError("嵌入模型 API 协议必须为 embeddings")
     gateway_mode = str(payload.get("gateway_mode") or "base_url").strip().lower()
@@ -195,6 +191,13 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(native_tools, list) or any(str(item).strip().lower() not in _NATIVE_TOOLS for item in native_tools):
         raise ModelRegistryError("原生工具仅支持 web_search")
     native_tools = list(dict.fromkeys(str(item).strip().lower() for item in native_tools))
+    if category == "llm":
+        vision_enabled_raw = payload.get("vision_enabled", False)
+        if not isinstance(vision_enabled_raw, bool):
+            raise ModelRegistryError("vision_enabled 必须为布尔值")
+        vision_enabled = bool(vision_enabled_raw)
+    else:
+        vision_enabled = False
 
     raw = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
     try:
@@ -232,12 +235,14 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
         "model_name": str(payload.get("model_name") or "").strip(),
         "dimensions": int(payload.get("dimensions") or 0),
         "pass_dimensions": bool(payload.get("pass_dimensions", True)),
-        "enabled": bool(payload.get("enabled", False)), "settings": settings,
+        "enabled": bool(payload.get("enabled", False)),
+        "vision_enabled": vision_enabled, "settings": settings,
     }
     if category == "llm":
-        if not all(result[key] for key in ("model_low", "model_min", "model_max")):
-            raise ModelRegistryError("大模型配置必须填写 Low、Min、Max 三个模型名称")
-        result.update(model_name="", dimensions=0, pass_dimensions=True)
+        # 模型选型改为：供应商 → 具体模型(model_name) → 思考强度，不再强制 Low/Min/Max 三档
+        if not result["model_name"]:
+            raise ModelRegistryError("大模型配置必须填写具体模型名称 model_name")
+        result.update(model_low="", model_min="", model_max="")
     else:
         if not result["model_name"]:
             raise ModelRegistryError("嵌入模型名称不能为空")
@@ -396,35 +401,21 @@ def load_runtime_overrides() -> dict[str, Any]:
                 deepseek_api_key=item["api_key"], deepseek_base_url=item["base_url"],
                 deepseek_gateway_mode=item.get("gateway_mode", "base_url"),
                 deepseek_model_low=item["model_low"], deepseek_model_min=item["model_min"],
-                deepseek_model_max=item["model_max"], deepseek_model_settings=item["settings"],
+                deepseek_model_max=item["model_max"],
+                deepseek_model_default=item["model_name"],
+                deepseek_model_settings=item["settings"],
                 deepseek_responses_models=(
                     tuple(dict.fromkeys((item["model_low"], item["model_min"], item["model_max"])))
                     if item["api_style"] == "responses" else ()
                 ),
                 deepseek_native_tools=tuple(item.get("native_tools") or ()),
             )
-        elif provider == "qwen":
-            overrides.update(
-                qwen_api_key=item["api_key"], qwen_base_url=item["base_url"],
-                qwen_model=item["model_min"], qwen_model_settings=item["settings"],
-            )
-        elif provider == "zhipu":
-            overrides.update(
-                zhipu_api_key=item["api_key"], zhipu_base_url=item["base_url"],
-                zhipu_model_low=item["model_low"], zhipu_model_min=item["model_min"],
-                zhipu_model_max=item["model_max"], zhipu_model_settings=item["settings"],
-                zhipu_responses_models=(
-                    tuple(dict.fromkeys((item["model_low"], item["model_min"], item["model_max"])))
-                    if item["api_style"] == "responses" else ()
-                ),
-                zhipu_native_tools=tuple(item.get("native_tools") or ()),
-                zhipu_gateway_mode=item.get("gateway_mode", "base_url"),
-            )
         else:
             custom[provider] = {
                 key: item.get(key) for key in (
-                    "name", "api_style", "base_url", "api_key", "model_low",
-                    "model_min", "model_max", "gateway_mode", "native_tools", "settings",
+                    "name", "api_style", "base_url", "api_key", "model_name",
+                    "model_low", "model_min", "model_max", "gateway_mode",
+                    "native_tools", "settings",
                 )
             }
             custom[provider]["gateway_mode"] = custom[provider].get("gateway_mode") or "base_url"
