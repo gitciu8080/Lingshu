@@ -302,7 +302,8 @@ def create_orchestrator_agent(
                         "先调用 ida_open_binary 上传文件并等待自动分析完成，"
                         "禁止手动启动 idat；随后直接用 IDA 分析工具（get_metadata / "
                         "list_functions / decompile_function / get_xrefs_to 等）分析当前已加载二进制。\n"
-                        "需要动态验证时使用 gdb_create_session，结束后关闭 GDB 会话。\n"
+                        "需要动态验证时用 gdb_debug 在容器内做批量调试（每次独立执行，"
+                        "把断点/运行/查看写全在一个 commands 脚本里）。\n"
                         "充分使用 IDA/GDB 工具完成分析。所有目标函数已还原后输出最终报告。"
                     ),
                 ),
@@ -342,7 +343,7 @@ def create_orchestrator_agent(
                 )
             return (
                 f"[Reserve 异常] {type(exc).__name__}: {exc}。"
-                f"请检查 IDA/GDB MCP 服务可用性后重试。"
+                f"请检查 IDA MCP 服务可用性后重试（GDB 已容器内化，无需外部服务）。"
             )
         mission.add_finding("Reserve", report)
         store.save(mission)

@@ -214,13 +214,6 @@ const AGENTS: Record<
     role: string;
   }
 > = {
-  Brain: {
-    label: "战略总参谋",
-    expert: "Sophia - 战略规划专家",
-    icon: BrainCircuit,
-    tone: "brain",
-    role: "战略规划",
-  },
   Recon: { label: "网络侦察", expert: "Ethan - 网络侦察专家", icon: Network, tone: "recon", role: "情报采集" },
   ArtifactTriage: {
     label: "文件研判",
@@ -269,7 +262,6 @@ const AGENTS: Record<
 };
 
 const EXPERT_HINTS: [RegExp, keyof typeof AGENTS][] = [
-  [/Sophia|战略规划/, "Brain"],
   [/Alex|行动指挥/, "Orchestrator"],
   [/Mia|对话总结|报告专家/, "Summary"],
   [/Ethan|网络侦察/, "Recon"],
@@ -1083,7 +1075,8 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (submitLock.current) return;
-    if (!target.trim() && files.length === 0) {
+    const trimmedTarget = target.trim();
+    if (!trimmedTarget && files.length === 0) {
       toast.error("请输入授权目标或上传目标文件");
       return;
     }
@@ -1094,15 +1087,18 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
     submitLock.current = true;
     setSubmitting(true);
     try {
-      const resolvedTarget = files.length ? (await api.upload(files)).target : target.trim();
+      // 支持“链接/主机 + 附件”混合目标：两者同时提供时，
+      // 链接作为授权目标，上传文件作为附件一并注入任务。
+      const uploadedTarget = files.length ? (await api.upload(files)).target : "";
       const r = await api.create({
-        target: resolvedTarget,
+        target: trimmedTarget || uploadedTarget,
         goal,
         provider,
         model,
         thinking_intensity: thinkingIntensity,
         ...(vision ? { vision: "1" } : {}),
         ...(provider === "qwen" ? { qwen_tool_call_mode: qwenToolMode } : {}),
+        ...(trimmedTarget && uploadedTarget ? { attachments: [uploadedTarget] } : {}),
       });
       setOpen(false);
       setFiles([]);
@@ -1135,15 +1131,13 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
               <input
                 value={target}
                 onChange={(e) => setTarget(e.target.value)}
-                placeholder="IP / 主机名 / 文件路径"
-                disabled={files.length > 0}
+                placeholder="IP / 主机名 / 链接 / 文件路径"
               />
             </label>
-            <div className="target-divider"><span>或</span></div>
             <label className={`upload-field ${files.length ? "selected" : ""}`}>
               <Upload size={18} />
               <span>
-                <b>{files.length ? `已选择 ${files.length} 个文件` : "上传目标文件（可多选）"}</b>
+                <b>{files.length ? `已选择 ${files.length} 个文件` : "上传题目附件（可选，可与上方目标同时提供）"}</b>
                 <small>
                   {files.length
                     ? `${(files.reduce((sum, file) => sum + file.size, 0) / 1024 / 1024).toFixed(2)} MB · ${files.map((file) => file.name).join("、")}`
@@ -1154,9 +1148,7 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
                 type="file"
                 multiple
                 onChange={(e) => {
-                  const selected = Array.from(e.target.files || []);
-                  setFiles(selected);
-                  if (selected.length) setTarget("");
+                  setFiles(Array.from(e.target.files || []));
                 }}
               />
             </label>
@@ -1790,7 +1782,7 @@ function PlanPanel({ mission, phase }: { mission: Mission; phase?: string }) {
           </article>
           ))
         ) : (
-          <p className="empty-note">Brain 制定计划后将在此处显示。</p>
+          <p className="empty-note">制定计划后将在此处显示。</p>
         )}
       </div>
     </section>

@@ -1,11 +1,14 @@
-"""灵枢本地工作区服务（Workspace v2）。
+"""灵枢 Docker 工作区服务（Workspace v2）。
 
 统一供传统 API、Agent Service 与 CLI 使用：
 
 - 工作区 ID 由 user_id + session_id 确定性生成（``u{user_id}/{session_id}``
   或 ``cli/{session_id}``），不依赖 AgentScope 内置 Manager 按 agent_id
   共用的目录推导，实现真正的 PER_SESSION 文件隔离。
-- 内存缓存已初始化的 :class:`LocalWorkspace`；TTL 只 close（关闭 MCP、
+- 每个会话对应一个独立 Docker 容器（kali-full 镜像，host 网络 +
+  ``NET_RAW``/``NET_ADMIN``），所有工具在容器内执行；工作区目录 bind mount
+  到容器 ``/workspace``。
+- 内存缓存已初始化的 :class:`LingshuDockerWorkspace`；TTL 只 close（关闭 MCP、
   释放对象），**不删除磁盘文件**。
 - 只有用户明确删除会话时才删除 Workspace（原子移动到内部 trash）。
 - 上传文件先进入内容寻址 blob store（``blobs/{sha256}/source``），再
@@ -28,7 +31,7 @@
             └── mission/checkpoint.json
 
 说明：
-- ``.mcp``/``skills/``/``data/``/``sessions/`` 由 AgentScope LocalWorkspace
+- ``.mcp``/``skills/``/``data/``/``sessions/`` 由 AgentScope DockerWorkspace
   自身创建与管理；``input/``/``artifacts/``/``reports/``/``mission/`` 是
   灵枢业务目录。
 - Workspace v1 不复制全仓库 Skills；现有分类技能仍从项目目录加载，
@@ -47,7 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agentscope.workspace import DockerWorkspace, LocalWorkspace
+from agentscope.workspace import DockerWorkspace
 
 # 默认工作区根目录固定在项目内，不依赖启动命令的当前目录。
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent  # 项目根（core/ 的上一级）
@@ -134,20 +137,16 @@ class WorkspaceService:
         root: str | Path = _DEFAULT_ROOT,
         *,
         idle_ttl_seconds: float = 3600.0,
-        mode: str = "docker",
         base_image: str = "kali-full:latest",
         gateway_port: int | None = None,
         extra_pip: tuple[str, ...] = (),
     ) -> None:
+        """创建按 (user_id, session_id) 隔离的 Workspace 生命周期管理器。"""
         candidate = Path(root).expanduser()
         self.root = (
             candidate if candidate.is_absolute() else _PROJECT_ROOT / candidate
         ).resolve()
         self.idle_ttl_seconds = idle_ttl_seconds
-        # docker | local | legacy：决定 get() 构造哪种 Workspace。
-        if mode not in {"docker", "local", "legacy"}:
-            mode = "docker"
-        self.mode = mode
         self.base_image = base_image or "kali-full:latest"
         self.gateway_port = gateway_port
         self.extra_pip = tuple(extra_pip)
@@ -157,8 +156,7 @@ class WorkspaceService:
     def host_to_container(self, user_id: int | None, session_id: str, path: str | Path) -> str:
         """把会话目录内的宿主路径映射为容器内 /workspace 相对路径。
 
-        docker 模式下返回 ``/workspace/<rel>``；非 docker 模式返回原绝对路径
-        字符串。路径必须是会话工作目录内的文件，否则抛出 ValueError。
+        路径必须是会话工作目录内的文件，否则抛出 ValueError。
         """
         host_dir = self.workspace_dir(user_id, session_id).resolve()
         target = Path(path).expanduser().resolve()
@@ -168,11 +166,9 @@ class WorkspaceService:
             raise ValueError(
                 f"路径不在会话工作区内: {path}（工作区 {host_dir}）"
             ) from None
-        if self.mode == "docker":
-            # 容器内挂载点为 /workspace：拼接相对段到其下。
-            rel_parts = [part for part in rel.parts if part not in {".", ".."}]
-            return _CONTAINER_WORKDIR + "/" + "/".join(rel_parts)
-        return str(target)
+        # 容器内挂载点为 /workspace：拼接相对段到其下。
+        rel_parts = [part for part in rel.parts if part not in {".", ".."}]
+        return _CONTAINER_WORKDIR + "/" + "/".join(rel_parts)
 
     # ── 路径与 ID 推导（确定性） ──
 
@@ -213,12 +209,11 @@ class WorkspaceService:
         default_mcps: list[Any] | None = None,
         skill_paths: list[str | Path] | None = None,
     ) -> "Any":
-        """获取（必要时创建并初始化）会话的工作区。
+        """获取（必要时创建并初始化）会话的 Docker 工作区。
 
-        docker 模式返回 :class:`LingshuDockerWorkspace`（工具在容器内执行），
-        local 模式返回 :class:`LocalWorkspace`（宿主机执行）。TTL 语义：
-        缓存命中即刷新 last_used；空闲超过 TTL 的工作区由 :meth:`close_idle`
-        关闭（仅释放资源，不删除磁盘数据）。
+        返回 :class:`LingshuDockerWorkspace`（所有工具在容器内执行）。
+        TTL 语义：缓存命中即刷新 last_used；空闲超过 TTL 的工作区由
+        :meth:`close_idle` 关闭（仅释放资源，不删除磁盘数据）。
         """
         key = self.workspace_id(user_id, session_id)
         async with self._lock:
@@ -233,48 +228,38 @@ class WorkspaceService:
             for sub in ("input", "artifacts", "reports", "mission"):
                 (workdir / sub).mkdir(parents=True, exist_ok=True)
 
-            if self.mode == "docker":
-                kwargs: dict[str, Any] = {}
-                if self.gateway_port is not None:
-                    kwargs["gateway_port"] = self.gateway_port
-                workspace = LingshuDockerWorkspace(
-                    base_image=self.base_image,
-                    host_workdir=str(workdir),
-                    extra_pip=list(self.extra_pip),
-                    default_mcps=default_mcps,
-                    skill_paths=[str(p) for p in (skill_paths or [])],
-                    **kwargs,
-                )
-            else:
-                workspace = LocalWorkspace(
-                    workdir=str(workdir),
-                    workspace_id=key,
-                    default_mcps=default_mcps,
-                    skill_paths=[str(p) for p in (skill_paths or [])],
-                )
+            kwargs: dict[str, Any] = {}
+            if self.gateway_port is not None:
+                kwargs["gateway_port"] = self.gateway_port
+            workspace = LingshuDockerWorkspace(
+                base_image=self.base_image,
+                host_workdir=str(workdir),
+                extra_pip=list(self.extra_pip),
+                default_mcps=default_mcps,
+                skill_paths=[str(p) for p in (skill_paths or [])],
+                **kwargs,
+            )
 
             try:
                 await workspace.initialize()
             except Exception as exc:
-                if self.mode == "docker":
-                    # docker 模式初始化失败给出可操作指引，并保留真实异常链
-                    # 便于排障（如派生镜像构建缺网络/缺 uv 等）。
-                    import logging as _logging
+                # 初始化失败给出可操作指引，并保留真实异常链便于排障
+                # （如派生镜像构建缺网络/缺 uv 等）。
+                import logging as _logging
 
-                    _logging.getLogger(__name__).warning(
-                        "Docker 工作区初始化失败（%s）: %s",
-                        type(exc).__name__,
-                        exc,
-                    )
-                    raise RuntimeError(
-                        "Docker 工作区初始化失败：请确认 docker daemon 可访问、"
-                        f"基础镜像 {self.base_image!r} 已构建，且首次派生镜像"
-                        "构建（网关 venv，需网络）已成功。"
-                        "若构建期网络受限，可先用 "
-                        "'./scripts/build_workspace_image.sh' 预热派生镜像。"
-                        f"底层错误: {type(exc).__name__}: {exc}"
-                    ) from exc
-                raise
+                _logging.getLogger(__name__).warning(
+                    "Docker 工作区初始化失败（%s）: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                raise RuntimeError(
+                    "Docker 工作区初始化失败：请确认 docker daemon 可访问、"
+                    f"基础镜像 {self.base_image!r} 已构建，且首次派生镜像"
+                    "构建（网关 venv，需网络）已成功。"
+                    "若构建期网络受限，可先用 "
+                    "'./scripts/build_workspace_image.sh' 预热派生镜像。"
+                    f"底层错误: {type(exc).__name__}: {exc}"
+                ) from exc
             self._cache[key] = _CachedWorkspace(workspace)
             return workspace
 
@@ -452,13 +437,9 @@ def get_workspace_service(
         kwargs: dict[str, Any] = {}
         if idle_ttl_seconds is not None:
             kwargs["idle_ttl_seconds"] = idle_ttl_seconds
-        # 模式与镜像配置可由调用方主动传入；单例创建后后续调用沿用首次值。
-        # 兼容旧调用：未显式传参时从环境变量读取（与 config.RuntimeConfig
-        # 一致），保证 CLI 直接构造也能落到 docker 模式。
-        kwargs.setdefault(
-            "mode",
-            _os.getenv("LINGSHU_WORKSPACE_MODE", "docker").strip().lower(),
-        )
+        # 镜像与网关配置可由调用方主动传入；单例创建后后续调用沿用首次值。
+        # 兼容旧调用：未显式传参时从环境变量读取（与 config.RuntimeConfig 一致），
+        # 保证 CLI 直接构造也能拿到正确的镜像配置。
         kwargs.setdefault(
             "base_image",
             _os.getenv("LINGSHU_WORKSPACE_BASE_IMAGE", "kali-full:latest").strip(),

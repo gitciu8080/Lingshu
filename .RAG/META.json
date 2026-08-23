@@ -1,0 +1,119 @@
+{
+  "name": "网络安全知识库",
+  "name_en": "Cybersecurity Knowledge Base",
+  "version": "1.0.0",
+  "description": "面向网络安全攻防、渗透测试、安全运维、安全维护的中文检索增强生成(RAG)知识库",
+  "language": "zh-CN",
+  "format": "markdown",
+  "updated": "2025-01-01",
+  "intended_use": "RAG retrieval-augmented generation, security professional quick reference, training",
+  "modules": [
+    {
+      "id": "00",
+      "name": "总览",
+      "path": "00-总览",
+      "keywords": ["索引", "导航", "知识地图"],
+      "files": ["知识库索引.md"]
+    },
+    {
+      "id": "01",
+      "name": "渗透测试",
+      "path": "01-渗透测试",
+      "keywords": ["渗透测试", "pentest", "信息收集", "漏洞扫描", "Web渗透", "内网渗透", "提权", "无线渗透", "测试报告"],
+      "files": ["README.md", "信息收集.md", "漏洞扫描与枚举.md", "Web渗透测试.md", "主机与系统渗透.md", "内网渗透.md", "无线与IoT渗透.md", "渗透测试流程与报告.md"]
+    },
+    {
+      "id": "02",
+      "name": "攻防对抗",
+      "path": "02-攻防对抗",
+      "keywords": ["红队", "蓝队", "攻防演练", "护网", "HVV", "社会工程学", "钓鱼", "C2", "威胁狩猎"],
+      "files": ["README.md", "红队作战.md", "蓝队防御.md", "攻防演练.md", "社会工程学.md"]
+    },
+    {
+      "id": "03",
+      "name": "安全运维",
+      "path": "03-安全运维",
+      "keywords": ["安全运营", "SecOps", "监控", "告警", "日志分析", "威胁情报", "漏洞管理", "SIEM", "SOAR"],
+      "files": ["README.md", "安全监控与告警.md", "日志管理与分析.md", "威胁情报.md", "漏洞管理.md", "SIEM与SOAR.md"]
+    },
+    {
+      "id": "04",
+      "name": "安全维护与加固",
+      "path": "04-安全维护与加固",
+      "keywords": ["安全加固", "基线核查", "补丁管理", "配置管理", "系统加固", "Web加固", "网络设备"],
+      "files": ["README.md", "系统安全加固.md", "Web安全加固.md", "网络设备安全配置.md", "基线核查.md", "补丁与配置管理.md"]
+    },
+    {
+      "id": "05",
+      "name": "应急响应",
+      "path": "05-应急响应",
+      "keywords": ["应急响应", "IR", "勒索软件", "WebShell", "后门", "取证", "日志分析", "数据泄露"],
+      "files": ["README.md", "应急响应流程.md", "勒索软件应急.md", "WebShell与后门排查.md", "日志取证分析.md", "数据泄露处置.md"]
+    },
+    {
+      "id": "06",
+      "name": "安全工具",
+      "path": "06-安全工具",
+      "keywords": ["工具", "Nmap", "Burp Suite", "Metasploit", "sqlmap", "Wireshark", "hashcat", "Nuclei", "Wazuh"],
+      "files": ["README.md", "信息收集工具.md", "漏洞扫描工具.md", "渗透框架与利用工具.md", "流量分析工具.md", "密码破解工具.md", "防御监控工具.md"]
+    },
+    {
+      "id": "07",
+      "name": "合规与标准",
+      "path": "07-合规与标准",
+      "keywords": ["等保", "等级保护", "ISO27001", "NIST", "CIS", "GDPR", "PTES", "OSSTMM", "OWASP"],
+      "files": ["README.md", "等保2.0.md", "国际标准与框架.md", "渗透测试标准.md"]
+    },
+    {
+      "id": "08",
+      "name": "密码学与身份认证",
+      "path": "08-密码学与身份认证",
+      "keywords": ["密码学", "对称加密", "非对称加密", "哈希", "认证", "访问控制", "MFA", "PKI", "TLS", "OAuth"],
+      "files": ["README.md", "密码学基础.md", "认证与访问控制.md", "PKI与TLS.md"]
+    },
+    {
+      "id": "09",
+      "name": "CTF竞赛",
+      "path": "09-CTF竞赛",
+      "keywords": ["CTF", "竞赛", "Writeup", "题解", "夺旗赛", "正则绕过", "phar反序列化", "LSB隐写", "PowerShell混淆", "可见字符shellcode", "tcache", "堆利用", "z3", "Frida", "VM", "NTRU", "格密码"],
+      "files": ["README.md", "NCTF2023-Writeup.md", "CTF-Web技巧.md", "CTF-Misc技巧.md", "CTF-Pwn技巧.md", "CTF-逆向技巧.md", "CTF-密码技巧.md"]
+    },
+    {
+      "id": "10",
+      "name": "漏洞与框架知识",
+      "path": "10-漏洞与框架知识",
+      "source": "导入自 https://github.com/shuaiqideyu/SecAtlas 的 knowledge/ 目录",
+      "keywords": ["漏洞分类", "SQL注入", "XSS", "SSRF", "SSTI", "反序列化", "命令注入", "请求走私", "JWT", "OAuth", "IDOR", "XXE", "文件包含", "国产CMS", "国产OA", "ERP", "RuoYi", "若依", "发卡系统", "漏洞全集"],
+      "files": ["README.md", "categories/acl.md", "categories/agentic-ai.md", "categories/blockchain.md", "categories/command-injection.md", "categories/deserialization.md", "categories/file-inclusion.md", "categories/idor.md", "categories/jwt.md", "categories/misc.md", "categories/oauth.md", "categories/pwn.md", "categories/request-smuggling.md", "categories/sqli.md", "categories/ssrf.md", "categories/ssti.md", "categories/tool-checklist-9phase.md", "categories/xss.md", "categories/xxe.md", "frameworks/chinese-cms-vulnerabilities.md", "frameworks/chinese-oa-erp-vulnerabilities.md", "frameworks/faka-frameworks-vulnerabilities.md", "frameworks/ruoyi-vulnerabilities-full.md"]
+    },
+    {
+      "id": "11",
+      "name": "CVE漏洞库",
+      "path": "11-CVE漏洞库",
+      "source": "整合自旧智能体知识库 G:\\WorkDir\\.RAG.old\\Vuln (649 个漏洞文档)",
+      "keywords": ["CVE", "漏洞库", "漏洞利用", "中间件漏洞", "Web漏洞", "网络设备漏洞", "反序列化", "RCE", "文件上传", "未授权", "Shiro", "Weblogic", "Tomcat", "Struts2", "Spring", "用友", "致远", "泛微", "通达", "ThinkPHP"],
+      "files": ["README.md", "middleware/", "network/", "web/"]
+    },
+    {
+      "id": "12",
+      "name": "Payload库",
+      "path": "12-Payload库",
+      "source": "整合自旧智能体知识库 G:\\WorkDir\\.RAG.old\\Payload (88 个文件)",
+      "keywords": ["Payload", "反弹shell", "reverse-shell", "SQL注入", "XSS", "SSRF", "XXE", "LFI", "RCE", "上传绕过", "提示注入", "CORS", "HPP"],
+      "files": ["README.md", "access-bypass/", "cors/", "format/", "lfi/", "prompt-injection/", "rce/", "reverse-shell/", "sqli/", "ssrf/", "upload/", "xss/", "xxe/"]
+    },
+    {
+      "id": "13",
+      "name": "字典库",
+      "path": "13-字典库",
+      "source": "整合自旧智能体知识库 G:\\WorkDir\\.RAG.old\\Dic (291 个文件, 约 35MB)",
+      "keywords": ["字典", "密码字典", "弱口令", "用户名", "目录扫描", "端口", "DNS", "子域名", "爆破", "Shiro密钥", "WebShell密码"],
+      "files": ["README.md", "auth/", "network/", "port/", "regular/", "web/"]
+    }
+  ],
+  "retrieval_notes": {
+    "chunking": "按 ## 二级标题分块,每块 300~800 token",
+    "metadata_fields": ["path", "module", "title", "keywords"],
+    "disclaimer": "仅用于合法授权场景;未经授权的探测与攻击属违法行为"
+  }
+}

@@ -22,38 +22,25 @@ def _within(root: Path, value: str) -> Path:
 def create_tonydec_tool(
     allowed_root: str | Path,
     *,
-    executor: Any | None = None,
+    executor: Any,
 ) -> AllowedFunctionTool:
     """创建只能读取和写入任务工作目录的 TonyEnc 解码工具。
 
     Args:
         allowed_root: 任务工作目录根。
-        executor: LingshuDockerExecutor 实例。提供时文件读写通过容器执行；
-            解码逻辑仍在宿主机运行（依赖本地 tonydec Python 模块）。
+        executor: LingshuDockerExecutor 实例。文件读写与目录列举均通过
+            会话 Docker 容器执行；解码逻辑在宿主机运行（依赖本地
+            tonydec Python 模块）。
     """
     root = Path(allowed_root).resolve()
 
     async def _read_file_bytes(path: Path) -> bytes:
-        if executor is not None:
-            container_path = executor.map_path(str(path))
-            return await executor.read_bytes(container_path)
-        return path.read_bytes()
+        container_path = executor.map_path(str(path))
+        return await executor.read_bytes(container_path)
 
     async def _write_file_bytes(path: Path, data: bytes) -> None:
-        if executor is not None:
-            container_path = executor.map_path(str(path))
-            await executor.write_bytes(container_path, data)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-
-    async def _list_files(directory: Path) -> list[Path]:
-        """列出目录下的普通文件列表。"""
-        if executor is not None:
-            container_path = executor.map_path(str(directory))
-            entries = await executor.list_dir(container_path)
-            return [directory / name for name in entries]
-        return sorted(f for f in directory.rglob("*") if f.is_file() and not f.is_symlink())
+        container_path = executor.map_path(str(path))
+        await executor.write_bytes(container_path, data)
 
     async def tonydec(input_path: str, output_path: str) -> dict:
         """识别并解码 TonyEnc 文件或目录。
@@ -68,15 +55,12 @@ def create_tonydec_tool(
         source = _within(root, input_path)
         destination = _within(root, output_path)
 
-        # Docker 模式：通过 executor 检查存在性
-        if executor is not None:
-            container_src = executor.map_path(str(source))
-            check = await executor.exec_shell(
-                f"test -e {_shell_quote(container_src)} && echo exists || echo missing",
-            )
-            exists = b"exists" in check.stdout
-        else:
-            exists = source.exists()
+        # 通过 executor 检查存在性
+        container_src = executor.map_path(str(source))
+        check = await executor.exec_shell(
+            f"test -e {_shell_quote(container_src)} && echo exists || echo missing",
+        )
+        exists = b"exists" in check.stdout
 
         if not exists:
             raise FileNotFoundError(f"输入不存在: {source}")
@@ -106,40 +90,28 @@ def create_tonydec_tool(
                 "sha256": hashlib.sha256(payload).hexdigest(),
             })
 
-        # 判断是否为目录（Docker 模式下通过 exec 检查）
-        is_dir = False
-        if executor is not None:
-            container_src = executor.map_path(str(source))
-            check = await executor.exec_shell(
-                f"test -d {_shell_quote(container_src)} && echo dir || echo file",
-            )
-            is_dir = b"dir" in check.stdout
-        else:
-            is_dir = source.is_dir()
+        # 判断是否为目录（通过 exec 检查）
+        container_src = executor.map_path(str(source))
+        check = await executor.exec_shell(
+            f"test -d {_shell_quote(container_src)} && echo dir || echo file",
+        )
+        is_dir = b"dir" in check.stdout
 
         if not is_dir:
             await process_file(source, destination)
         else:
-            # Docker 模式下递归列出文件
-            if executor is not None:
-                container_src = executor.map_path(str(source))
-                result = await executor.exec_shell(
-                    f"cd {_shell_quote(container_src)} && find . -type f -printf '%P\\n'",
-                )
-                file_list = [
-                    line for line in
-                    result.stdout.decode("utf-8", errors="replace").splitlines()
-                    if line
-                ]
-                for rel in sorted(file_list):
-                    current = source / rel
-                    await process_file(current, destination / rel)
-            else:
-                for current in sorted(source.rglob("*")):
-                    if current.is_symlink():
-                        continue
-                    if current.is_file():
-                        await process_file(current, destination / current.relative_to(source))
+            # 递归列出文件
+            result = await executor.exec_shell(
+                f"cd {_shell_quote(container_src)} && find . -type f -printf '%P\\n'",
+            )
+            file_list = [
+                line for line in
+                result.stdout.decode("utf-8", errors="replace").splitlines()
+                if line
+            ]
+            for rel in sorted(file_list):
+                current = source / rel
+                await process_file(current, destination / rel)
 
         return {
             "signature": tonyenc_header.hex(),

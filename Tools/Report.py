@@ -106,13 +106,13 @@ def _register_pdf_fonts(pdfmetrics: Any, TTFont: Any, UnicodeCIDFont: Any) -> tu
     project_root = Path(__file__).resolve().parents[1]
     regular_candidates = [
         os.getenv("LINGSHU_PDF_FONT_REGULAR", ""),
-        str(project_root / "frontend" / "MSYH.TTC"),
+        str(project_root / "webui" / "src" / "MSYH.TTC"),
         "/usr/share/fonts/truetype/msttcorefonts/msyh.ttf",
         "/usr/share/fonts/truetype/microsoft/YaHei.ttf",
     ]
     bold_candidates = [
         os.getenv("LINGSHU_PDF_FONT_BOLD", ""),
-        str(project_root / "frontend" / "MSYHBD.TTC"),
+        str(project_root / "webui" / "src" / "MSYHBD.TTC"),
         "/usr/share/fonts/truetype/msttcorefonts/msyhbd.ttf",
         "/usr/share/fonts/truetype/microsoft/YaHeiBold.ttf",
     ]

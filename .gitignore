@@ -17,7 +17,6 @@ venv/
 .bak2
 .Reports/
 webui/node_modules/
-.RAG/
 .qwen
 .opencode
 .codex

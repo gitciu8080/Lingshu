@@ -21,7 +21,8 @@ FastAPI + SSE）创建会话并消费事件流，从而在前端控制台实时�
     python workbench_nss.py
     python workbench_nss.py --rounds 3
     python workbench_nss.py --loop --api-url http://localhost:8080
-    python workbench_nss.py --model Max
+    python workbench_nss.py --thinking-intensity high
+    python workbench_nss.py --provider deepseek --model deepseek-chat
 """
 from __future__ import annotations
 
@@ -40,13 +41,13 @@ import httpx
 NSS_API_BASE = "https://www.nssctf.cn/api"
 
 # 默认 Agent Token：优先读环境变量 NSSCTF_AGENT_TOKEN，否则使用此默认值
-DEFAULT_TOKEN = "nss_agent_qLvExRxvLtSUIDiRkQToFedw2RZf9OHcZ0b5S8t5lqI"
+DEFAULT_TOKEN = "nss_agent_joXHBmPrSfJhyRf0e2ZlxKTy3AUPSKHSmDXMQLLj6oI"
 
 # ── 灵枢 Web 后端 ──
 DEFAULT_API_URL = os.environ.get("LINGSHU_API_URL", "http://localhost:8080")
 # 默认 Web 登录账号（auth.py 中创建的用户）
-DEFAULT_USERNAME = os.environ.get("LINGSHU_USER", "admin")
-DEFAULT_PASSWORD = os.environ.get("LINGSHU_PASS", "gdcp@2026")
+DEFAULT_USERNAME = os.environ.get("LINGSHU_USER", "NSSCTF")
+DEFAULT_PASSWORD = os.environ.get("LINGSHU_PASS", "Nssctf12345")
 
 # 附件 / 题面工作目录
 ARENA_WORKDIR = Path(__file__).resolve().parent / "WorkDir" / "arena"
@@ -238,9 +239,16 @@ async def _start_session(
     goal: str,
     provider: str,
     model: str,
+    thinking_intensity: str = "medium",
     nss_context: dict | None = None,
 ) -> dict:
-    """通过 /api/session/start 创建会话，返回 {session_id, ...}。"""
+    """通过 /api/session/start 创建会话，返回 {session_id, ...}。
+
+    当前 API 契约（v0.3.x）：``model`` 为具体模型名称（空字符串表示
+    使用该 Provider 默认模型），思考强度由独立的 ``thinking_intensity``
+    （off/low/medium/high）表达；Low/Min/Max 固定三档已被后端移除。
+    ``auto_approve=True`` 让后端自动批准攻击阶段，适合无人值守工作台。
+    """
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
@@ -251,6 +259,8 @@ async def _start_session(
                 "goal": goal,
                 "provider": provider,
                 "model": model,
+                "thinking_intensity": thinking_intensity,
+                "auto_approve": True,
                 "nss_context": nss_context,
             },
         )
@@ -330,6 +340,7 @@ async def _solve_attempt(
     attempt: dict,
     provider: str,
     model: str,
+    thinking_intensity: str,
     retries: int,
 ) -> bool:
     attempt_id = attempt.get("id")
@@ -384,6 +395,7 @@ async def _solve_attempt(
         try:
             start = await _start_session(
                 api_url, web_token, target, goal, provider, model,
+                thinking_intensity=thinking_intensity,
                 nss_context=nss_context,
             )
         except Exception as exc:
@@ -484,7 +496,10 @@ async def _solve_attempt(
         if not mission_flag:
             mission_flag = detail.get("flag") or (detail.get("target_info") or {}).get("flag")
         if mission_success is None:
+            # success 存于 MissionState（mission_state）内，顶层无此字段
             mission_success = detail.get("success")
+            if mission_success is None:
+                mission_success = mission_state.get("success")
         if not mission_phase or mission_phase == "unknown":
             mission_phase = detail.get("phase") or "unknown"
 
@@ -611,6 +626,7 @@ async def _play_round(
     nss_token: str,
     provider: str,
     model: str,
+    thinking_intensity: str,
     retries: int,
 ) -> bool | None:
     """领取/复用一道题并处理。返回 True 解出 / False 未解出 / None 无题。"""
@@ -642,7 +658,7 @@ async def _play_round(
     print(f"[workbench] 当前题目状态: {state} (reused={data.get('reused', False)})")
     return await _solve_attempt(
         api_url, web_token, nss_client, nss_token,
-        attempt, provider, model, retries,
+        attempt, provider, model, thinking_intensity, retries,
     )
 
 
@@ -681,21 +697,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="单题最多解题轮数（最少 1 轮，默认 1；提交错误后可按配置重跑）",
     )
     parser.add_argument(
-        "--model", "-m", default="Min", choices=["Low", "Min", "Max"],
-        help="思考级别：Low(快速) / Min(默认) / Max(深度推理)",
+        "--model", "-m", default="",
+        help="具体模型名称（留空使用该提供商在 Web 管理中配置的默认模型）",
     )
     parser.add_argument(
-        "--provider", "-p", default="deepseek", choices=["deepseek", "qwen"],
-        help="模型提供商（deepseek 或 qwen）",
+        "--thinking-intensity", "-T", default="medium",
+        choices=["off", "low", "medium", "high"],
+        help="思考强度：off(关闭)/low/medium(默认)/high；旧版 Low/Min/Max 三档已移除",
+    )
+    parser.add_argument(
+        "--provider", "-p", default="deepseek",
+        help="模型提供商标识（deepseek、qwen 或 Web 管理注册的自定义 Provider）",
     )
     return parser
 
 
 async def main() -> None:
     args = build_parser().parse_args()
+
+    # 旧版兼容：--model 若被填成 Low/Min/Max 层级名，映射到思考强度并清空。
+    legacy_level = args.model.strip().lower()
+    if legacy_level in {"low", "min", "max"}:
+        mapped = {"low": "low", "min": "medium", "max": "high"}[legacy_level]
+        print(f"[workbench] ⚠️ --model {args.model} 为旧版层级名，"
+              f"已映射为思考强度 {mapped}，model 留空使用默认模型")
+        if "--thinking-intensity" not in sys.argv and "-T" not in sys.argv:
+            args.thinking_intensity = mapped
+        args.model = ""
+
     nss_token = args.token or os.environ.get("NSSCTF_AGENT_TOKEN") or DEFAULT_TOKEN
     print(f"[workbench] NSSCTF Agent Token: {_mask_token(nss_token)}")
-    print(f"[workbench] 灵枢 Web API: {args.api_url} | 模型: {args.provider}/{args.model}")
+    print(f"[workbench] 灵枢 Web API: {args.api_url} | "
+          f"模型: {args.provider}/{args.model or '提供商默认'} "
+          f"| 思考强度: {args.thinking_intensity}")
 
     # 登录灵枢 Web 后端
     try:
@@ -715,7 +749,7 @@ async def main() -> None:
             print(f"\n===== {label} =====")
             outcome = await _play_round(
                 args.api_url, web_token, nss_client, nss_token,
-                args.provider, args.model, args.retries,
+                args.provider, args.model, args.thinking_intensity, args.retries,
             )
             if outcome is None:
                 break
