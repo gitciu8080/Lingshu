@@ -43,7 +43,8 @@ import httpx
 NSS_API_BASE = "https://www.nssctf.cn/api"
 
 # 默认 Agent Token：优先读环境变量 NSSCTF_AGENT_TOKEN，否则使用此默认值
-# DEFAULT_TOKEN = "nss_agent_qLvExRxvLtSUIDiRkQToFedw2RZf9OHcZ0b5S8t5lqI"
+# DEFAULT_TOKEN = "nss_agent_tGo34OLhnTcIkScqkF7-JimArC0nhqjGe1Ql1Zd3hYQ"
+
 DEFAULT_TOKEN = "nss_agent_3n-RbnCNc8r8JgFONn4-1OcCntgoDHXoiV1syInHRR4"
 
 
@@ -468,8 +469,17 @@ async def _solve_attempt(
                     if not approved:
                         print(f"\n[Web:{session_id}] ⛔ 请求攻击阶段批准 → 自动批准")
                         try:
-                            await _send_message(api_url, web_token, session_id, "批准")
-                            approved = True
+                            response = await _send_message(
+                                api_url, web_token, session_id, "批准",
+                            )
+                            if response.get("status") == "sent":
+                                approved = True
+                                print(f"[Web:{session_id}] ✅ 自动批准已送达审批通道")
+                            else:
+                                print(
+                                    f"[workbench] 自动批准未被接收: "
+                                    f"{response.get('status', response)}",
+                                )
                         except Exception as exc:
                             print(f"[workbench] 自动批准失败: {exc}")
                 elif etype == "approval_resolved":

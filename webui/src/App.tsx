@@ -2139,6 +2139,43 @@ function SuperAdminPage() {
   </main>;
 }
 
+// 会话行独立 memo：accountStream / mission_end 只 patch 单个会话时，
+// 其余行的 props（session 引用、selected、onSelect）不变即可跳过重渲染。
+const SessionRow = memo(function SessionRow({
+  session,
+  selected,
+  onSelect,
+}: {
+  session: Session;
+  selected: boolean;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <button
+      onClick={() => onSelect(session.id)}
+      className={`session-row ${selected ? "selected" : ""}`}
+    >
+      <i
+        className={
+          session.is_live
+            ? "live"
+            : session.success === true
+              ? "success"
+              : session.success === false
+                ? "fail"
+                : ""
+        }
+      />
+      <div>
+        <b>{session.title || session.target || session.id.slice(0, 8)}</b>
+        <small>
+          {phaseLabel(session.phase)} · {session.target || "等待任务信息"}
+        </small>
+      </div>
+    </button>
+  );
+});
+
 function ConsoleApp() {
   const [ready, setReady] = useState(!!auth.get()),
     [theme, setTheme] = useState<ThemeMode>(() => {
@@ -2185,6 +2222,8 @@ function ConsoleApp() {
   const outgoingQueueRef = useRef<OutgoingMessage[]>([]);
   const flushingOutgoingRef = useRef(false);
   const scrollFrameRef = useRef(0);
+  // 稳定的会话选择回调：SessionRow memo 判等所需。
+  const selectSession = useCallback((id: string) => setActive(id), []);
   const current = useMemo(
     () => sessions.find((s) => s.id === active),
     [sessions, active],
@@ -2194,7 +2233,25 @@ function ConsoleApp() {
   const events = eventsForSession(eventStore, active);
   const toolEvents = eventStore.sessionId === active ? eventStore.toolItems : [];
   const phase = String(detail.phase || current?.phase || "");
-  const reportReferenceIndex = useMemo(() => buildReportReferenceIndex(detail), [detail]);
+  // referenceIndex 只依赖三个记录数组：plan_updated / target_info / 审批
+  // 事件都会产生新的 detail 对象引用，但 spread 保留这三个数组不变——
+  // 以字段级依赖做 memo，避免流式期间索引反复重建击穿全部 AgentCard 的
+  // memo 并触发逐卡全文正则替换。
+  const reportReferenceIndex = useMemo(
+    () => buildReportReferenceIndex(detail),
+    [detail.hypotheses, detail.evidence_records, detail.action_history],
+  );
+  // 会话列表过滤结果按 (sessions, search) 记忆化：事件高频到达时避免每次
+  // 渲染都重建过滤数组与拼接字符串。
+  const filteredSessions = useMemo(
+    () =>
+      sessions.filter((s) =>
+        `${s.title || ""} ${s.target || ""}`
+          .toLowerCase()
+          .includes(search.toLowerCase()),
+      ),
+    [sessions, search],
+  );
   const approvalMeta = approvalStatusMeta(detail);
   const activeHypothesis = activeHypothesisOf(detail);
   const hypothesisStatus = String(activeHypothesis?.status || "proposed");
@@ -2611,11 +2668,6 @@ function ConsoleApp() {
         <Login onReady={() => setReady(true)} />
       </>
     );
-  const filtered = sessions.filter((s) =>
-    `${s.title || ""} ${s.target || ""}`
-      .toLowerCase()
-      .includes(search.toLowerCase()),
-  );
   const flushOutgoing = async () => {
     if (flushingOutgoingRef.current) return;
     flushingOutgoingRef.current = true;
@@ -2812,32 +2864,15 @@ function ConsoleApp() {
               <p className="session-count">
                 <span>任务会话</span>
                 <i aria-hidden="true" />
-                <b>{filtered.length}{hasMoreSessions ? "+" : ""}</b>
+                <b>{filteredSessions.length}{hasMoreSessions ? "+" : ""}</b>
               </p>
-              {filtered.map((s) => (
-                <button
+              {filteredSessions.map((s) => (
+                <SessionRow
                   key={s.id}
-                  onClick={() => setActive(s.id)}
-                  className={`session-row ${active === s.id ? "selected" : ""}`}
-                >
-                  <i
-                    className={
-                      s.is_live
-                        ? "live"
-                        : s.success === true
-                          ? "success"
-                          : s.success === false
-                            ? "fail"
-                            : ""
-                    }
-                  />
-                  <div>
-                    <b>{s.title || s.target || s.id.slice(0, 8)}</b>
-                    <small>
-                      {phaseLabel(s.phase)} · {s.target || "等待任务信息"}
-                    </small>
-                  </div>
-                </button>
+                  session={s}
+                  selected={active === s.id}
+                  onSelect={selectSession}
+                />
               ))}
               {!search.trim() && hasMoreSessions && (
                 <button

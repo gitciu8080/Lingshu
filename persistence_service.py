@@ -29,6 +29,10 @@ class _WriteGroup:
     admitted_at: float = field(default_factory=time.monotonic)
     byte_size: int = 0
     outbox_path: Path | None = None
+    # 语义批次的 outbox 流水线写入任务（submit 后立即并发执行）；
+    # worker 在 SQLite 提交前等待其完成，保持崩溃恢复不变量。
+    outbox_task: asyncio.Task[Path] | None = None
+    durable: bool = False
 
 
 class PersistenceWriter:
@@ -126,8 +130,12 @@ class PersistenceWriter:
         if not self.running or self._queue is None:
             raise RuntimeError("SQLite 持久化服务尚未启动")
         # 跨线程、outbox 与重启重放必须看到完全相同的 JSON 形状。
-        operations = json.loads(json.dumps(operations, ensure_ascii=False, default=str))
-        byte_size = _operation_bytes(operations)
+        # 单次序列化同时完成规范化深拷贝与容量字节数计算。
+        serialized = json.dumps(
+            operations, ensure_ascii=False, separators=(",", ":"), default=str,
+        )
+        operations = json.loads(serialized)
+        byte_size = len(serialized.encode("utf-8"))
         if len(operations) > self.capacity or byte_size > self.capacity_bytes:
             raise RuntimeError(
                 f"单批持久化操作超过容量限制: operations={len(operations)}, bytes={byte_size}",
@@ -140,12 +148,16 @@ class PersistenceWriter:
             operation.get("type") not in {"snapshot_upsert", "snapshot_delete"}
             for operation in operations
         )
-        outbox_path = (
-            await asyncio.to_thread(self._write_outbox, operations)
+        # outbox 写入（含 fsync）立即调度到线程池流水线执行，入队路径只做
+        # 序列化与配额登记；worker 在 SQLite 提交前等待本批 outbox 完成，
+        # 保持"先持久化到 outbox、再提交 SQLite"的崩溃恢复不变量。
+        outbox_task = (
+            asyncio.create_task(asyncio.to_thread(self._write_outbox, operations))
             if durable else None
         )
         group = _WriteGroup(
-            operations, receipt, byte_size=byte_size, outbox_path=outbox_path,
+            operations, receipt, byte_size=byte_size,
+            outbox_task=outbox_task, durable=durable,
         )
         await self._admit(group)
         if receipt is not None:
@@ -176,16 +188,33 @@ class PersistenceWriter:
 
     async def _drain_callbacks(self) -> None:
         while self._callback_pending:
-            operations = self._callback_pending[0]
+            # 合并积压的小批次一起入队：fsync 已流水线化出 submit 路径，
+            # 合并可摊薄序列化与配额登记开销，降低多会话高吞吐时的排队延迟。
+            merged: list[dict[str, Any]] = []
+            sources: list[list[dict[str, Any]]] = []
+            batches = 0
+            while self._callback_pending and batches < 16 and len(merged) < 1024:
+                operations_batch = self._callback_pending.popleft()
+                merged.extend(operations_batch)
+                sources.append(operations_batch)
+                batches += 1
             try:
-                await self.submit(operations)
+                await self.submit(merged)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("持久化回调入队失败")
-                self._callback_pending.popleft()
-                continue
-            self._callback_pending.popleft()
+                # 合并失败时回退为逐批提交（容量超限等场景拆小即可通过），
+                # 仅真正无法入队的批次才丢弃——尽量保证数据不丢。
+                logger.exception("持久化合并批次（%d 操作）入队失败，回退逐批提交", len(merged))
+                for source in sources:
+                    try:
+                        await self.submit(source)
+                    except asyncio.CancelledError:
+                        self._callback_pending.appendleft(source)
+                        raise
+                    except Exception:
+                        logger.exception("持久化回调批次（%d 操作）入队失败，已丢弃", len(source))
+                        self.degraded = True
 
     async def flush(self) -> None:
         drain = self._callback_drain
@@ -277,6 +306,9 @@ class PersistenceWriter:
             operations = [op for group in groups for op in group.operations]
             self._inflight_since = min(group.admitted_at for group in groups)
             self._inflight_operations = len(operations)
+            # 提交前必须确保本批所有语义操作的 outbox 已 fsync 落盘：
+            # 崩溃时"已入队未提交"的操作仍可从 outbox 重放，数据不丢。
+            await self._await_outbox(groups)
             delay = self.retry_initial
             while True:
                 try:
@@ -330,12 +362,39 @@ class PersistenceWriter:
                     await asyncio.sleep(delay)
                     delay = min(delay * 2, self.retry_max)
 
+    async def _await_outbox(self, groups: list[_WriteGroup]) -> None:
+        """等待本批组的 outbox 流水线写盘完成并回收结果。
+
+        outbox 写失败不阻断提交：SQLite 是主存储，outbox 仅用于崩溃重放；
+        丢一份重放副本好过阻塞所有会话的持久化管道。
+        """
+        tasks = [
+            group.outbox_task for group in groups
+            if group.outbox_task is not None
+        ]
+        if not tasks:
+            return
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for group in groups:
+            task = group.outbox_task
+            group.outbox_task = None
+            if task is None or task.cancelled():
+                continue
+            error = task.exception()
+            if error is not None:
+                logger.error("outbox 写入失败（批次仍将提交 SQLite）: %s", error)
+                continue
+            group.outbox_path = task.result()
+
     async def _isolate_failed_groups(self, groups: list[_WriteGroup]) -> None:
         """Retry groups separately so one malformed event cannot poison neighbors."""
         loop = asyncio.get_running_loop()
         assert self._executor is not None and self._queue is not None
         for group in groups:
             try:
+                loop = asyncio.get_running_loop()
+                assert self._executor is not None
+                await self._await_outbox([group])
                 results = await loop.run_in_executor(
                     self._executor,
                     session_store.apply_persistence_batch,

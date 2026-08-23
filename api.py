@@ -104,6 +104,9 @@ class SessionContext:
     # 不能让每个 delta 都重新打开 SQLite、覆盖完整正文并提交事务。
     stream_snapshot_writes: dict[str, tuple[float, int]] = field(default_factory=dict)
     tool_buffers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # SSE 审批事件发出后，SQLite 投影可能仍在异步写入队列中。实时决策必须
+    # 以此内存态为准，不能等待 pending_approval 已经落盘。
+    pending_approval_request: dict[str, Any] | None = None
     approval_decision_submitted: bool = False
     agent_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     # 运行时追加指令状态（非审批用户消息 → 中断 Agent → 注入后恢复）
@@ -316,14 +319,19 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                 ctx.stream_buffer_sizes[stream_key] = current_size + len(chunk)
             if block_id:
                 now = time.monotonic()
-                full_text = _buffer_text(parts)
                 last_write, last_size = ctx.stream_snapshot_writes.get(
                     stream_key, (0.0, 0),
                 )
                 # 与 Agent Service 历史镜像保持相同策略：最多约每 200ms
                 # 写一次；大块输出累计 512 字符时提前落盘。首个非空
                 # delta 会立即写入，崩溃恢复能力不受影响。
-                if now - last_write >= 0.2 or len(full_text) - last_size >= 512:
+                # 长度判断用累计字节数而非全量 join：每个 delta 都做
+                # O(n) 拼接在多会话并发流式下是 O(n²) 的循环内 CPU。
+                if (
+                    now - last_write >= 0.2
+                    or ctx.stream_buffer_sizes.get(stream_key, 0) - last_size >= 512
+                ):
+                    full_text = _buffer_text(parts)
                     persistence_operations.append({
                         "type": "snapshot_upsert",
                         "session_id": session_id,
@@ -471,6 +479,7 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
         # 审批状态持久化：approval_required 时保存完整事件数据，approval_resolved 时清除
         if event_type == "approval_required":
             ctx.approval_decision_submitted = False
+            ctx.pending_approval_request = dict(payload)
             requested_at = datetime.now().astimezone().isoformat()
             persistence_operations.append(session_update_operation(
                 session_id,
@@ -488,6 +497,7 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             }))
         elif event_type == "approval_resolved":
             ctx.approval_decision_submitted = True
+            ctx.pending_approval_request = None
             decision = str(payload.get("decision") or "").strip()
             approval_status = (
                 "approved" if payload.get("approved") else
@@ -1706,8 +1716,10 @@ async def send_message(session_id: str, msg: ChatMessage, current_user: dict = D
 
     # ── 审批决策 ──
     if content in {"批准", "补充侦察", "拒绝"}:
-        session = await asyncio.to_thread(session_store.get_session, session_id)
-        if ctx.approval_decision_submitted or not session.get("pending_approval"):
+        # approval_required 通过 SSE 发出后，持久化服务才异步投影到 SQLite。
+        # 自动审批客户端会在收到 SSE 的同一轮立即回传，不能因 SQLite 尚未提交
+        # 而误判为“已处理”。活跃会话的内存态是实时权威，SQLite 仅用于恢复。
+        if ctx.approval_decision_submitted or ctx.pending_approval_request is None:
             return {"status": "approval_already_resolved"}
         ctx.approval_decision_submitted = True
     else:

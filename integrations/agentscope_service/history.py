@@ -112,8 +112,11 @@ class RoleHistoryRecorder:
             block_id = self._stream_ids.get((agent, kind), source_id)
             now = time.monotonic()
             last_write, last_size = self._snapshot_writes.get((agent, kind), (0.0, 0))
-            content = "".join(self._streams[(agent, kind)])
-            if now - last_write >= 0.2 or len(content) - last_size >= 512:
+            # 长度判断用累计字节数而非全量 join，避免每个 delta 都做
+            # O(n) 拼接（多会话并发流式下为 O(n²) CPU）。
+            current_size = self._stream_sizes[(agent, kind)]
+            if now - last_write >= 0.2 or current_size - last_size >= 512:
+                content = "".join(self._streams[(agent, kind)])
                 self._submit({
                     "type": "snapshot_upsert", "session_id": self.session_id,
                     "reply_id": self.reply_id, "block_id": block_id,
