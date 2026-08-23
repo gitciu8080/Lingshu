@@ -82,11 +82,11 @@ def validate_password_strength(password: str) -> str:
 
 
 def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     # journal_mode 是数据库级设置，只在 init_db 中初始化一次。每次新建
     # 连接重复切换 WAL 会引入额外锁竞争，实时消息高频写入时尤其明显。
-    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn

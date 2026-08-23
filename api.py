@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 import subprocess
 import time
@@ -367,6 +368,20 @@ def _persist_target_info(session_id: str, payload: dict) -> None:
         pass
 
 
+def _safe_update_session(session_id: str, **fields: Any) -> bool:
+    """更新会话索引；SQLite 暂时不可用时不得中断权威 Mission 工作流。"""
+    try:
+        session_store.update_session(session_id, **fields)
+        return True
+    except sqlite3.Error:
+        logger.exception(
+            "会话索引更新失败，Mission JSON 与运行任务保持继续: session_id=%s fields=%s",
+            session_id,
+            sorted(fields),
+        )
+        return False
+
+
 # ── Session-aware 事件回调工厂 ──
 
 def _make_session_callback(session_id: str, ctx: SessionContext):
@@ -520,7 +535,7 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             })
         elif event_type == "phase_change":
             _persist_target_info(session_id, {"phase": payload.get("phase", "")})
-            session_store.update_session(
+            _safe_update_session(
                 session_id,
                 phase=payload.get("phase", ""),
             )
@@ -535,7 +550,7 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             )
         elif event_type == "session_title":
             title = str(payload.get("title") or "安全测试任务")
-            session_store.update_session(session_id, title=title)
+            _safe_update_session(session_id, title=title)
             publish_account_event(
                 ctx.user_id,
                 "account_session_title",
@@ -550,13 +565,13 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
         # 审批状态持久化：approval_required 时保存完整事件数据，approval_resolved 时清除
         if event_type == "approval_required":
             ctx.approval_decision_submitted = False
-            session_store.update_session(
+            _safe_update_session(
                 session_id,
                 pending_approval=json.dumps(payload, ensure_ascii=False),
             )
         elif event_type == "approval_resolved":
             ctx.approval_decision_submitted = True
-            session_store.update_session(session_id, pending_approval=None)
+            _safe_update_session(session_id, pending_approval=None)
             if payload.get("approved"):
                 _persist_target_info(session_id, {"exploitation_approved": True})
 
@@ -778,7 +793,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             # Summary 报告已由 run_mission 收尾阶段生成（含 PDF 落盘与 report_ready
             # 事件），此处仅落库并通知前端任务结束。
             await asyncio.to_thread(
-                session_store.update_session,
+                _safe_update_session,
                 session_id,
                 status=status_val,
                 phase=phase,
@@ -846,7 +861,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             callback("mission_end", message="任务已结束", status=status_val)
         await _flush_persistence()
         await asyncio.to_thread(
-            lambda: session_store.update_session(
+            lambda: _safe_update_session(
                 session_id, status=status_val, phase=phase,
                 success=success, flag=flag, summary=summary,
             )

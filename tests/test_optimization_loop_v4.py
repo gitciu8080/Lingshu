@@ -5,36 +5,23 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-
-from agentscope.message import ToolCallBlock
-
 from TaskState import MissionState, MissionStore
 from Tools.target import normalize_target
-from Tools.tooling import (
-    AllowedFunctionTool,
-    StrictJSONToolkit,
-    bind_tool_budget_handler,
-    reset_tool_budget_handler,
-)
 from agent.Attack import _build_skill_list
 from agent.categorize import CategoryDecision, evaluate_reclassification
 from main import (
     _commit_recon_reclassification,
-    _iter_budget,
+    _max_react_iters,
     _mission_complexity,
 )
 
 
 class StructuredStateTest(unittest.TestCase):
-    def test_fact_attempt_evidence_and_budgets_roundtrip(self) -> None:
+    def test_fact_attempt_and_evidence_roundtrip(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="lingshu-v4-state-"))
         store = MissionStore(root / "mission.json")
         mission = MissionState(target="challenge", goal="获取 Flag", authorized=True)
-        mission.configure_budgets("simple", action_limit=2, tool_limit=3)
-
         attempt = mission.begin_attempt("recon", "Iris", "challenge", {"focus": "file"})
-        self.assertIsNotNone(attempt)
         evidence = mission.add_evidence("Iris", "recon_report", "ELF 64-bit LSB executable")
         fact = mission.add_fact(
             "工具输出确认目标是 ELF 64-bit",
@@ -51,15 +38,7 @@ class StructuredStateTest(unittest.TestCase):
         self.assertEqual(loaded.facts[0].id, fact.id)
         self.assertEqual(loaded.attempts[0].status, "success")
         self.assertEqual(loaded.evidence_records[0].id, evidence.id)
-        self.assertEqual(loaded.action_budget.used, 1)
-        self.assertEqual(loaded.action_budget.limit, 2)
-
-    def test_action_budget_blocks_third_action(self) -> None:
-        mission = MissionState(target="t", goal="g", authorized=True)
-        mission.configure_budgets("simple", 2, 3)
-        self.assertIsNotNone(mission.begin_attempt("recon", "r", "t"))
-        self.assertIsNotNone(mission.begin_attempt("attack", "a", "t"))
-        self.assertIsNone(mission.begin_attempt("attack", "a", "t"))
+        self.assertEqual(len(loaded.attempts), 1)
 
 
 class ReclassificationIntegrationTest(unittest.TestCase):
@@ -108,47 +87,23 @@ class IndependentBudgetTest(unittest.TestCase):
         self.assertEqual(_mission_complexity(spec, "获取 Flag", None, simple_decision), "simple")
         self.assertEqual(_mission_complexity(spec, "获取 Flag", None, complex_decision), "complex")
         self.assertLess(
-            _iter_budget("network", "attack", "simple"),
-            _iter_budget("network", "attack", "complex"),
+            _max_react_iters("network", "attack", "simple"),
+            _max_react_iters("network", "attack", "complex"),
         )
 
 
-class ToolBudgetTest(unittest.IsolatedAsyncioTestCase):
-    async def test_tool_budget_rejects_after_limit(self) -> None:
-        invoked = 0
-
-        def work() -> str:
-            nonlocal invoked
-            invoked += 1
-            return "ok"
-
-        remaining = {"value": 1}
-
-        def consume(_name: str) -> tuple[bool, str]:
-            if remaining["value"] <= 0:
-                return False, "tool budget exhausted"
-            remaining["value"] -= 1
-            return True, ""
-
-        token = bind_tool_budget_handler(consume)
-        try:
-            toolkit = StrictJSONToolkit(tools=[AllowedFunctionTool(work)])
-            state = SimpleNamespace(tool_context=SimpleNamespace(activated_groups=[]))
-
-            async def call(call_id: str):
-                return [
-                    item async for item in toolkit.call_tool(
-                        ToolCallBlock(id=call_id, name="work", input="{}"),
-                        state,
-                    )
-                ]
-
-            await call("c1")
-            rejected = await call("c2")
-            self.assertEqual(invoked, 1)
-            self.assertIn("tool budget exhausted", str(rejected))
-        finally:
-            reset_tool_budget_handler(token)
+class RemovedBudgetCompatibilityTest(unittest.TestCase):
+    def test_legacy_budget_fields_are_discarded_on_load(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="lingshu-no-budget-"))
+        store = MissionStore(root / "mission.json")
+        mission = MissionState(target="t", goal="g", authorized=True)
+        payload = mission.to_dict()
+        payload["action_budget"] = {"limit": 1, "used": 1}
+        payload["tool_budget"] = {"limit": 1, "used": 1}
+        store.path.write_text(__import__("json").dumps(payload), encoding="utf-8")
+        loaded = store.load()
+        self.assertFalse(hasattr(loaded, "action_budget"))
+        self.assertFalse(hasattr(loaded, "tool_budget"))
 
 
 if __name__ == "__main__":

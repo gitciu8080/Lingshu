@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -82,6 +83,24 @@ class SessionStorePerformanceTest(unittest.TestCase):
         )
         self.assertEqual([row["content"] for row in messages], ["A", "B"])
         self.assertEqual(snapshots[0]["content"], "未完成")
+
+    def test_parallel_writers_are_serialized_without_lock_errors(self) -> None:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [
+                executor.submit(
+                    session_store.add_message,
+                    "page-test",
+                    "agent",
+                    f"并发消息 {index}",
+                )
+                for index in range(40)
+            ]
+            sequences = [future.result() for future in futures]
+
+        self.assertEqual(sorted(sequences), list(range(1, 41)))
+        messages = session_store.get_all_messages("page-test")
+        self.assertEqual(len(messages), 40)
+        self.assertEqual([row["seq"] for row in messages], list(range(1, 41)))
 
 
 if __name__ == "__main__":

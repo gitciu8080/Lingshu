@@ -96,10 +96,6 @@ _TOOL_JSON_FAILURE_HANDLER: ContextVar[
     Callable[[dict[str, Any]], None] | None
 ] = ContextVar("lingshu_tool_json_failure_handler", default=None)
 
-_TOOL_BUDGET_HANDLER: ContextVar[
-    Callable[[str], tuple[bool, str]] | None
-] = ContextVar("lingshu_tool_budget_handler", default=None)
-
 _ACTION_LIFECYCLE_HANDLER: ContextVar[
     Callable[[str, dict[str, Any]], dict[str, Any]] | None
 ] = ContextVar("lingshu_action_lifecycle_handler", default=None)
@@ -114,17 +110,6 @@ def bind_tool_json_failure_handler(
 
 def reset_tool_json_failure_handler(token: Token) -> None:
     _TOOL_JSON_FAILURE_HANDLER.reset(token)
-
-
-def bind_tool_budget_handler(
-    handler: Callable[[str], tuple[bool, str]],
-) -> Token:
-    """绑定当前任务的确定性工具预算检查器。"""
-    return _TOOL_BUDGET_HANDLER.set(handler)
-
-
-def reset_tool_budget_handler(token: Token) -> None:
-    _TOOL_BUDGET_HANDLER.reset(token)
 
 
 def bind_action_lifecycle_handler(
@@ -204,25 +189,6 @@ class StrictJSONToolkit(Toolkit):
                             ToolResultState.SUCCESS
                             if decision == "cached" else ToolResultState.ERROR
                         ),
-                    )
-                    yield chunk
-                    yield response.append_chunk(chunk)
-                    return
-
-            # 缓存命中/重复拦截不消耗预算；只有真正执行才计数。
-            budget_handler = _TOOL_BUDGET_HANDLER.get()
-            if budget_handler is not None:
-                allowed, message = budget_handler(tool_call.name)
-                if not allowed:
-                    if lifecycle_handler is not None and lifecycle.get("action_id"):
-                        lifecycle_handler("after", {
-                            "action_id": lifecycle["action_id"], "result": message,
-                            "raised": True, "tool_error": True,
-                        })
-                    response = ToolResponse(id=tool_call.id)
-                    chunk = ToolChunk(
-                        content=[TextBlock(text=message)],
-                        state=ToolResultState.ERROR,
                     )
                     yield chunk
                     yield response.append_chunk(chunk)

@@ -86,14 +86,12 @@ from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     bind_agent_tasks,
     bind_expert_roster,
     bind_process_tracker,
-    bind_tool_budget_handler,
     bind_tool_json_failure_handler,
     cancel_agent_tasks,
     reset_agent_tasks,
     reset_action_lifecycle_handler,
     reset_expert_roster,
     reset_process_tracker,
-    reset_tool_budget_handler,
     reset_tool_json_failure_handler,
     run_interruptible_agent_reply,
     stream_agent_reply,
@@ -275,8 +273,8 @@ def build_final_mission_title(mission: MissionState) -> str:
         f"{category_title} - {detail} - {outcome}",
     )
 
-# 各角色基础迭代预算（按目标类型）——P2 自适应预算的基准表。
-# 网络渗透任务涉及扫描/枚举/利用，预算最高；单文件取证相对收敛。
+# 各角色 ReAct 最大迭代数（按目标类型）。
+# 这只是单次 Agent 回复的防失控上限，不限制任务的调度次数或工具调用次数。
 _ROLE_BASE_BUDGET = {
     "network": {"recon": 26, "attack": 28, "reserve": 22, "brain": 16},
     "archive": {"recon": 22, "attack": 28, "reserve": 28, "brain": 16},
@@ -286,21 +284,15 @@ _ROLE_BASE_BUDGET = {
 
 _ITER_BUDGET_MIN, _ITER_BUDGET_MAX = 12, 40
 
-_COMPLEXITY_LIMITS = {
-    "simple": {"actions": 8, "tools": 45},
-    "complex": {"actions": 18, "tools": 120},
-}
-
-
-def _iter_budget(
+def _max_react_iters(
     kind: str,
     role: str,
     complexity: str = "complex",
     plan_items: int = 0,
 ) -> int:
-    """按目标类型、任务复杂度和计划规模计算 ReAct 迭代预算。
+    """按目标类型、任务复杂度和计划规模计算单次 ReAct 最大迭代数。
 
-    模型 Low/Min/Max 只控制模型自身推理深度，不再改变行动或工具迭代预算。
+    模型 Low/Min/Max 只控制模型自身推理深度；本值不构成行动或工具预算。
     """
     base = _ROLE_BASE_BUDGET.get(kind, _ROLE_BASE_BUDGET["directory"])[role]
     plan_bonus = min(plan_items, 4 if complexity == "simple" else 8)
@@ -1206,25 +1198,14 @@ async def run_mission(
             )
         store.save(mission)
 
-    # ── v0.4.0：复杂度与执行预算（与模型推理强度完全分离）──
+    # ── 任务复杂度（仅用于角色 ReAct 迭代配置，不限制行动或工具次数）──
     complexity = _mission_complexity(target_spec, goal_text, manifest, category_decision)
-    limits = _COMPLEXITY_LIMITS[complexity]
-    if mission.action_budget.limit <= 0 or mission.tool_budget.limit <= 0:
-        mission.configure_budgets(
-            complexity,
-            action_limit=limits["actions"],
-            tool_limit=limits["tools"],
-            preserve_usage=resume,
-        )
-        store.save(mission)
-    else:
-        # v4 会话恢复时以已持久化预算为准，不能因模型 Ver 改变而重置额度。
+    if resume and mission.complexity in {"simple", "complex"}:
         complexity = mission.complexity
-    print(
-        f"[系统] 任务复杂度: {complexity}，"
-        f"行动预算={mission.action_budget.limit}，"
-        f"工具预算={mission.tool_budget.limit}"
-    )
+    else:
+        mission.complexity = complexity
+    store.save(mission)
+    print(f"[系统] 任务复杂度: {complexity}，行动与工具调用均不设总次数预算")
 
     # ── 动态授权范围注册表 ──
     scope_registry = ScopeRegistry()
@@ -1332,7 +1313,6 @@ async def run_mission(
     agent_tasks_token = bind_agent_tasks(active_agent_tasks)
     expert_roster_token = None
     tool_json_token = None
-    tool_budget_token = None
     action_lifecycle_token = None
     attack = None
     reserve = None
@@ -1574,34 +1554,6 @@ async def run_mission(
 
         action_lifecycle_token = bind_action_lifecycle_handler(_action_lifecycle)
 
-        # 控制/收尾工具在预算耗尽后仍必须可用，否则无法安全进入终态；其余
-        # Function/MCP 工具统一消耗 tool_budget。
-        budget_exempt_tools = {
-            "complete_mission", "view_mission_state", "ListPlan",
-            "request_exploitation_approval", "request_scope_expansion",
-        }
-
-        def _consume_tool_budget(tool_name: str) -> tuple[bool, str]:
-            if tool_name in budget_exempt_tools:
-                return True, ""
-            if mission.tool_budget.consume():
-                return True, ""
-            mission.record(
-                "system",
-                "tool_budget_exhausted",
-                tool_name=tool_name,
-                used=mission.tool_budget.used,
-                limit=mission.tool_budget.limit,
-            )
-            store.save(mission)
-            return (
-                False,
-                "[预算拒绝] 本任务工具预算已经耗尽。禁止继续调用执行工具；"
-                "请基于已有 Facts/Evidence 调用 complete_mission 如实收尾。",
-            )
-
-        tool_budget_token = bind_tool_budget_handler(_consume_tool_budget)
-
         # ── v0.3.0：获取会话 Workspace（LocalWorkspace + 业务目录）──
         # 同一会话所有内部 Agent 共享同一 Workspace：
         #   - offloader：压缩上下文与超限工具结果卸载（角色分区）
@@ -1809,7 +1761,7 @@ async def run_mission(
             model,
             tools=brain_tools,
             # Qwen 的逐条 AddPlan 通常需要 4~8 次登记加一次正文输出。
-            max_iters=(15 if qwen_flat_plan_tools else _iter_budget(
+            max_iters=(15 if qwen_flat_plan_tools else _max_react_iters(
                 target_spec.kind, "brain", complexity,
             )),
             # 检索由 run_mission 在首轮 Recon 后确定性执行并显式注入，避免
@@ -1841,7 +1793,7 @@ async def run_mission(
             recon = create_network_recon_agent(
                 model, target_str, project_dir, runtime.command_timeout,
                 scope_registry=scope_registry,
-                max_iters=_iter_budget(target_spec.kind, "recon", complexity),
+                max_iters=_max_react_iters(target_spec.kind, "recon", complexity),
                 offloader=workspace,
                 context_config=_role_context("recon"),
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
@@ -1856,7 +1808,7 @@ async def run_mission(
                 triage_categories.update({"forensics", "reverse", "misc"})
             recon = create_artifact_triage_agent(
                 model, workdir, project_dir, runtime.command_timeout,
-                max_iters=_iter_budget(target_spec.kind, "recon", complexity),
+                max_iters=_max_react_iters(target_spec.kind, "recon", complexity),
                 offloader=workspace,
                 context_config=_role_context("recon"),
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
@@ -1876,8 +1828,6 @@ async def run_mission(
                 mission.target,
                 {"focus": "首轮最小化侦察与题型确认"},
             )
-            if bootstrap_attempt is None:
-                raise RuntimeError("首轮 Recon 无可用行动预算")
             try:
                 bootstrap_result = await run_interruptible_agent_reply(
                     recon,
@@ -2095,7 +2045,7 @@ async def run_mission(
                 runtime.command_timeout,
                 category_decision=mission.category_decision,
                 scope_registry=scope_registry,
-                max_iters=_iter_budget(
+                max_iters=_max_react_iters(
                     target_spec.kind, "attack", complexity, len(mission.plan_items),
                 ),
                 # Attack 使用 MissionState 中共享的有界 Knowledge Context；
@@ -2145,7 +2095,7 @@ async def run_mission(
                 runtime.command_timeout,
                 category_decision=mission.category_decision,
                 scope_registry=scope_registry,
-                max_iters=_iter_budget(
+                max_iters=_max_react_iters(
                     target_spec.kind, "reserve", complexity, len(mission.plan_items),
                 ),
                 event_callback=event_callback,
@@ -2221,8 +2171,6 @@ async def run_mission(
             f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
             f"分层决策上下文（Historical 仅含引用，需要时调用 view_mission_state）：\n"
             f"{json.dumps(mission.context_layers(limit=8), ensure_ascii=False)}\n"
-            f"行动预算：{mission.action_budget.used}/{mission.action_budget.limit}；"
-            f"工具预算：{mission.tool_budget.used}/{mission.tool_budget.limit}\n"
             "首轮 Recon 与题型确认已经完成；只有存在明确证据缺口时才补充侦察，"
             "否则直接基于 Facts/Evidence 推进。对待验证判断先登记 Hypothesis 并在"
             "dispatch 时关联其 ID；遇到 Failed Path 按 resolution 执行 Retry/Fallback/停止路径。"
@@ -2432,8 +2380,6 @@ async def run_mission(
             reset_tool_json_failure_handler(tool_json_token)
         if action_lifecycle_token is not None:
             reset_action_lifecycle_handler(action_lifecycle_token)
-        if tool_budget_token is not None:
-            reset_tool_budget_handler(tool_budget_token)
         # 停止本任务启动的所有命令及后台子进程，避免取消后继续运行。
         await process_tracker.terminate_all()
         reset_process_tracker(process_tracker_token)

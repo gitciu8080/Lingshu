@@ -5,12 +5,44 @@ session_store.py — SQLite 会话存储层
 复用 auth.py 的 get_db() 获取数据库连接。
 """
 
+import os
+import sqlite3
+import threading
+import time
 import uuid
 from datetime import datetime
+from functools import wraps
 
 from auth import get_db
 
 
+_WRITE_LOCK = threading.RLock()
+_LOCK_RETRIES = max(1, int(os.getenv("LINGSHU_SQLITE_LOCK_RETRIES", "5")))
+
+
+def _retry_locked_write(function):
+    """串行化进程内写事务，并对跨进程 SQLite 锁竞争进行退避重试。"""
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        delay = 0.05
+        for attempt in range(_LOCK_RETRIES):
+            try:
+                with _WRITE_LOCK:
+                    return function(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" not in message:
+                    raise
+                if attempt + 1 >= _LOCK_RETRIES:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 1.0)
+        raise RuntimeError("SQLite 写入重试状态异常")
+
+    return wrapped
+
+
+@_retry_locked_write
 def init_sessions_db():
     """初始化 sessions 和 session_messages 两张表（幂等操作）。"""
     conn = get_db()
@@ -121,6 +153,7 @@ def init_sessions_db():
         conn.close()
 
 
+@_retry_locked_write
 def create_session(
     user_id: int,
     target: str,
@@ -160,6 +193,7 @@ _UPDATABLE_FIELDS = {
 }
 
 
+@_retry_locked_write
 def update_session(session_id: str, **fields) -> None:
     """动态更新会话的指定字段（仅允许白名单中的字段）。"""
     # 过滤非法字段
@@ -216,6 +250,7 @@ def get_session(session_id: str) -> dict | None:
         conn.close()
 
 
+@_retry_locked_write
 def delete_session(session_id: str) -> list[str]:
     """删除会话及其所有关联消息、快照与 blob 引用。
 
@@ -251,6 +286,7 @@ def delete_session(session_id: str) -> list[str]:
     return orphaned
 
 
+@_retry_locked_write
 def add_blob_ref(session_id: str, sha256: str, original_name: str = '', size: int = 0) -> None:
     """为会话登记一条 blob 引用（幂等：同会话同 sha256 只记一次）。"""
     conn = get_db()
@@ -280,6 +316,7 @@ def list_blob_refs(session_id: str) -> list[dict]:
         conn.close()
 
 
+@_retry_locked_write
 def add_message(
     session_id: str,
     role: str,
@@ -316,6 +353,7 @@ def add_message(
         conn.close()
 
 
+@_retry_locked_write
 def apply_persistence_batch(operations: list[dict]) -> list[int | None]:
     """在单个事务中顺序应用消息和流快照操作。
 
@@ -433,6 +471,7 @@ def get_all_messages(session_id: str) -> list[dict]:
         conn.close()
 
 
+@_retry_locked_write
 def upsert_stream_snapshot(
     session_id: str,
     reply_id: str,
@@ -469,6 +508,7 @@ def upsert_stream_snapshot(
         conn.close()
 
 
+@_retry_locked_write
 def delete_stream_snapshot(session_id: str, block_id: str) -> None:
     conn = get_db()
     try:

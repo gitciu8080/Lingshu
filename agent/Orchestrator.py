@@ -110,12 +110,6 @@ def create_orchestrator_agent(
             mission.target,
             {"focus": focus, "hypothesis_id": hypothesis_id},
         )
-        if attempt is None:
-            store.save(mission)
-            return (
-                "[预算拒绝] 行动预算已经耗尽，不能再次派遣 Recon。"
-                "请基于现有 Facts/Evidence 调用 complete_mission 如实收尾。"
-            )
         if mission.phase != Phase.RECON:
             mission.transition(Phase.RECON, f"需要补充侦察: {focus}")
         mission.record("Orchestrator", "dispatch_recon", focus=focus)
@@ -278,12 +272,6 @@ def create_orchestrator_agent(
                 "hypothesis_id": hypothesis_id,
             },
         )
-        if attempt is None:
-            store.save(mission)
-            return (
-                "[预算拒绝] 行动预算已经耗尽，不能再次派遣 Attack。"
-                "请基于现有 Facts/Evidence 调用 complete_mission 如实收尾。"
-            )
         if exploitation and mission.phase == Phase.ANALYSIS:
             mission.transition(Phase.EXPLOITATION, f"开始执行: {objective}")
         if any(word in lower or word in objective for word in ("flag", "post", "提权")):
@@ -405,12 +393,6 @@ def create_orchestrator_agent(
             {"binary_path": binary_path, "objective": objective,
              "hypothesis_id": hypothesis_id},
         )
-        if attempt is None:
-            store.save(mission)
-            return (
-                "[预算拒绝] 行动预算已经耗尽，不能再次派遣 Reserve。"
-                "请基于现有 Facts/Evidence 调用 complete_mission 如实收尾。"
-            )
         if any(word in lower or word in objective for word in ("exploit", "利用", "patch")):
             if mission.phase == Phase.ANALYSIS:
                 mission.transition(Phase.EXPLOITATION, f"逆向进入利用阶段: {objective}")
@@ -735,10 +717,6 @@ def create_orchestrator_agent(
             "context_layers": mission.context_layers(limit=8),
             "success": mission.success,
             "active_plan_item": mission.active_plan_item,
-            "budgets": {
-                "action": {"used": mission.action_budget.used, "limit": mission.action_budget.limit},
-                "tool": {"used": mission.tool_budget.used, "limit": mission.tool_budget.limit},
-            },
             "counts": {
                 "evidence": len(mission.evidence_records),
                 "actions": len(mission.action_history),

@@ -249,31 +249,6 @@ class FailedPathRecord:
 
 
 @dataclass
-class BudgetState:
-    """独立于模型 reasoning intensity 的运行预算。"""
-
-    limit: int = 0
-    used: int = 0
-
-    @property
-    def remaining(self) -> int:
-        return max(0, self.limit - self.used)
-
-    def consume(self, amount: int = 1) -> bool:
-        if amount < 0:
-            raise ValueError("预算消耗不能为负数")
-        # limit=0 表示旧会话/独立单元测试尚未配置预算，保持历史无限制行为；
-        # run_mission 会在任何 Agent 启动前设置正数限制。
-        if self.limit <= 0:
-            self.used += amount
-            return True
-        if self.used + amount > self.limit:
-            return False
-        self.used += amount
-        return True
-
-
-@dataclass
 class MissionState:
     target: str
     goal: str
@@ -344,7 +319,7 @@ class MissionState:
 
     # ── v0.4.0 最小优化闭环 ──
     # 新旧结构暂时并存：findings/attack_chain 继续供现有 UI、报告和长期记忆使用，
-    # 下列结构用于 Orchestrator 的预算、证据和行动决策。
+    # 下列结构用于 Orchestrator 的证据和行动决策。
     facts: list[FactRecord] = field(default_factory=list)
     evidence_records: list[EvidenceRecord] = field(default_factory=list)
     attempts: list[AttemptRecord] = field(default_factory=list)
@@ -355,8 +330,6 @@ class MissionState:
     hypothesis_sequence: int = 0
     failed_path_sequence: int = 0
     complexity: str = "complex"
-    action_budget: BudgetState = field(default_factory=BudgetState)
-    tool_budget: BudgetState = field(default_factory=BudgetState)
 
     # RAG 是参考知识而非当前任务事实。保存最近一次有界检索结果及其状态指纹，
     # 供 Brain/Orchestrator/Attack 共享；不得自动并入 facts/evidence_records。
@@ -428,50 +401,14 @@ class MissionState:
         self.attack_chain.append(step)
         self.record("Orchestrator", "attack_step_added", objective=objective)
 
-    def configure_budgets(
-        self,
-        complexity: str,
-        action_limit: int,
-        tool_limit: int,
-        *,
-        preserve_usage: bool = False,
-    ) -> None:
-        """设置 simple/complex 预算；恢复任务时可保留已用额度。"""
-        if complexity not in {"simple", "complex"}:
-            raise ValueError(f"不支持的复杂度: {complexity}")
-        if action_limit <= 0 or tool_limit <= 0:
-            raise ValueError("行动预算和工具预算必须大于 0")
-        action_used = self.action_budget.used if preserve_usage else 0
-        tool_used = self.tool_budget.used if preserve_usage else 0
-        self.complexity = complexity
-        self.action_budget = BudgetState(action_limit, min(action_used, action_limit))
-        self.tool_budget = BudgetState(tool_limit, min(tool_used, tool_limit))
-        self.record(
-            "system",
-            "budgets_configured",
-            complexity=complexity,
-            action_limit=action_limit,
-            tool_limit=tool_limit,
-            preserve_usage=preserve_usage,
-        )
-
     def begin_attempt(
         self,
         action_type: str,
         agent: str,
         target: str,
         parameters: dict[str, Any] | None = None,
-    ) -> AttemptRecord | None:
-        """消耗一个行动额度并创建 running Attempt；额度不足返回 None。"""
-        if not self.action_budget.consume():
-            self.record(
-                "Orchestrator",
-                "action_budget_exhausted",
-                action_type=action_type,
-                used=self.action_budget.used,
-                limit=self.action_budget.limit,
-            )
-            return None
+    ) -> AttemptRecord:
+        """创建一条 running Attempt；调用次数不受全局预算限制。"""
         attempt = AttemptRecord(
             id=f"a{len(self.attempts) + 1}",
             action_type=action_type,
@@ -485,7 +422,6 @@ class MissionState:
             "attempt_started",
             attempt_id=attempt.id,
             action_type=action_type,
-            action_budget_used=self.action_budget.used,
         )
         return attempt
 
@@ -897,7 +833,7 @@ SCHEMA_VERSION = 6
 #     active_plan_item/pending_action/last_action_fingerprint/
 #     retry_counters/agent_context_refs
 # v4: v0.4.0 最小优化闭环新增 facts/evidence_records/attempts/
-#     complexity/action_budget/tool_budget
+#     complexity（历史 action_budget/tool_budget 字段加载时丢弃）
 # v5: 第二批执行闭环新增 hypotheses/action_history/failed_paths 及序列号
 # v6: RAG 有界 Knowledge Context、查询指纹与共享缓存状态
 
@@ -1041,10 +977,10 @@ class MissionStore:
             int(merged.get("failed_path_sequence") or 0),
             _max_numeric_id(merged["failed_paths"], "fp"),
         )
-        for budget_name in ("action_budget", "tool_budget"):
-            budget = merged.get(budget_name)
-            if not isinstance(budget, BudgetState):
-                merged[budget_name] = BudgetState(**(budget or {}))
+        # v4/v5 历史任务可能带有预算字段。预算机制已取消；加载时显式
+        # 丢弃，避免旧的耗尽状态影响恢复，也保持旧快照可读。
+        merged.pop("action_budget", None)
+        merged.pop("tool_budget", None)
 
         try:
             return MissionState(**merged)
