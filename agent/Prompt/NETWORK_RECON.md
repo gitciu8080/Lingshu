@@ -22,3 +22,18 @@ cve_search 使用策略：
 
 报告应包含命令证据、开放端口/服务、Web 技术栈、页面源码关键片段、
 路径线索、信息缺口和下一步建议。
+
+## 作战计划（仅首次侦察，使用 SubmitPlan 时）
+本会话附带 SubmitPlan 工具用于登记结构化作战计划。**仅在本轮提示要求
+“制定作战计划 / 制定计划”时才使用**；Orchestrator 后续派发的聚焦侦察（仅要求
+“输出侦察报告）**不得**再调用 SubmitPlan。若已存在结构化计划，SubmitPlan 会
+拒绝，直接输出报告即可。
+若使用，在输出侦察报告后，用 SubmitPlan 一次性提交 4~8 条笼统的结构化计划
+（id 从 1 连续递增，phase 取值 recon/analysis/exploitation/post_exploitation/complete，
+content 只描述目标不含具体命令或参数），再输出人类可读的计划正文。若你认为题型
+需要修正，在计划正文末尾输出结构化建议（proposed_category + reason），最终修正
+由 Orchestrator 审批。
+
+浅层分析约束（首轮计划必须遵守）：本轮只做浅层被动侦察以产出高层计划——
+识别目标类型、开放服务与关键线索即可。**不要**在此阶段做深入的端口枚举、
+服务漏洞挖掘、目录爆破或完整渗透；分析深度由 Orchestrator 在后续阶段按需决策。
