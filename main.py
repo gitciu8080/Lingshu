@@ -285,24 +285,31 @@ _ROLE_BASE_BUDGET = {
 
 _ITER_BUDGET_MIN, _ITER_BUDGET_MAX = 12, 40
 
+# 思考级别对单次 ReAct 最大迭代数的叠加修正。
+_THINKING_ITER_ADJUST = {"low": -4, "min": 8, "max": 16}
+
+
 def _max_react_iters(
     kind: str,
     role: str,
     complexity: str = "complex",
     plan_items: int = 0,
+    thinking: str = "min",
 ) -> int:
-    """按目标类型、任务复杂度和计划规模计算单次 ReAct 最大迭代数。
+    """按目标类型、任务复杂度、计划规模和思考级别计算单次 ReAct 最大迭代数。
 
-    模型 Low/Min/Max 只控制模型自身推理深度；本值不构成行动或工具预算。
+    thinking（模型 Low/Min/Max 档位）叠加固定修正：Low -4 / Min +8 / Max +16；
+    本值不构成行动或工具预算。
     """
     base = _ROLE_BASE_BUDGET.get(kind, _ROLE_BASE_BUDGET["directory"])[role]
     plan_bonus = min(plan_items, 4 if complexity == "simple" else 8)
+    thinking_adjust = _THINKING_ITER_ADJUST.get(str(thinking).lower(), 0)
     if complexity == "simple":
         base = max(_ITER_BUDGET_MIN, int(base * 0.65))
         upper = 24
     else:
         upper = _ITER_BUDGET_MAX
-    return max(_ITER_BUDGET_MIN, min(upper, base + plan_bonus))
+    return max(_ITER_BUDGET_MIN, min(upper, base + plan_bonus + thinking_adjust))
 
 
 def _mission_complexity(
@@ -1829,7 +1836,7 @@ async def run_mission(
             tools=brain_tools,
             # Qwen 的逐条 AddPlan 通常需要 4~8 次登记加一次正文输出。
             max_iters=(15 if qwen_flat_plan_tools else _max_react_iters(
-                target_spec.kind, "brain", complexity,
+                target_spec.kind, "brain", complexity, thinking=model_ver,
             )),
             # 检索由 run_mission 在首轮 Recon 后确定性执行并显式注入，避免
             # agentic middleware 是否被模型调用不可观测及 Brain/Attack 重复检索。
@@ -1860,7 +1867,7 @@ async def run_mission(
             recon = create_network_recon_agent(
                 model, target_str, project_dir, runtime.command_timeout,
                 scope_registry=scope_registry,
-                max_iters=_max_react_iters(target_spec.kind, "recon", complexity),
+                max_iters=_max_react_iters(target_spec.kind, "recon", complexity, thinking=model_ver),
                 offloader=workspace,
                 context_config=_role_context("recon"),
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
@@ -1875,7 +1882,7 @@ async def run_mission(
                 triage_categories.update({"forensics", "reverse", "misc"})
             recon = create_artifact_triage_agent(
                 model, workdir, project_dir, runtime.command_timeout,
-                max_iters=_max_react_iters(target_spec.kind, "recon", complexity),
+                max_iters=_max_react_iters(target_spec.kind, "recon", complexity, thinking=model_ver),
                 offloader=workspace,
                 context_config=_role_context("recon"),
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
@@ -1913,6 +1920,9 @@ async def run_mission(
                     bootstrap_result.get_text_content() or "[Recon] 未返回文本结果"
                 )
             except AgentMaxIterationsError as exc:
+                # 降级而非中止：首轮侦察超迭代只代表本轮未产出有效报告，
+                # 记录 information_gain="none" 后继续流程，信息缺口由
+                # Orchestrator 的聚焦补侦（dispatch_recon）接管补齐。
                 mission.finish_attempt(
                     bootstrap_attempt,
                     "failure",
@@ -1920,7 +1930,17 @@ async def run_mission(
                     information_gain="none",
                 )
                 store.checkpoint(mission, "bootstrap_recon_max_iters")
-                raise
+                mission.record(
+                    "system",
+                    "bootstrap_recon_max_iters_degraded",
+                    error=str(exc),
+                )
+                bootstrap_report = (
+                    "[Recon] 首轮侦察达到最大推理迭代次数，本轮未产出有效报告。\n"
+                    "本轮无任何新证据或事实；沿用启动时初始分类继续流程，"
+                    "关键信息缺口交由后续聚焦补侦补充。"
+                )
+                print(f"[系统] 首轮 Recon 超迭代，已降级继续（聚焦补侦接管）：{exc}")
             except asyncio.CancelledError:
                 mission.finish_attempt(
                     bootstrap_attempt,
@@ -1929,30 +1949,30 @@ async def run_mission(
                 )
                 store.checkpoint(mission, "bootstrap_recon_interrupted")
                 raise
-
-            category_decision, reclassification, evidence = _commit_recon_reclassification(
-                mission,
-                category_decision,
-                bootstrap_report,
-                recon.name,
-            )
-            information_gain = (
-                "high" if reclassification.accepted
-                else "medium" if reclassification.signals
-                else "low"
-            )
-            mission.finish_attempt(
-                bootstrap_attempt,
-                "success",
-                bootstrap_report,
-                [evidence.id],
-                information_gain,
-            )
-            store.checkpoint(mission, "bootstrap_recon_classified")
-            print(
-                f"[系统] Recon 后分类: primary={category_decision.primary} "
-                f"accepted={reclassification.accepted}；{reclassification.reason}"
-            )
+            else:
+                category_decision, reclassification, evidence = _commit_recon_reclassification(
+                    mission,
+                    category_decision,
+                    bootstrap_report,
+                    recon.name,
+                )
+                information_gain = (
+                    "high" if reclassification.accepted
+                    else "medium" if reclassification.signals
+                    else "low"
+                )
+                mission.finish_attempt(
+                    bootstrap_attempt,
+                    "success",
+                    bootstrap_report,
+                    [evidence.id],
+                    information_gain,
+                )
+                store.checkpoint(mission, "bootstrap_recon_classified")
+                print(
+                    f"[系统] Recon 后分类: primary={category_decision.primary} "
+                    f"accepted={reclassification.accepted}；{reclassification.reason}"
+                )
 
         # 首轮 Recon 后再判断知识缺口，保证 Query 使用最终分类与真实 Facts。
         # 该 Context 是参考知识，不写入 Facts/Evidence。
@@ -2127,6 +2147,7 @@ async def run_mission(
                 scope_registry=scope_registry,
                 max_iters=_max_react_iters(
                     target_spec.kind, "attack", complexity, len(mission.plan_items),
+                    thinking=model_ver,
                 ),
                 # Attack 使用 MissionState 中共享的有界 Knowledge Context；
                 # 新知识缺口由 Orchestrator 调度前的 provider 按状态指纹刷新。
@@ -2177,6 +2198,7 @@ async def run_mission(
                 scope_registry=scope_registry,
                 max_iters=_max_react_iters(
                     target_spec.kind, "reserve", complexity, len(mission.plan_items),
+                    thinking=model_ver,
                 ),
                 event_callback=event_callback,
                 offloader=workspace,
