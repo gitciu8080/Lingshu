@@ -1302,6 +1302,16 @@ document.getElementById('regPassword').addEventListener('keypress', e => { if (e
 
 function handleLogout() { App.handleLogout(); }
 
+// 历史消息预算与分批渲染：切会话时最多拉取/渲染最近 MAX_HISTORY_MESSAGES 条，
+// 每 200 条让出主线程一次，避免几千条消息一次性渲染导致切换白屏卡顿。
+const MAX_HISTORY_MESSAGES = 1000;
+async function renderHistoryInBatches(items, renderOne) {
+  for (let i = 0; i < items.length; i++) {
+    renderOne(items[i]);
+    if (i % 200 === 199) await new Promise(resolve => setTimeout(resolve, 0));
+  }
+}
+
 // 会话操作
 function filterSessions() { App.onSessionListRender(App.sessions); }
 
@@ -1317,7 +1327,7 @@ async function doSwitchSession(id) {
         ) {
           let before = '';
           const pages = [];
-          while (true) {
+          while (pages.length < MAX_HISTORY_MESSAGES) {
             const data = await App.getMessages(sid, { before, limit: 200 });
             const messages = data.messages || [];
             if (!messages.length) break;
@@ -1325,26 +1335,40 @@ async function doSwitchSession(id) {
             if (!data.has_more || !data.before) break;
             before = data.before;
           }
-          pages.forEach(message => {
+          const bounded = pages.slice(-MAX_HISTORY_MESSAGES);
+          await renderHistoryInBatches(bounded, message => {
             App.primeHistoryMessage(message);
             renderHistoryMessage(message);
           });
+          if (bounded.length < pages.length) {
+            App.onRenderSystemMessage(`仅显示最近 ${MAX_HISTORY_MESSAGES} 条历史消息`);
+          }
           doScrollToBottom(true);
           return;
         }
         let afterSeq = 0;
         let streamSnapshots = [];
+        let historyTotal = 0;
+        let historyTruncated = false;
         while (true) {
           const data = await App.getMessages(sid, { afterSeq, limit: 500 });
           streamSnapshots = data.snapshots || streamSnapshots;
           const messages = data.messages || [];
-          messages.forEach(m => {
+          const remainder = MAX_HISTORY_MESSAGES - historyTotal;
+          const batch = remainder > 0 ? messages.slice(0, remainder) : [];
+          historyTotal += batch.length;
+          historyTruncated = historyTruncated || messages.length > batch.length;
+          await renderHistoryInBatches(batch, m => {
             App.primeHistoryMessage(m);
             renderHistoryMessage(m);
             if (m.seq > App.lastMessageSeq) App.lastMessageSeq = m.seq;
           });
+          if (historyTotal >= MAX_HISTORY_MESSAGES) break;
           if (messages.length < (data.page_limit || 500)) break;
           afterSeq = messages[messages.length - 1].seq;
+        }
+        if (historyTruncated) {
+          App.onRenderSystemMessage(`仅显示最近 ${MAX_HISTORY_MESSAGES} 条历史消息`);
         }
         App.restoreStreamSnapshots(streamSnapshots);
         doScrollToBottom(true);

@@ -55,7 +55,7 @@ from Tools.tooling import (
     interrupt_agent_tasks,
 )
 import session_store
-from persistence_service import get_persistence_writer
+import persistence_service as ps
 from session_events import (
     message_operation as _event_persistence_operation,
     session_create_operation,
@@ -94,8 +94,7 @@ class SessionContext:
     input_queue: asyncio.Queue
     task: asyncio.Task | None = None
     subscribers: set[asyncio.Queue] = field(default_factory=set)
-    stream_buffers: dict[str, list[str]] = field(default_factory=dict)
-    stream_buffer_sizes: dict[str, int] = field(default_factory=dict)
+    stream_buffers: dict[str, str] = field(default_factory=dict)
     # stream key → 稳定 block id。必须跨 start/delta/end 传递，历史恢复时
     # 才不会把同一 Agent 的多次推理合并覆盖成一条。
     stream_blocks: dict[str, str] = field(default_factory=dict)
@@ -135,10 +134,6 @@ _TOOL_ARGS_MAX_CHARS = max(
 _SSE_SUBSCRIBER_QUEUE_SIZE = max(
     32, int(os.getenv("LINGSHU_SSE_SUBSCRIBER_QUEUE_SIZE", "512")),
 )
-
-
-def _buffer_text(parts: list[str]) -> str:
-    return "".join(parts)
 
 
 def _publish_session_event(ctx: SessionContext, event: dict[str, Any]) -> None:
@@ -261,7 +256,7 @@ async def _event_generator():
 
 async def _flush_persistence() -> None:
     """等待此前排队的持久化操作完成，用于报告、删除和关闭边界。"""
-    await get_persistence_writer().flush()
+    await ps.flush_persistence()
 
 
 async def _write_session_message(
@@ -279,7 +274,7 @@ async def _write_session_message(
     )
     if operation is None:
         raise ValueError(f"不支持持久化的事件类型: {event_type}")
-    results = await get_persistence_writer().submit([operation], wait=True)
+    results = await ps.submit([operation], wait=True)
     return int((results or [0])[0] or 0)
 
 
@@ -310,28 +305,25 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             if block_id:
                 payload["block_id"] = block_id
             delta = str(payload.get("delta") or payload.get("content") or "")
-            parts = ctx.stream_buffers.setdefault(stream_key, [])
-            current_size = ctx.stream_buffer_sizes.get(stream_key, 0)
-            remaining = max(0, _STREAM_BUFFER_MAX_CHARS - current_size)
+            # Docker 版风格的原地字符串累加：命中 CPython 的 unicode 原地
+            # 扩容优化，每 delta 成本 O(delta)，避免列表 + 全量 join。
+            current = ctx.stream_buffers.get(stream_key, "")
+            remaining = max(0, _STREAM_BUFFER_MAX_CHARS - len(current))
             if remaining:
-                chunk = delta[:remaining]
-                parts.append(chunk)
-                ctx.stream_buffer_sizes[stream_key] = current_size + len(chunk)
+                ctx.stream_buffers[stream_key] = current + delta[:remaining]
             if block_id:
                 now = time.monotonic()
+                full_text = ctx.stream_buffers.get(stream_key, "")
                 last_write, last_size = ctx.stream_snapshot_writes.get(
                     stream_key, (0.0, 0),
                 )
                 # 与 Agent Service 历史镜像保持相同策略：最多约每 200ms
                 # 写一次；大块输出累计 512 字符时提前落盘。首个非空
                 # delta 会立即写入，崩溃恢复能力不受影响。
-                # 长度判断用累计字节数而非全量 join：每个 delta 都做
-                # O(n) 拼接在多会话并发流式下是 O(n²) 的循环内 CPU。
                 if (
                     now - last_write >= 0.2
-                    or ctx.stream_buffer_sizes.get(stream_key, 0) - last_size >= 512
+                    or len(full_text) - last_size >= 512
                 ):
-                    full_text = _buffer_text(parts)
                     persistence_operations.append({
                         "type": "snapshot_upsert",
                         "session_id": session_id,
@@ -354,9 +346,7 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                     "session_id": session_id,
                     "block_id": block_id,
                 })
-            full = _buffer_text(ctx.stream_buffers.pop(stream_key, []))
-            ctx.stream_buffer_sizes.pop(stream_key, None)
-            ctx.stream_snapshot_writes.pop(stream_key, None)
+            full = ctx.stream_buffers.pop(stream_key, "")
             if full:
                 payload["full_text"] = full
             # 也推到 SSE（前端依靠 SSE 拿到含 full_text 的 text_end）
@@ -369,8 +359,7 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             ctx.stream_counter += 1
             block_id = f"{stream_key}:{ctx.stream_counter}"
             ctx.stream_blocks[stream_key] = block_id
-            ctx.stream_buffers[stream_key] = []
-            ctx.stream_buffer_sizes[stream_key] = 0
+            ctx.stream_buffers[stream_key] = ""
             ctx.stream_snapshot_writes.pop(stream_key, None)
             payload["block_id"] = block_id
 
@@ -519,7 +508,9 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             }))
 
         if persistence_operations:
-            get_persistence_writer().submit_from_callback(persistence_operations)
+            # Docker 版风格：入队批量提交；队列未启动/满载时线程池直写兜底。
+            if not ps.queue_persistence_operations(persistence_operations):
+                ps.fallback_direct_write(persistence_operations)
 
         # 每个浏览器连接拥有独立队列，所有订阅者收到完全相同的事件。
         _publish_session_event(ctx, event)
@@ -588,8 +579,8 @@ async def _session_event_generator(
         5000,
     )
     stream_snapshot = [
-        (key, _buffer_text(parts), ctx.stream_blocks.get(key, ""))
-        for key, parts in ctx.stream_buffers.items()
+        (key, full_text, ctx.stream_blocks.get(key, ""))
+        for key, full_text in ctx.stream_buffers.items()
     ]
     tool_snapshot = {
         tool_call_id: dict(tool)
@@ -828,7 +819,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                     approval_decision="任务结束前审批未完成",
                     approval_resolved_at=datetime.now().astimezone().isoformat(),
                 )
-        await get_persistence_writer().submit([
+        await ps.submit([
             session_update_operation(session_id, **terminal_fields),
         ], wait=True)
         # 保存到长期记忆
@@ -847,12 +838,11 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
 @asynccontextmanager
 async def _app_lifespan(_: FastAPI):
     global _workspace_janitor_task
-    writer = get_persistence_writer()
-    await writer.start()
+    await ps.start_persistence()
     try:
-        repaired = await writer.reconcile_mission_states(_sessions_dir)
+        repaired = await ps.reconcile_mission_states(_sessions_dir)
     except Exception:
-        await writer.stop()
+        await ps.stop_persistence()
         raise
     if repaired:
         logger.info("启动时已从 Mission JSON 校正 %d 条会话索引", repaired)
@@ -913,7 +903,7 @@ async def _app_lifespan(_: FastAPI):
                 if _background_tasks:
                     await asyncio.gather(*tuple(_background_tasks), return_exceptions=True)
                 await rag.close()
-                await writer.stop()
+                await ps.stop_persistence()
     finally:
         if _workspace_janitor_task is not None:
             _workspace_janitor_task.cancel()
@@ -921,7 +911,7 @@ async def _app_lifespan(_: FastAPI):
                 await _workspace_janitor_task
             _workspace_janitor_task = None
         await get_workspace_service().close_all()
-        await writer.stop()
+        await ps.stop_persistence()
         await antsword.stop()
 
 
@@ -1323,17 +1313,18 @@ async def superadmin_runtime_health(current_user: dict = Depends(get_current_use
     )
     return {
         "status": "degraded" if (
-            get_persistence_writer().degraded
-            or workspace_health["disk"]["waterline_reached"]
+            workspace_health["disk"]["waterline_reached"]
         ) else "ok",
-        "persistence": {**sqlite_status, **get_persistence_writer().health()},
+        "persistence": {**sqlite_status, **ps.health()},
         "workspace": workspace_health,
         "realtime": {
             "active_sessions": len(_active_sessions),
             "subscribers": sum(len(ctx.subscribers) for ctx in _active_sessions.values()),
             "resyncs": sum(ctx.sse_resyncs for ctx in _active_sessions.values()),
             "buffer_chars": sum(
-                sum(ctx.stream_buffer_sizes.values()) for ctx in _active_sessions.values()
+                len(text)
+                for ctx in _active_sessions.values()
+                for text in ctx.stream_buffers.values()
             ),
         },
     }
@@ -1583,9 +1574,6 @@ async def knowledge_reindex(current_user: dict = Depends(get_current_user)):
 @app.post("/api/session/start")
 async def session_start(req: MissionStartRequest, current_user: dict = Depends(get_current_user)):
     """创建并启动新会话。"""
-    writer = get_persistence_writer()
-    if writer.degraded or writer.health()["queue_depth"] >= writer.capacity:
-        raise HTTPException(status_code=503, detail="会话持久化暂时拥塞，请稍后重试")
     try:
         get_workspace_service().ensure_capacity()
     except WorkspaceCapacityError as exc:
@@ -1641,7 +1629,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     # 持久化到 DB（传入 API 层生成的 session_id）
     workspace_id = get_workspace_service().workspace_id(current_user["id"], session_id)
     try:
-        await writer.submit([
+        await ps.submit([
             session_create_operation(
                 session_id, user_id=current_user["id"], target=authorized_target,
                 goal=req.goal, provider=req.provider, model=model_level,
@@ -2157,7 +2145,7 @@ async def get_pending_approval(
                 approval_decision="任务结束前审批未完成",
                 approval_resolved_at=datetime.now().astimezone().isoformat(),
             )
-        await get_persistence_writer().submit([
+        await ps.submit([
             session_update_operation(session_id, **fields),
         ], wait=True)
         return {"pending": False}
@@ -2173,7 +2161,7 @@ async def get_pending_approval(
         }
         return {"pending": True, "event": event}
     except (json.JSONDecodeError, TypeError):
-        await get_persistence_writer().submit([
+        await ps.submit([
             session_update_operation(
                 session_id,
                 pending_approval=None,
@@ -2325,7 +2313,7 @@ async def resume_session(
             "phase": session.get("phase"),
         }
     # 登记恢复状态并重新启动任务
-    await get_persistence_writer().submit([
+    await ps.submit([
         session_update_operation(session_id, resume_status="running"),
     ], wait=True)
     goal = session.get("goal") or ""
@@ -2383,7 +2371,7 @@ async def cancel_session(session_id: str, current_user: dict = Depends(get_curre
     ctx.task.cancel()
 
     # 3) 先落库为已取消；保留 ctx 直到 finally 完成，这样 SSE 能收到终态。
-    await get_persistence_writer().submit([
+    await ps.submit([
         session_update_operation(
             session_id, status="cancelled", phase="cancelled", pending_approval=None,
         ),

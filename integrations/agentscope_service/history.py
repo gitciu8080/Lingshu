@@ -28,8 +28,7 @@ class RoleHistoryRecorder:
         self.reply_id = reply_id
         self.enabled = enabled
         self.user_id = user_id
-        self._streams: dict[tuple[str, str], list[str]] = defaultdict(list)
-        self._stream_sizes: dict[tuple[str, str], int] = defaultdict(int)
+        self._streams: dict[tuple[str, str], str] = defaultdict(str)
         self._stream_limit = max(
             16_384, int(os.getenv("LINGSHU_STREAM_BUFFER_MAX_CHARS", "1048576")),
         )
@@ -89,8 +88,7 @@ class RoleHistoryRecorder:
             return
         if event_type in {"text_start", "thinking_start"}:
             kind = "thinking" if event_type.startswith("thinking") else "text"
-            self._streams[(agent, kind)] = []
-            self._stream_sizes[(agent, kind)] = 0
+            self._streams[(agent, kind)] = ""
             self._stream_ids[(agent, kind)] = source_id
             self._submit({
                 "type": "snapshot_upsert", "session_id": self.session_id,
@@ -103,20 +101,16 @@ class RoleHistoryRecorder:
             kind = "thinking" if event_type.startswith("thinking") else "text"
             key = (agent, kind)
             delta = str(payload.get("delta") or "")
-            size = self._stream_sizes[key]
-            remaining = max(0, self._stream_limit - size)
+            # Docker 版风格的原地字符串累加：每 delta 成本 O(delta)。
+            current = self._streams[key]
+            remaining = max(0, self._stream_limit - len(current))
             if remaining:
-                chunk = delta[:remaining]
-                self._streams[key].append(chunk)
-                self._stream_sizes[key] = size + len(chunk)
+                self._streams[key] = current + delta[:remaining]
             block_id = self._stream_ids.get((agent, kind), source_id)
             now = time.monotonic()
             last_write, last_size = self._snapshot_writes.get((agent, kind), (0.0, 0))
-            # 长度判断用累计字节数而非全量 join，避免每个 delta 都做
-            # O(n) 拼接（多会话并发流式下为 O(n²) CPU）。
-            current_size = self._stream_sizes[(agent, kind)]
-            if now - last_write >= 0.2 or current_size - last_size >= 512:
-                content = "".join(self._streams[(agent, kind)])
+            content = self._streams[key]
+            if now - last_write >= 0.2 or len(content) - last_size >= 512:
                 self._submit({
                     "type": "snapshot_upsert", "session_id": self.session_id,
                     "reply_id": self.reply_id, "block_id": block_id,
@@ -126,8 +120,7 @@ class RoleHistoryRecorder:
             return
         if event_type in {"text_end", "thinking_end"}:
             kind = "thinking" if event_type.startswith("thinking") else "text"
-            content = "".join(self._streams.pop((agent, kind), []))
-            self._stream_sizes.pop((agent, kind), None)
+            content = self._streams.pop((agent, kind), "")
             block_id = self._stream_ids.pop((agent, kind), source_id)
             if content:
                 operation = message_operation(

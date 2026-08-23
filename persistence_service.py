@@ -1,18 +1,21 @@
-"""Single-writer SQLite projection service for mission/session events."""
+"""Docker 版风格的轻量批量持久化：模块级队列 + 单 worker 直写 SQLite。
+
+与 Lingshu-Docker 分支 (7b91071) 完全一致的策略：
+- 无读写分离、无单写者文件锁、无 outbox/dead-letter、无 degraded 拥塞闸门；
+- 事件操作进入模块级 asyncio.Queue，worker 以 20ms/128 操作微批合并，
+  经 asyncio.to_thread 直写 session_store.apply_persistence_batch；
+- 队列满载时调用方回退：同步上下文走默认线程池直写（不丢数据），
+  异步上下文可直接 await submit(wait=True) 同步落库；
+- 崩溃时未提交批次随进程丢失，权威状态以 MissionState JSON checkpoint 为准。
+"""
 
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 import logging
 import os
 import json
 import sqlite3
-import time
-import fcntl
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 from pathlib import Path
 
@@ -21,103 +24,235 @@ from TaskState import infer_exploitation_approval_status
 
 logger = logging.getLogger(__name__)
 
+_QUEUE_SIZE = max(1, int(os.getenv("LINGSHU_PERSISTENCE_QUEUE_SIZE", "10000")))
 
-@dataclass
-class _WriteGroup:
-    operations: list[dict[str, Any]]
-    receipt: asyncio.Future[list[int | None]] | None = None
-    admitted_at: float = field(default_factory=time.monotonic)
-    byte_size: int = 0
-    outbox_path: Path | None = None
-    # 语义批次的 outbox 流水线写入任务（submit 后立即并发执行）；
-    # worker 在 SQLite 提交前等待其完成，保持崩溃恢复不变量。
-    outbox_task: asyncio.Task[Path] | None = None
-    durable: bool = False
+_queue: asyncio.Queue[list[dict]] | None = None
+_task: asyncio.Task | None = None
+
+
+async def start_persistence() -> None:
+    global _queue, _task
+    if _queue is not None and _task is not None and not _task.done():
+        return
+    _queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
+    _task = asyncio.create_task(_persistence_worker(), name="lingshu-sqlite-persistence")
+
+
+async def stop_persistence() -> None:
+    global _queue, _task
+    await flush_persistence()
+    task, _task = _task, None
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    _queue = None
+
+
+async def flush_persistence() -> None:
+    """等待此前排队的持久化操作完成，用于报告、删除和关闭边界。"""
+    if _queue is not None:
+        await _queue.join()
+
+
+def queue_persistence_operations(operations: list[dict]) -> bool:
+    """将操作加入批量队列；未启动或队列满时返回 False，由调用方回退。"""
+    if not operations or _queue is None:
+        return False
+    try:
+        _queue.put_nowait(operations)
+        return True
+    except asyncio.QueueFull:
+        logger.warning("持久化队列已满，回退线程池直写")
+        return False
+
+
+def fallback_direct_write(operations: list[dict]) -> None:
+    """队列不可用时的兜底：默认线程池一次性直写，不阻塞事件循环。"""
+    if not operations:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, session_store.apply_persistence_batch, operations)
+    except RuntimeError:
+        # 无事件循环（纯同步脚本场景）：退化为阻塞直写。
+        session_store.apply_persistence_batch(operations)
+
+
+async def submit(
+    operations: list[dict[str, Any]],
+    *,
+    wait: bool = False,
+) -> list[int | None] | None:
+    """提交一批操作。
+
+    wait=True 时绕过队列直接在线程池落库并返回 seq 结果（会话创建/
+    审批状态等需要确定性完成的场景）；否则入队异步批量提交。
+    """
+    if not operations:
+        return [] if wait else None
+    if wait:
+        return await asyncio.to_thread(session_store.apply_persistence_batch, operations)
+    if queue_persistence_operations(list(operations)):
+        return None
+    fallback_direct_write(operations)
+    return None
+
+
+async def _persistence_worker() -> None:
+    """聚合短时间内的会话事件，以单个 SQLite 事务批量提交。"""
+    assert _queue is not None
+    queue = _queue
+    while True:
+        first = await queue.get()
+        groups = [first]
+        operation_count = len(first)
+        deadline = asyncio.get_running_loop().time() + 0.02
+        while operation_count < 128:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                group = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            groups.append(group)
+            operation_count += len(group)
+        operations = [operation for group in groups for operation in group]
+        try:
+            await asyncio.to_thread(session_store.apply_persistence_batch, operations)
+        except sqlite3.Error as exc:
+            # 外键冲突等永久性坏行（如会话已删但任务仍在产事件）：
+            # 逐条隔离重放，只丢弃真正损坏的操作，健康数据照常落库。
+            logger.warning("批量持久化失败（%s），逐条隔离重放", exc)
+            await _isolate_operations(operations)
+        except Exception:
+            logger.exception("批量持久化失败，正在重试")
+            await asyncio.sleep(0.05)
+            try:
+                await asyncio.to_thread(session_store.apply_persistence_batch, operations)
+            except Exception:
+                logger.exception("批量持久化重试失败")
+        finally:
+            for _ in groups:
+                queue.task_done()
+
+
+async def _isolate_operations(operations: list[dict]) -> None:
+    for operation in operations:
+        try:
+            await asyncio.to_thread(session_store.apply_persistence_batch, [operation])
+        except sqlite3.Error as op_error:
+            logger.error("持久化操作被隔离丢弃: %s", op_error)
+        except Exception:
+            logger.exception("持久化操作隔离重放失败")
+
+
+def health() -> dict[str, Any]:
+    running = _task is not None and not _task.done()
+    depth = _queue.qsize() if _queue is not None else 0
+    return {
+        "running": running,
+        "degraded": False,
+        "queue_depth": depth,
+        "queue_capacity": _QUEUE_SIZE,
+        "pending_admissions": 0,
+        "inflight_operations": 0,
+        "oldest_operation_seconds": 0,
+        "lock_retries": 0,
+        "total_failures": 0,
+        "consecutive_failures": 0,
+        "committed_operations": 0,
+        "dead_letter_operations": 0,
+        "replayed_operations": 0,
+        "callback_rejections": 0,
+        "coalesced_snapshots": 0,
+    }
+
+
+async def reconcile_mission_states(sessions_dir: str | Path) -> int:
+    """Project authoritative per-session Mission JSON into the SQLite index."""
+    directory = Path(sessions_dir)
+    if not directory.is_dir():
+        return 0
+
+    def _read_states() -> dict[str, dict[str, Any]]:
+        states: dict[str, dict[str, Any]] = {}
+        for path in directory.glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                logger.exception("跳过损坏的 Mission JSON: %s", path)
+                continue
+            if isinstance(data, dict):
+                states[path.stem] = data
+        return states
+
+    mission_states = await asyncio.to_thread(_read_states)
+    sessions = await asyncio.to_thread(
+        session_store.get_sessions_by_ids, list(mission_states),
+    )
+    repairs: list[dict[str, Any]] = []
+    for session_id, data in mission_states.items():
+        session = sessions.get(session_id)
+        if session is None:
+            continue
+        phase = str(data.get("phase") or session.get("phase") or "planning")
+        terminal = phase in {"completed", "failed", "cancelled"}
+        fields = {
+            "phase": phase,
+            "status": phase if terminal else "active",
+            "success": data.get("success"),
+            "flag": data.get("flag"),
+            "summary": data.get("summary") or "",
+            "title": data.get("title") or session.get("title"),
+            "checkpoint_seq": int(data.get("checkpoint_seq") or 0),
+            "resume_status": data.get("resume_status") or session.get("resume_status") or "fresh",
+            "approval_status": infer_exploitation_approval_status(
+                data,
+                pending=bool(session.get("pending_approval")),
+                active=not terminal,
+            ),
+            "approval_decision": data.get("exploitation_approval_decision") or "",
+            "approval_requested_at": data.get("exploitation_approval_requested_at") or "",
+            "approval_resolved_at": data.get("exploitation_approval_resolved_at") or "",
+        }
+        changed = {key: value for key, value in fields.items() if session.get(key) != value}
+        if changed:
+            repairs.append({
+                "type": "session_update", "session_id": session_id,
+                "fields": changed,
+            })
+    if repairs:
+        await submit(repairs, wait=True)
+    return len(repairs)
 
 
 class PersistenceWriter:
-    """Serialize SQLite projections without blocking the asyncio event loop."""
-
-    def __init__(self) -> None:
-        self.capacity = max(1, int(os.getenv("LINGSHU_PERSISTENCE_QUEUE_SIZE", "10000")))
-        self.capacity_bytes = max(
-            1024 * 1024,
-            int(os.getenv("LINGSHU_PERSISTENCE_QUEUE_BYTES", str(64 * 1024 * 1024))),
-        )
-        self.callback_capacity = max(
-            1, int(os.getenv("LINGSHU_PERSISTENCE_CALLBACK_QUEUE_SIZE", "2048")),
-        )
-        self.shutdown_timeout = max(
-            1.0, float(os.getenv("LINGSHU_PERSISTENCE_SHUTDOWN_TIMEOUT_SECONDS", "20")),
-        )
-        configured_outbox = os.getenv("LINGSHU_PERSISTENCE_OUTBOX_DIR", "").strip()
-        self.outbox_dir = Path(
-            configured_outbox
-            or Path(__file__).resolve().parent / ".TaskMemory" / "persistence-outbox"
-        ).resolve()
-        self.dead_letter_dir = self.outbox_dir / "dead-letter"
-        self.retry_initial = max(
-            0.01, float(os.getenv("LINGSHU_SQLITE_RETRY_INITIAL_MS", "50")) / 1000.0,
-        )
-        self.retry_max = max(
-            self.retry_initial,
-            float(os.getenv("LINGSHU_SQLITE_RETRY_MAX_MS", "5000")) / 1000.0,
-        )
-        self._queue: asyncio.Queue[_WriteGroup] | None = None
-        self._worker: asyncio.Task[None] | None = None
-        self._executor: ThreadPoolExecutor | None = None
-        self._callback_pending: deque[list[dict[str, Any]]] = deque()
-        self._callback_drain: asyncio.Task[None] | None = None
-        self._admission_condition: asyncio.Condition | None = None
-        self._admitted_operations = 0
-        self._admitted_bytes = 0
-        self._inflight_since: float | None = None
-        self._inflight_operations = 0
-        self._process_lock_handle: Any = None
-        self.started_at: str | None = None
-        self.last_success_at: str | None = None
-        self.last_error_at: str | None = None
-        self.last_error: str = ""
-        self.lock_retries = 0
-        self.total_failures = 0
-        self.consecutive_failures = 0
-        self.committed_operations = 0
-        self.dead_letter_operations = 0
-        self.replayed_operations = 0
-        self.callback_rejections = 0
-        self.coalesced_snapshots = 0
-        self.degraded = False
+    """兼容适配器：为 integrations 等旧调用方保留对象式 API。"""
 
     @property
     def running(self) -> bool:
-        return self._worker is not None and not self._worker.done()
+        return _task is not None and not _task.done()
+
+    @property
+    def capacity(self) -> int:
+        return _QUEUE_SIZE
+
+    @property
+    def degraded(self) -> bool:
+        return False
 
     async def start(self) -> None:
-        if self.running:
-            return
-        self._queue = asyncio.Queue(maxsize=self.capacity)
-        self._admission_condition = asyncio.Condition()
-        self.outbox_dir.mkdir(parents=True, exist_ok=True)
-        self.dead_letter_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = self.outbox_dir.parent / "api-single-writer.lock"
-        self._process_lock_handle = lock_path.open("a+", encoding="utf-8")
-        try:
-            fcntl.flock(
-                self._process_lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB,
-            )
-        except BlockingIOError as exc:
-            self._process_lock_handle.close()
-            self._process_lock_handle = None
-            raise RuntimeError(
-                "检测到另一个 Lingshu API worker；SQLite 模式仅支持单 Uvicorn worker",
-            ) from exc
-        self._executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="lingshu-sqlite-writer",
-        )
-        self.started_at = _utc_now()
-        self._worker = asyncio.create_task(self._run(), name="lingshu-sqlite-persistence")
-        await self._replay_outbox()
+        await start_persistence()
+
+    async def stop(self) -> None:
+        await stop_persistence()
+
+    async def flush(self) -> None:
+        await flush_persistence()
 
     async def submit(
         self,
@@ -125,464 +260,17 @@ class PersistenceWriter:
         *,
         wait: bool = False,
     ) -> list[int | None] | None:
-        if not operations:
-            return [] if wait else None
-        if not self.running or self._queue is None:
-            raise RuntimeError("SQLite 持久化服务尚未启动")
-        # 跨线程、outbox 与重启重放必须看到完全相同的 JSON 形状。
-        # 单次序列化同时完成规范化深拷贝与容量字节数计算。
-        serialized = json.dumps(
-            operations, ensure_ascii=False, separators=(",", ":"), default=str,
-        )
-        operations = json.loads(serialized)
-        byte_size = len(serialized.encode("utf-8"))
-        if len(operations) > self.capacity or byte_size > self.capacity_bytes:
-            raise RuntimeError(
-                f"单批持久化操作超过容量限制: operations={len(operations)}, bytes={byte_size}",
-            )
-        loop = asyncio.get_running_loop()
-        receipt = loop.create_future() if wait else None
-        # 流快照是可重建的展示状态，最终 text_end/thinking_end 才是语义记录；
-        # 对每个 200ms 快照 fsync 会制造比 SQLite 本身更大的写放大。
-        durable = any(
-            operation.get("type") not in {"snapshot_upsert", "snapshot_delete"}
-            for operation in operations
-        )
-        # outbox 写入（含 fsync）立即调度到线程池流水线执行，入队路径只做
-        # 序列化与配额登记；worker 在 SQLite 提交前等待本批 outbox 完成，
-        # 保持"先持久化到 outbox、再提交 SQLite"的崩溃恢复不变量。
-        outbox_task = (
-            asyncio.create_task(asyncio.to_thread(self._write_outbox, operations))
-            if durable else None
-        )
-        group = _WriteGroup(
-            operations, receipt, byte_size=byte_size,
-            outbox_task=outbox_task, durable=durable,
-        )
-        await self._admit(group)
-        if receipt is not None:
-            return await receipt
-        return None
+        return await submit(operations, wait=wait)
 
     def submit_from_callback(self, operations: list[dict[str, Any]]) -> None:
-        """Bridge a synchronous Agent callback into the bounded async queue."""
-        if not operations:
-            return
-        if not self.running:
-            raise RuntimeError("SQLite 持久化服务尚未启动")
-        if len(self._callback_pending) >= self.callback_capacity:
-            if all(
-                operation.get("type") in {"snapshot_upsert", "snapshot_delete"}
-                for operation in operations
-            ):
-                self.coalesced_snapshots += len(operations)
-                return
-            self.callback_rejections += len(operations)
-            self.degraded = True
-            raise RuntimeError("SQLite 持久化回调入口已满，已对事件生产者施加背压")
-        self._callback_pending.append(operations)
-        if self._callback_drain is None or self._callback_drain.done():
-            self._callback_drain = asyncio.get_running_loop().create_task(
-                self._drain_callbacks(), name="lingshu-persistence-admission",
-            )
-
-    async def _drain_callbacks(self) -> None:
-        while self._callback_pending:
-            # 合并积压的小批次一起入队：fsync 已流水线化出 submit 路径，
-            # 合并可摊薄序列化与配额登记开销，降低多会话高吞吐时的排队延迟。
-            merged: list[dict[str, Any]] = []
-            sources: list[list[dict[str, Any]]] = []
-            batches = 0
-            while self._callback_pending and batches < 16 and len(merged) < 1024:
-                operations_batch = self._callback_pending.popleft()
-                merged.extend(operations_batch)
-                sources.append(operations_batch)
-                batches += 1
-            try:
-                await self.submit(merged)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # 合并失败时回退为逐批提交（容量超限等场景拆小即可通过），
-                # 仅真正无法入队的批次才丢弃——尽量保证数据不丢。
-                logger.exception("持久化合并批次（%d 操作）入队失败，回退逐批提交", len(merged))
-                for source in sources:
-                    try:
-                        await self.submit(source)
-                    except asyncio.CancelledError:
-                        self._callback_pending.appendleft(source)
-                        raise
-                    except Exception:
-                        logger.exception("持久化回调批次（%d 操作）入队失败，已丢弃", len(source))
-                        self.degraded = True
-
-    async def flush(self) -> None:
-        drain = self._callback_drain
-        if drain is not None and not drain.done():
-            await drain
-        if self._queue is not None:
-            await self._queue.join()
-
-    async def stop(self) -> None:
-        try:
-            await asyncio.wait_for(self.flush(), timeout=self.shutdown_timeout)
-        except asyncio.TimeoutError:
-            self.degraded = True
-            logger.error(
-                "SQLite 持久化关闭等待超过 %.1fs，未提交操作保留在 outbox",
-                self.shutdown_timeout,
-            )
-        drain = self._callback_drain
-        self._callback_drain = None
-        if drain is not None and not drain.done():
-            drain.cancel()
-            try:
-                await drain
-            except asyncio.CancelledError:
-                pass
-        worker = self._worker
-        self._worker = None
-        if worker is not None:
-            worker.cancel()
-            try:
-                await worker
-            except asyncio.CancelledError:
-                pass
-        executor = self._executor
-        self._executor = None
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
-        self._queue = None
-        self._admission_condition = None
-        if self._process_lock_handle is not None:
-            fcntl.flock(self._process_lock_handle.fileno(), fcntl.LOCK_UN)
-            self._process_lock_handle.close()
-            self._process_lock_handle = None
-
-    async def _admit(self, group: _WriteGroup) -> None:
-        assert self._queue is not None and self._admission_condition is not None
-        async with self._admission_condition:
-            await self._admission_condition.wait_for(lambda: (
-                self._admitted_operations + len(group.operations) <= self.capacity
-                and self._admitted_bytes + group.byte_size <= self.capacity_bytes
-            ))
-            self._admitted_operations += len(group.operations)
-            self._admitted_bytes += group.byte_size
-        try:
-            await self._queue.put(group)
-        except BaseException:
-            await self._release(group)
-            raise
-
-    async def _release(self, group: _WriteGroup) -> None:
-        condition = self._admission_condition
-        if condition is None:
-            return
-        async with condition:
-            self._admitted_operations = max(
-                0, self._admitted_operations - len(group.operations),
-            )
-            self._admitted_bytes = max(0, self._admitted_bytes - group.byte_size)
-            condition.notify_all()
-
-    async def _run(self) -> None:
-        assert self._queue is not None
-        while True:
-            first = await self._queue.get()
-            groups = [first]
-            operation_count = len(first.operations)
-            deadline = asyncio.get_running_loop().time() + 0.02
-            while operation_count < 128:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    break
-                try:
-                    group = await asyncio.wait_for(self._queue.get(), remaining)
-                except asyncio.TimeoutError:
-                    break
-                groups.append(group)
-                operation_count += len(group.operations)
-
-            operations = [op for group in groups for op in group.operations]
-            self._inflight_since = min(group.admitted_at for group in groups)
-            self._inflight_operations = len(operations)
-            # 提交前必须确保本批所有语义操作的 outbox 已 fsync 落盘：
-            # 崩溃时"已入队未提交"的操作仍可从 outbox 重放，数据不丢。
-            await self._await_outbox(groups)
-            delay = self.retry_initial
-            while True:
-                try:
-                    loop = asyncio.get_running_loop()
-                    assert self._executor is not None
-                    results = await loop.run_in_executor(
-                        self._executor,
-                        session_store.apply_persistence_batch,
-                        operations,
-                    )
-                    self.committed_operations += len(operations)
-                    self.consecutive_failures = 0
-                    self.degraded = False
-                    self.last_error = ""
-                    self.last_success_at = _utc_now()
-                    offset = 0
-                    for group in groups:
-                        count = len(group.operations)
-                        if group.receipt is not None and not group.receipt.done():
-                            group.receipt.set_result(results[offset:offset + count])
-                        offset += count
-                    for group in groups:
-                        if group.outbox_path is not None:
-                            await asyncio.to_thread(_unlink_quietly, group.outbox_path)
-                        self._queue.task_done()
-                        await self._release(group)
-                    self._inflight_since = None
-                    self._inflight_operations = 0
-                    break
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # retain transient batches until SQLite recovers
-                    self.total_failures += 1
-                    self.consecutive_failures += 1
-                    self.degraded = True
-                    self.last_error_at = _utc_now()
-                    self.last_error = f"{type(exc).__name__}: {exc}"[:500]
-                    if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
-                        self.lock_retries += 1
-                    if not _is_transient_sqlite_error(exc):
-                        logger.exception("SQLite 投影发生永久错误，批次转入 dead-letter")
-                        await self._isolate_failed_groups(groups)
-                        self._inflight_since = None
-                        self._inflight_operations = 0
-                        break
-                    logger.error(
-                        "SQLite 投影失败，%.2fs 后重试（批次不会丢弃）: %s",
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, self.retry_max)
-
-    async def _await_outbox(self, groups: list[_WriteGroup]) -> None:
-        """等待本批组的 outbox 流水线写盘完成并回收结果。
-
-        outbox 写失败不阻断提交：SQLite 是主存储，outbox 仅用于崩溃重放；
-        丢一份重放副本好过阻塞所有会话的持久化管道。
-        """
-        tasks = [
-            group.outbox_task for group in groups
-            if group.outbox_task is not None
-        ]
-        if not tasks:
-            return
-        await asyncio.gather(*tasks, return_exceptions=True)
-        for group in groups:
-            task = group.outbox_task
-            group.outbox_task = None
-            if task is None or task.cancelled():
-                continue
-            error = task.exception()
-            if error is not None:
-                logger.error("outbox 写入失败（批次仍将提交 SQLite）: %s", error)
-                continue
-            group.outbox_path = task.result()
-
-    async def _isolate_failed_groups(self, groups: list[_WriteGroup]) -> None:
-        """Retry groups separately so one malformed event cannot poison neighbors."""
-        loop = asyncio.get_running_loop()
-        assert self._executor is not None and self._queue is not None
-        for group in groups:
-            try:
-                loop = asyncio.get_running_loop()
-                assert self._executor is not None
-                await self._await_outbox([group])
-                results = await loop.run_in_executor(
-                    self._executor,
-                    session_store.apply_persistence_batch,
-                    group.operations,
-                )
-            except Exception as group_error:
-                self.dead_letter_operations += len(group.operations)
-                if group.outbox_path is not None:
-                    await asyncio.to_thread(self._move_dead_letter, group.outbox_path)
-                if group.receipt is not None and not group.receipt.done():
-                    group.receipt.set_exception(group_error)
-                logger.error(
-                    "持久化操作组进入 dead-letter: %s", group_error,
-                    exc_info=(type(group_error), group_error, group_error.__traceback__),
-                )
-            else:
-                self.committed_operations += len(group.operations)
-                self.last_success_at = _utc_now()
-                if group.receipt is not None and not group.receipt.done():
-                    group.receipt.set_result(results)
-                if group.outbox_path is not None:
-                    await asyncio.to_thread(_unlink_quietly, group.outbox_path)
-            finally:
-                self._queue.task_done()
-                await self._release(group)
+        if not queue_persistence_operations(operations):
+            fallback_direct_write(operations)
 
     def health(self) -> dict[str, Any]:
-        queue = self._queue
-        oldest_age = 0.0
-        if self._inflight_since is not None:
-            oldest_age = max(0.0, time.monotonic() - self._inflight_since)
-        elif queue is not None and queue.qsize():
-            try:
-                oldest_age = max(0.0, time.monotonic() - queue._queue[0].admitted_at)
-            except (AttributeError, IndexError):
-                pass
-        return {
-            "running": self.running,
-            "process_id": os.getpid(),
-            "degraded": self.degraded,
-            "queue_depth": queue.qsize() if queue is not None else 0,
-            "queue_capacity": self.capacity,
-            "queue_operations": self._admitted_operations,
-            "queue_bytes": self._admitted_bytes,
-            "queue_capacity_bytes": self.capacity_bytes,
-            "pending_admissions": len(self._callback_pending),
-            "inflight_operations": self._inflight_operations,
-            "oldest_operation_seconds": round(oldest_age, 3),
-            "lock_retries": self.lock_retries,
-            "total_failures": self.total_failures,
-            "consecutive_failures": self.consecutive_failures,
-            "committed_operations": self.committed_operations,
-            "dead_letter_operations": self.dead_letter_operations,
-            "replayed_operations": self.replayed_operations,
-            "callback_rejections": self.callback_rejections,
-            "coalesced_snapshots": self.coalesced_snapshots,
-            "started_at": self.started_at,
-            "last_success_at": self.last_success_at,
-            "last_error_at": self.last_error_at,
-            "last_error": self.last_error,
-        }
-
-    def _write_outbox(self, operations: list[dict[str, Any]]) -> Path:
-        self.outbox_dir.mkdir(parents=True, exist_ok=True)
-        name = f"{time.time_ns()}-{os.getpid()}-{id(operations):x}.json"
-        target = self.outbox_dir / name
-        temporary = target.with_suffix(".tmp")
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(
-                {"operations": operations}, handle, ensure_ascii=False, default=str,
-            )
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        return target
-
-    def _move_dead_letter(self, path: Path) -> None:
-        self.dead_letter_dir.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            os.replace(path, self.dead_letter_dir / path.name)
-
-    async def _replay_outbox(self) -> None:
-        for path in sorted(self.outbox_dir.glob("*.json")):
-            try:
-                payload = await asyncio.to_thread(
-                    lambda candidate=path: json.loads(candidate.read_text(encoding="utf-8")),
-                )
-                operations = payload.get("operations") if isinstance(payload, dict) else None
-                if not isinstance(operations, list) or not operations:
-                    raise ValueError("outbox 缺少 operations")
-                group = _WriteGroup(
-                    operations=operations,
-                    byte_size=_operation_bytes(operations),
-                    outbox_path=path,
-                )
-                if (
-                    len(operations) > self.capacity
-                    or group.byte_size > self.capacity_bytes
-                ):
-                    raise ValueError("outbox 批次超过当前队列容量")
-                await self._admit(group)
-                self.replayed_operations += len(operations)
-            except Exception:
-                logger.exception("持久化 outbox 重放失败，已转入 dead-letter: %s", path)
-                await asyncio.to_thread(self._move_dead_letter, path)
+        return health()
 
     async def reconcile_mission_states(self, sessions_dir: str | Path) -> int:
-        """Project authoritative per-session Mission JSON into the SQLite index."""
-        directory = Path(sessions_dir)
-        if not directory.is_dir():
-            return 0
-        mission_states = await asyncio.to_thread(_read_mission_states, directory)
-        sessions = await asyncio.to_thread(
-            session_store.get_sessions_by_ids, list(mission_states),
-        )
-        repairs: list[dict[str, Any]] = []
-        for session_id, data in mission_states.items():
-            session = sessions.get(session_id)
-            if session is None:
-                continue
-            phase = str(data.get("phase") or session.get("phase") or "planning")
-            terminal = phase in {"completed", "failed", "cancelled"}
-            fields = {
-                "phase": phase,
-                "status": phase if terminal else "active",
-                "success": data.get("success"),
-                "flag": data.get("flag"),
-                "summary": data.get("summary") or "",
-                "title": data.get("title") or session.get("title"),
-                "checkpoint_seq": int(data.get("checkpoint_seq") or 0),
-                "resume_status": data.get("resume_status") or session.get("resume_status") or "fresh",
-                "approval_status": infer_exploitation_approval_status(
-                    data,
-                    pending=bool(session.get("pending_approval")),
-                    active=not terminal,
-                ),
-                "approval_decision": data.get("exploitation_approval_decision") or "",
-                "approval_requested_at": data.get("exploitation_approval_requested_at") or "",
-                "approval_resolved_at": data.get("exploitation_approval_resolved_at") or "",
-            }
-            changed = {key: value for key, value in fields.items() if session.get(key) != value}
-            if changed:
-                repairs.append({
-                    "type": "session_update", "session_id": session_id,
-                    "fields": changed,
-                })
-        if repairs:
-            await self.submit(repairs, wait=True)
-        return len(repairs)
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _operation_bytes(operations: list[dict[str, Any]]) -> int:
-    return len(json.dumps(
-        operations, ensure_ascii=False, separators=(",", ":"), default=str,
-    ).encode("utf-8"))
-
-
-def _is_transient_sqlite_error(exc: Exception) -> bool:
-    if not isinstance(exc, sqlite3.OperationalError):
-        return False
-    message = str(exc).lower()
-    return any(token in message for token in (
-        "locked", "busy", "temporarily unavailable", "disk i/o error",
-    ))
-
-
-def _unlink_quietly(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        logger.exception("清理已提交 outbox 失败: %s", path)
-
-
-def _read_mission_states(directory: Path) -> dict[str, dict[str, Any]]:
-    states: dict[str, dict[str, Any]] = {}
-    for path in directory.glob("*.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            logger.exception("跳过损坏的 Mission JSON: %s", path)
-            continue
-        if isinstance(data, dict):
-            states[path.stem] = data
-    return states
+        return await reconcile_mission_states(sessions_dir)
 
 
 _writer = PersistenceWriter()

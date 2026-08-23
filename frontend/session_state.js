@@ -676,7 +676,9 @@ class LingShuState {
   // ══════════════════════════════════════
   startSessionPolling() {
     this.stopSessionPolling();
-    this._sessionPollTimer = setInterval(() => this.loadSessions(), 10000);
+    // 30s 低频全量刷新（原 10s）；新会话/切换由主动 loadSessions 触发，
+    // 降低轮询请求频率，缓解 3 会话并发时的请求堆积。
+    this._sessionPollTimer = setInterval(() => this.loadSessions(), 30000);
   }
 
   stopSessionPolling() {

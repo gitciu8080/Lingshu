@@ -204,12 +204,6 @@ type HypothesisView = {
   next_validation?: string;
   updated_at?: string;
 };
-type ReportReferenceIndex = {
-  hypotheses: Record<string, string>;
-  evidence: Record<string, string>;
-  actions: Record<string, string>;
-  tools: Record<string, string[]>;
-};
 type AttackOption = {
   id: string;
   title: string;
@@ -688,75 +682,6 @@ const MarkdownContent = memo(function MarkdownContent({ children }: { children: 
     </ReactMarkdown>
   );
 });
-
-function referenceCommand(action: Record<string, unknown>): string {
-  const command = String(action.command || "").trim();
-  if (command) return command.replace(/\s+/g, " ");
-  const tool = String(action.tool || "未知工具");
-  const parameters = action.parameters && typeof action.parameters === "object"
-    ? JSON.stringify(action.parameters)
-    : "{}";
-  return `${tool} ${parameters}`;
-}
-
-function buildReportReferenceIndex(mission: Mission): ReportReferenceIndex {
-  const index: ReportReferenceIndex = { hypotheses: {}, evidence: {}, actions: {}, tools: {} };
-  const hypotheses = Array.isArray(mission.hypotheses) ? mission.hypotheses : [];
-  hypotheses.forEach((value) => {
-    if (!value || typeof value !== "object") return;
-    const item = value as Record<string, unknown>;
-    if (item.id && item.statement) index.hypotheses[String(item.id).toLowerCase()] = String(item.statement);
-  });
-  const evidence = Array.isArray(mission.evidence_records) ? mission.evidence_records : [];
-  evidence.forEach((value) => {
-    if (!value || typeof value !== "object") return;
-    const item = value as Record<string, unknown>;
-    if (item.id && item.summary) index.evidence[String(item.id).toLowerCase()] = String(item.summary);
-  });
-  const actions = Array.isArray(mission.action_history) ? mission.action_history : [];
-  actions.forEach((value) => {
-    if (!value || typeof value !== "object") return;
-    const item = value as Record<string, unknown>;
-    const command = referenceCommand(item);
-    if (item.id) index.actions[String(item.id).toLowerCase()] = command;
-    const result = String(item.result_summary || "");
-    for (const match of result.matchAll(/artifacts\/[^<\s]*\/(tool-\d+)\/stdout\.txt/gi)) {
-      const key = match[1].toLowerCase();
-      const commands = index.tools[key] || (index.tools[key] = []);
-      if (!commands.includes(command)) commands.push(command);
-    }
-  });
-  return index;
-}
-
-function markdownCodeSpan(value: string): string {
-  const runs = value.match(/`+/g) || [];
-  const longest = runs.reduce((size, run) => Math.max(size, run.length), 0);
-  const fence = "`".repeat(Math.max(1, longest + 1));
-  return `${fence}${value.replaceAll("|", "\\|")}${fence}`;
-}
-
-function resolveReadableReferences(text: string, index: ReportReferenceIndex): string {
-  return text.replace(
-    /(?<![\w-])`?(tool-\d+|h\d+|e\d+|x\d+)`?(?![\w-])/gi,
-    (_original, raw: string) => {
-      const key = raw.toLowerCase();
-      if (key.startsWith("tool-")) {
-        const commands = index.tools[key] || [];
-        return commands.length
-          ? commands.map((command) => `执行命令：${markdownCodeSpan(command)}`).join("；")
-          : "未找到对应的原始执行命令";
-      }
-      if (key.startsWith("h"))
-        return index.hypotheses[key] ? `假设“${index.hypotheses[key]}”` : "未找到正文的历史假设";
-      if (key.startsWith("e"))
-        return index.evidence[key] ? `证据“${index.evidence[key]}”` : "未找到正文的历史证据";
-      return index.actions[key]
-        ? `执行命令：${markdownCodeSpan(index.actions[key])}`
-        : "未找到对应的历史动作";
-    },
-  );
-}
 
 const StreamingMarkdown = memo(function StreamingMarkdown({ children }: { children: string }) {
   const latestText = useRef(children);
@@ -1752,13 +1677,9 @@ function ApprovalDialog({
   );
 }
 
-const AgentCard = memo(function AgentCard({
-  event: value,
-  referenceIndex,
-}: {
-  event: Event;
-  referenceIndex: ReportReferenceIndex;
-}) {
+// 与 Docker 版对齐：AgentCard 只依赖 event 本身，memo 判等在流式期间
+// 几乎恒成立，避免 referenceIndex 引用变化击穿整列表 memo。
+const AgentCard = memo(function AgentCard({ event: value }: { event: Event }) {
   const event = safeEvent(value),
     info = agentOf(event),
     Icon = info.icon,
@@ -1768,9 +1689,7 @@ const AgentCard = memo(function AgentCard({
     displayName = info.name.includes(" - ") ? info.name : info.expert;
   const isUserMessage = kind === "user_message" || info.agentKey === "user";
   const isStreaming = kind === "text_stream" || kind === "thinking_stream";
-  const text = isUserMessage || kind.includes("thinking")
-    ? rawText
-    : resolveReadableReferences(rawText, referenceIndex);
+  const text = rawText;
   if (kind === "expert_joined") {
     const expertName = String(
       data.expert_name || data.agent || "安全专家",
@@ -2233,14 +2152,6 @@ function ConsoleApp() {
   const events = eventsForSession(eventStore, active);
   const toolEvents = eventStore.sessionId === active ? eventStore.toolItems : [];
   const phase = String(detail.phase || current?.phase || "");
-  // referenceIndex 只依赖三个记录数组：plan_updated / target_info / 审批
-  // 事件都会产生新的 detail 对象引用，但 spread 保留这三个数组不变——
-  // 以字段级依赖做 memo，避免流式期间索引反复重建击穿全部 AgentCard 的
-  // memo 并触发逐卡全文正则替换。
-  const reportReferenceIndex = useMemo(
-    () => buildReportReferenceIndex(detail),
-    [detail.hypotheses, detail.evidence_records, detail.action_history],
-  );
   // 会话列表过滤结果按 (sessions, search) 记忆化：事件高频到达时避免每次
   // 渲染都重建过滤数组与拼接字符串。
   const filteredSessions = useMemo(
@@ -3077,7 +2988,6 @@ function ConsoleApp() {
                 <AgentCard
                   key={eventRenderKey(event, i)}
                   event={event}
-                  referenceIndex={reportReferenceIndex}
                 />
               ))
             ) : (

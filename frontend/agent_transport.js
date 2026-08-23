@@ -157,10 +157,12 @@
           },
         },
       });
-      for (let attempt = 0; attempt < 20; attempt++) {
+      // 轮询降频：8 次 × 500ms（4 秒窗口），替代原 20 次 × 50ms；3 会话并发
+      // 启动时把该路径请求量从每会话 ~20 个降到 ~8 个，未就绪时前端靠 SSE 感知。
+      for (let attempt = 0; attempt < 8; attempt++) {
         const status = await this.getStatus(sessionId).catch(() => null);
         if (status?.is_live) break;
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
       return { ...created, session_id: sessionId };
     }
