@@ -15,7 +15,7 @@ from agentscope.credential import OpenAICredential
 from pydantic import SecretStr
 
 import integrations.agentscope_service.facade as facade_module
-from TaskState import MissionState, Phase
+from core.TaskState import MissionState, Phase
 from LLM.model import DeepSeekResponsesModel
 from main import build_final_mission_title, build_mission_title, prefix_session_title
 from agent.experts import REVERSE_EXPERT, attack_expert_name, build_expert_assignments

@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from auth import (
+from core.auth import (
     get_current_user,
     create_user,
     verify_password,
@@ -44,9 +44,9 @@ from auth import (
 )
 
 from main import run_mission
-from config import RuntimeConfig
-from workspace_service import get_workspace_service, WorkspaceCapacityError
-from api_workspace import (
+from core.config import RuntimeConfig
+from core.workspace_service import get_workspace_service, WorkspaceCapacityError
+from core.api_workspace import (
     list_artifacts as _list_workspace_artifacts,
     resolve_artifact_path as _resolve_artifact_path,
     workspace_summary as _workspace_summary,
@@ -54,9 +54,9 @@ from api_workspace import (
 from Tools.tooling import (
     interrupt_agent_tasks,
 )
-import session_store
-import persistence_service as ps
-from session_events import (
+import core.session_store as session_store
+import core.persistence_service as ps
+from core.session_events import (
     message_operation as _event_persistence_operation,
     session_create_operation,
     session_update_operation,
@@ -70,10 +70,10 @@ from integrations.agentscope_service import (
 from integrations.agentscope_service.account_events import publish_account_event
 from integrations.antsword_service import get_antsword_service
 from Tools.KnowledgeBase import get_rag_service
-from TaskState import infer_exploitation_approval_status
+from core.TaskState import infer_exploitation_approval_status
 from Tools.tool_catalog import get_tool_catalog
 from Tools.target import normalize_target
-from model_registry import (
+from core.model_registry import (
     ModelRegistryError,
     active_llm_providers,
     create_model_config,
@@ -1231,7 +1231,7 @@ async def register(data: UserCreate):
 
 @app.post("/auth/login", response_model=TokenResponse)
 async def login(data: UserLogin):
-    from auth import get_user_by_username as _get_user
+    from core.auth import get_user_by_username as _get_user
 
     def authenticate_and_touch() -> dict | None:
         user = _get_user(data.username)
@@ -1239,7 +1239,7 @@ async def login(data: UserLogin):
             return None
         # 与密码校验放入同一工作线程，避免 SQLite 与 bcrypt 分别阻塞
         # 主事件循环。
-        from auth import get_db
+        from core.auth import get_db
         from datetime import datetime, timezone
         conn = get_db()
         try:

@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from cryptography.fernet import Fernet, InvalidToken
 
 
-_ROOT = Path(__file__).resolve().parent
+_ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = _ROOT / "data" / "model_api_configs.json"
 LEGACY_DB_PATH = _ROOT / "data" / "users.db"
 KEY_PATH = _ROOT / "data" / "model_api.key"

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from TaskState import MissionState, MissionStore, Phase
+from core.TaskState import MissionState, MissionStore, Phase
 from Tools.Plan import create_add_plan_tool, create_update_plan_tool
 
 

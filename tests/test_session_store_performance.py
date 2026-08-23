@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-import auth
-import session_store
+import core.auth as auth
+import core.session_store as session_store
 
 
 class SessionStorePerformanceTest(unittest.TestCase):

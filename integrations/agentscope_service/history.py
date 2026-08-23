@@ -8,8 +8,8 @@ import time
 from collections import defaultdict
 from typing import Any
 
-from persistence_service import get_persistence_writer
-from session_events import message_operation, session_update_operation
+from core.persistence_service import get_persistence_writer
+from core.session_events import message_operation, session_update_operation
 from .account_events import publish_account_event
 
 

@@ -19,8 +19,8 @@ import sqlite3
 from typing import Any
 from pathlib import Path
 
-import session_store
-from TaskState import infer_exploitation_approval_status
+import core.session_store as session_store
+from core.TaskState import infer_exploitation_approval_status
 
 logger = logging.getLogger(__name__)
 

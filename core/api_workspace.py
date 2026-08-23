@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from workspace_service import WorkspaceService
+from core.workspace_service import WorkspaceService
 
 # artifacts 根下允许下载的顶层目录（角色产物）；input/ 由上传接口管理
 _ALLOWED_ARTIFACT_ROOTS = ("artifacts", "input", "reports", "mission", "data", "skills")

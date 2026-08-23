@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from TaskState import MissionState, MissionStore
+from core.TaskState import MissionState, MissionStore
 from Tools.target import normalize_target
 from agent.Attack import _build_skill_list
 from agent.categorize import CategoryDecision, evaluate_reclassification

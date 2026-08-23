@@ -53,7 +53,7 @@ from agentscope.workspace import LocalWorkspace
 logger = logging.getLogger(__name__)
 
 # 默认工作区根目录固定在项目内，不依赖启动命令的当前目录。
-_PROJECT_ROOT = Path(__file__).resolve().parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_ROOT = _PROJECT_ROOT / "WorkDir" / "v2"
 
 

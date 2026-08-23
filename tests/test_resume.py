@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from TaskState import MissionState, MissionStore, Phase
+from core.TaskState import MissionState, MissionStore, Phase
 
 SESSION_ID = "resume-test-session"
 

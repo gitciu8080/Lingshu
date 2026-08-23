@@ -12,9 +12,9 @@ from unittest.mock import AsyncMock, patch
 
 from agentscope.message import ToolCallBlock
 
-from config import RuntimeConfig
+from core.config import RuntimeConfig
 from LLM.model import Qwen, QwenModelUnavailableError, resolve_qwen_model
-from TaskState import MissionState, MissionStore
+from core.TaskState import MissionState, MissionStore
 from Tools.Plan import create_submit_plan_tool
 from Tools.tooling import (
     AllowedFunctionTool,
@@ -125,7 +125,7 @@ class QwenRepeatPenaltyTest(unittest.TestCase):
 
     def test_explicit_high_value_is_preserved_with_warning(self) -> None:
         with patch.dict(os.environ, {"QWEN_REPEAT_PENALTY": "1.35"}, clear=True):
-            with self.assertLogs("config", level="WARNING"):
+            with self.assertLogs("core.config", level="WARNING"):
                 cfg = RuntimeConfig.from_env()
         self.assertEqual(cfg.qwen_repeat_penalty, 1.35)
 

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from TaskState import FactRecord, MissionState, MissionStore, Phase
+from core.TaskState import FactRecord, MissionState, MissionStore, Phase
 from Tools.KnowledgeBase import RAGService, build_retrieval_request
 
 

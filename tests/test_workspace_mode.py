@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from config import RuntimeConfig
+from core.config import RuntimeConfig
 
 
 class WorkspaceModeConfigTest(unittest.TestCase):
@@ -40,7 +40,7 @@ class LegacyModeNoWorkspaceTest(unittest.IsolatedAsyncioTestCase):
     async def test_legacy_mode_skips_workspace_creation(self) -> None:
         """legacy 模式下 run_mission 不调用 workspace get（mock 模型抛错前验证）。"""
         import main as main_module
-        from TaskState import MissionState, MissionStore, Phase
+        from core.TaskState import MissionState, MissionStore, Phase
 
         base = Path(tempfile.mkdtemp(prefix="lingshu-legacy-"))
         store = MissionStore(base / "mission.json")
@@ -72,7 +72,7 @@ class LegacyModeNoWorkspaceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_local_mode_creates_workspace(self) -> None:
         import main as main_module
-        from TaskState import MissionState, MissionStore
+        from core.TaskState import MissionState, MissionStore
 
         base = Path(tempfile.mkdtemp(prefix="lingshu-local-"))
         store = MissionStore(base / "mission.json")

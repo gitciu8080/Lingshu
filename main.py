@@ -29,13 +29,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from agentscope.message import UserMsg  # AgentScope 用户消息封装
 from agentscope.types import ReplyFinishedReason
 
-from config import RuntimeConfig  # 运行时配置（API Key、超时等，从环境变量读取）
+from core.config import RuntimeConfig  # 运行时配置（API Key、超时等，从环境变量读取）
 from LLM.model import (  # 创建 LLM 模型实例（deepseek / qwen）
     QwenModelUnavailableError,
     create_model,
     resolve_qwen_model,
 )
-from TaskState import MissionState, MissionStore, Phase  # 任务状态、持久化存储、阶段枚举
+from core.TaskState import MissionState, MissionStore, Phase  # 任务状态、持久化存储、阶段枚举
 from agent.Analysis import create_analysis_agent  # 漏洞研判专家（纯推理）
 from Tools.archive import safe_extract, SafeExtractError  # 安全解压（防路径穿越等）
 from agent.Attack import close_attack_agent, create_attack_agent  # 攻击手 Agent（分析 + 利用）
@@ -78,7 +78,7 @@ from agent.context import (  # 内部 Agent 的统一 Offloader/ContextConfig/�
     build_agent_context_config,
     build_role_agent_state,
 )
-from workspace_service import get_workspace_service  # Workspace v2 生命周期
+from core.workspace_service import get_workspace_service  # Workspace v2 生命周期
 from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     AgentMaxIterationsError,
     LazyAgent,

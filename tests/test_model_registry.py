@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-import model_registry
+import core.model_registry as model_registry
 
 
 class ModelRegistryTests(unittest.TestCase):
@@ -118,7 +118,7 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertEqual(custom["api_key"], "router-key")
         self.assertEqual(custom["api_style"], "responses")
 
-        from config import RuntimeConfig
+        from core.config import RuntimeConfig
         from LLM.model import OpenAICompatible
         from agentscope.model import OpenAIResponseModel
 
@@ -156,7 +156,7 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertEqual(overrides["zhipu_native_tools"], ("web_search",))
 
     def test_zhipu_factory_maps_thinking_levels_and_native_search(self) -> None:
-        from config import RuntimeConfig
+        from core.config import RuntimeConfig
         from LLM.model import Zhipu, ZhipuResponsesModel
 
         runtime = RuntimeConfig(
@@ -174,7 +174,7 @@ class ModelRegistryTests(unittest.TestCase):
 
     def test_zhipu_responses_uses_vendor_reasoning_wire_format(self) -> None:
         from agentscope.message import UserMsg
-        from config import RuntimeConfig
+        from core.config import RuntimeConfig
         from LLM.model import Zhipu, ZhipuResponsesModel
 
         runtime = RuntimeConfig(

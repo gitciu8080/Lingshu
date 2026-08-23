@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from functools import wraps
 
-from auth import get_db
+from core.auth import get_db
 
 
 _WRITE_LOCK = threading.RLock()

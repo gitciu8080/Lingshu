@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from config import RuntimeConfig
+from core.config import RuntimeConfig
 
 
 logger = logging.getLogger(__name__)

@@ -24,7 +24,7 @@ from agentscope.model import DeepSeekChatModel, OpenAIResponseModel, OpenAIChatM
 from agentscope.model import ChatResponse
 from agentscope.message import ThinkingBlock
 
-from config import RuntimeConfig
+from core.config import RuntimeConfig
 
 
 logger = logging.getLogger(__name__)

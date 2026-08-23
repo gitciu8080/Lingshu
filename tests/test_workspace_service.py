@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from workspace_service import WorkspaceService
+from core.workspace_service import WorkspaceService
 
 
 def _service() -> WorkspaceService:

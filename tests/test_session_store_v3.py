@@ -11,8 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import auth
-import session_store
+import core.auth as auth
+import core.session_store as session_store
 
 
 class SessionStoreV3Test(unittest.TestCase):

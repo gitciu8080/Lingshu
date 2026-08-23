@@ -26,13 +26,13 @@ from agentscope.app.workspace_manager import IsolationPolicy, LocalWorkspaceMana
 from agentscope.credential import DeepSeekCredential, OpenAICredential
 from pydantic import SecretStr
 
-from auth import get_current_user
-from config import RuntimeConfig
-import session_store
-from persistence_service import get_persistence_writer
-from session_events import message_operation, session_create_operation
+from core.auth import get_current_user
+from core.config import RuntimeConfig
+import core.session_store as session_store
+from core.persistence_service import get_persistence_writer
+from core.session_events import message_operation, session_create_operation
 from Tools.tooling import cancel_agent_tasks
-from workspace_service import get_workspace_service
+from core.workspace_service import get_workspace_service
 
 from .facade import LingshuMissionAgent
 from .account_events import subscribe_account, unsubscribe_account
@@ -225,7 +225,7 @@ async def prepare_service_session(
     if body.source_session_id:
         source = await storage.get_session(user_id, _agent_id(user_id), body.source_session_id)
         if source is None:
-            import session_store
+            import core.session_store
 
             legacy = await asyncio.to_thread(
                 session_store.get_session, body.source_session_id,

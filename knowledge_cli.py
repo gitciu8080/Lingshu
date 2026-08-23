@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-# Tools 是命名空间包（无 __init__.py），其内部 `from config import ...` 需要项目根在 sys.path。
+# Tools 是命名空间包（无 __init__.py），其内部 `from core.config import ...` 需要项目根在 sys.path。
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "Tools"))
 

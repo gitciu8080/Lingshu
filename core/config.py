@@ -200,7 +200,7 @@ class RuntimeConfig:
         # 超级管理员启用的数据库配置优先于 .env。注册表故障不能阻断主服务，
         # 此时保留环境变量配置并记录原因，便于运维恢复加密密钥或数据库。
         try:
-            from model_registry import load_runtime_overrides
+            from core.model_registry import load_runtime_overrides
 
             values.update(load_runtime_overrides())
         except Exception as exc:  # noqa: BLE001

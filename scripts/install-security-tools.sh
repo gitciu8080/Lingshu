@@ -31,10 +31,12 @@ case "$PROFILE" in
 esac
 
 CORE_PACKAGES=(
-  subfinder feroxbuster joomscan foremost ropper apktool steghide zbar-tools
+  subfinder feroxbuster joomscan foremost ropper apktool steghide stegseek zbar-tools
   strace python3-pytesseract
 )
 EXTENDED_PACKAGES=(ghidra bettercap wine wine64 wine32)
+# 当前源可能缺失的可选工具：逐个容错安装，失败不阻断整体。
+OPTIONAL_PACKAGES=(outguess)
 PACKAGES=("${CORE_PACKAGES[@]}")
 if [ "$PROFILE" = "extended" ]; then
   PACKAGES+=("${EXTENDED_PACKAGES[@]}")
@@ -65,4 +67,9 @@ fi
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y "${PACKAGES[@]}"
+for package in "${OPTIONAL_PACKAGES[@]}"; do
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"; then
+    printf '[可选] %s 在当前源不可用，已跳过\n' "$package"
+  fi
+done
 printf '%s\n' '安装完成。请通过 GET /api/superadmin/tooling/status?refresh=true 刷新健康状态。'

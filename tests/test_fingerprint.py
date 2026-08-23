@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import unittest
 
-from TaskState import MissionState
+from core.TaskState import MissionState
 from Tools.fingerprint import (
     MAX_ACTION_RETRIES,
     compute_action_fingerprint,

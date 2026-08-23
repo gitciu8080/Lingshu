@@ -13,8 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from workspace_service import WorkspaceService
-from api_workspace import list_artifacts, resolve_artifact_path, workspace_summary
+from core.workspace_service import WorkspaceService
+from core.api_workspace import list_artifacts, resolve_artifact_path, workspace_summary
 from Tools.workspace_tools import create_workspace_tools
 
 

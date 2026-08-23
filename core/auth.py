@@ -18,7 +18,7 @@ from passlib.context import CryptContext
 
 def _load_dotenv_for_auth() -> None:
     """认证在配置模块之前导入，因此在此尽早读取项目 .env。"""
-    dotenv_path = Path(__file__).with_name(".env")
+    dotenv_path = Path(__file__).resolve().parent.parent / ".env"
     if not dotenv_path.is_file():
         return
     for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
@@ -37,7 +37,7 @@ JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "10080"))
 
-DB_DIR = Path(__file__).parent / "data"
+DB_DIR = Path(__file__).resolve().parent.parent / "data"
 DB_DIR.mkdir(exist_ok=True)
 DB_PATH = DB_DIR / "users.db"
 
