@@ -15,7 +15,11 @@ from Tools.ScopeRegistry import ScopeRegistry
 from Tools.TonyDec import create_tonydec_tool
 from Tools.Vision import create_vision_analysis_tool
 from Tools.Volatility import create_volatility_tools
-from Tools.tooling import StrictJSONToolkit, create_scoped_shell_tool
+from Tools.tooling import (
+    StrictJSONToolkit,
+    create_parallel_scoped_shell_tool,
+    create_scoped_shell_tool,
+)
 from Tools.tool_catalog import append_capability_summary, create_tool_catalog_tools
 from agent.experts import ARTIFACT_TRIAGE_EXPERT, NETWORK_RECON_EXPERT
 
@@ -35,6 +39,9 @@ NETWORK_RECON_SYS_PROMPT = """你是网络安全信息侦察专家（NetworkReco
 - 不声称未由工具输出证明的端口、版本、目录或漏洞。
 - 若本轮 Toolkit 提供 analyze_image 且工作区已有相关图片，可用于理解视觉线索。
 - 不修改全局任务状态，也不在任意路径写文件。
+- Toolkit 提供 parallel_scoped_shell 时，互不依赖的只读探测（端口/服务扫描、HTTP
+  指纹、目录枚举等）应合并进一次 parallel_scoped_shell 并行执行以节省时间；任一命令
+  越界会整体拒绝，写文件/验证类命令禁止并行，必须用 scoped_shell 串行。
 
 cve_search 使用策略：
 - 仅当本轮 Toolkit 提供且任务上下文明确提到具体 CVE 编号时，才调用它获取公开情报。
@@ -67,6 +74,7 @@ def create_network_recon_agent(
 ) -> Agent:
     tools = [
         create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root),
+        create_parallel_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root),
         *create_tool_catalog_tools("recon", categories={"recon", "web"}),
     ]
     if include_cve_search:
@@ -108,6 +116,9 @@ ARTIFACT_TRIAGE_SYS_PROMPT = """你是 CTF 文件分析专家（ArtifactTriage�
   再用 file/xxd/strings 确认真实格式；未匹配时不得猜测为 TonyEnc。
 - 绝不直接执行二进制文件（./chall 等）— 这属于 Attack 阶段的职责。
 - 不执行漏洞利用、口令爆破或破坏性操作。
+- Toolkit 提供 parallel_scoped_shell 时，互不依赖的只读分析命令（file/strings/readelf/
+  unzip -l 等）可合并进一次 parallel_scoped_shell 并行执行；写文件/解码类命令必须
+  用 scoped_shell 串行。
 - 除 tonydec 写入独立解码产物外，不修改原文件；不联网。
 
 **关键：分析完成后必须立即输出最终中文分析报告并停止所有操作。
@@ -139,6 +150,7 @@ def create_artifact_triage_agent(
     catalog_categories = selected.intersection({"forensics", "reverse", "mobile"})
     tools = [
             create_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root),
+            create_parallel_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root),
             *create_tool_catalog_tools("triage", categories=catalog_categories),
         ]
     if selected.intersection({"forensics", "misc", "osint", "ai-ml"}):

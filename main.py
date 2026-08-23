@@ -71,6 +71,7 @@ from Tools.Report import (  # 任务总结 Markdown 规范化与 PDF 报告生�
 )
 from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
 from Tools.KnowledgeBase import build_retrieval_request, get_rag_service
+from Tools.AgenticMemory import get_experience_hint  # P0-C：Brain 规划前注入历史经验
 from Tools.tool_catalog import get_tool_catalog
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
 from agent.context import (  # 内部 Agent 的统一 Offloader/ContextConfig/角色状态
@@ -1993,6 +1994,19 @@ async def run_mission(
                 "只能把以上内容作为候选方法和检查清单；所有判断仍需由当前任务的 "
                 "Facts/Evidence 验证。\n"
             )
+        # P0-C：Brain 规划前注入历史成功经验（仅参考，不写入 Facts/Evidence）。
+        # 长期记忆可能为空或文件损坏，安全降级为空字符串不阻断规划。
+        try:
+            experience_hint = get_experience_hint()
+        except Exception:
+            experience_hint = ""
+        if experience_hint:
+            plan_prompt += (
+                "\n## 历史成功经验（仅参考，须以当前目标真实证据核验，"
+                "不得直接当作已验证事实）\n"
+                f"{experience_hint}\n"
+            )
+            mission.record("Brain", "experience_injected", source="agentic_memory")
         plan_prompt += (
             "\n你的任务：\n"
             "基于上述事实制定可审计的阶段计划。\n"

@@ -17,6 +17,68 @@ _MEMORY_FILE = os.path.join(_PROJECT_ROOT, "../.LongMemory", "agentic_memory.jso
 _RAG_ARCHIVE_DIR = Path(_PROJECT_ROOT).parent / ".RAG" / "long-memory"
 _MAX_HOT_MISSIONS = 50
 
+# 反思经验提炼的上限条数
+_LESSON_MAX = 8
+
+
+# 确定性失败分类 → 人类可读教训前缀（与 Tools/fingerprint.py 的 failure_type 对齐）
+_LESSON_LABELS = {
+    "transient": "临时性失败",
+    "parameter": "参数错误",
+    "tool": "工具不可用",
+    "environment": "环境受限",
+    "method": "方法失效",
+    "hypothesis_rejected": "假设被证伪",
+}
+
+
+def extract_lessons(
+    failed_paths: list[Any] | None = None,
+    attack_chain: list[dict[str, Any]] | None = None,
+    success: bool = False,
+) -> list[str]:
+    """从失败路径与攻击链中确定性提炼脱敏经验条目（不调用 LLM）。
+
+    - failed_paths: FailedPathRecord 或同构 dict，取 failure_type/failure_reason。
+    - attack_chain: 攻击链步骤（dict），成功时提取 service/cve 成功路径。
+    - 输出统一经 ``_redact`` 脱敏并去重，最多 ``_LESSON_MAX`` 条。
+
+    Returns:
+        教训列表；无失败路径且未成功时返回空列表。
+    """
+    lessons: list[str] = []
+    seen: set[str] = set()
+
+    def _push(text: str) -> None:
+        cleaned = _redact(text)
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            lessons.append(cleaned)
+
+    for entry in failed_paths or []:
+        if isinstance(entry, dict):
+            ftype = entry.get("failure_type")
+            reason = entry.get("failure_reason")
+        else:
+            ftype = getattr(entry, "failure_type", None)
+            reason = getattr(entry, "failure_reason", None)
+        label = _LESSON_LABELS.get(str(ftype or ""), "失败路径")
+        if reason:
+            _push(f"{label}: {str(reason)[:200]}")
+        elif ftype:
+            _push(f"{label}（无详细原因）")
+
+    if success:
+        for step in attack_chain or []:
+            if not isinstance(step, dict):
+                continue
+            service = step.get("service")
+            cve = step.get("cve")
+            if service:
+                _push(f"成功路径: {service} 可利用 {cve or '未记录 CVE'}")
+
+    return lessons[: _LESSON_MAX]
+
 
 def _atomic_write(path: Path, content: str) -> None:
     """原子写入归档卡片，避免任务中断产生半个 Markdown 文件。"""
@@ -31,6 +93,12 @@ def _redact(text: object) -> str:
     value = str(text or "")
     value = re.sub(r"https?://\S+", "[已脱敏 URL]", value, flags=re.IGNORECASE)
     value = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "[已脱敏目标]", value)
+    # IPv6（含压缩形式与 zone id）；前置负断言避免误伤单冒号文本
+    value = re.sub(
+        r"(?<![\w:])(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{0,4}(?:%\w+)?",
+        "[已脱敏目标]",
+        value,
+    )
     value = re.sub(r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b", "[已脱敏域名]", value)
     value = re.sub(r"(?:flag|ctf|nssctf)\{[^}\r\n]{1,512}\}", "[已脱敏 Flag]", value, flags=re.IGNORECASE)
     value = re.sub(r"(?i)\b(api[_-]?key|token|password|secret)\s*[:=]\s*\S+", r"\1=[已脱敏]", value)
@@ -62,12 +130,20 @@ def _archive_cold_mission(mission: dict) -> Path:
     outcome = "成功" if mission.get("success") else "未成功"
     goal = _redact(mission.get("goal")) or "未记录任务目标"
     tag_text = ", ".join(tags) if tags else "无可确认的服务或漏洞标识"
+    lesson_lines = mission.get("lessons") or []
+    lesson_section: list[str] = []
+    if lesson_lines:
+        lesson_section.append("lessons:")
+        for line in lesson_lines:
+            # 防御性脱敏：即使 lessons 未经 extract_lessons 生成，归档也不泄露目标信息
+            lesson_section.append(f"  - {_redact(line)}")
     content = "\n".join([
         "---",
         "type: mission_lesson",
         "source: long_memory_archive",
         f"outcome: {outcome}",
         "sensitivity: sanitized",
+        *lesson_section,
         "---",
         "",
         "# 历史任务经验卡片",
@@ -105,7 +181,7 @@ def _save(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def save_mission(target, goal, plan, attack_chain, success, summary, flag=None):
+def save_mission(target, goal, plan, attack_chain, success, summary, flag=None, lessons=None):
     """保存一次任务的完整经验。
 
     Args:
@@ -115,6 +191,8 @@ def save_mission(target, goal, plan, attack_chain, success, summary, flag=None):
         attack_chain: 攻击链步骤列表
         success: 是否成功
         summary: 任务总结
+        flag: 已确认 Flag（可选）
+        lessons: 任务后反思沉淀的脱敏教训列表（可选，默认空）
     """
     data = _load()
     mission = {
@@ -126,6 +204,7 @@ def save_mission(target, goal, plan, attack_chain, success, summary, flag=None):
         "success": success,
         "summary": summary,
         "flag": flag,
+        "lessons": list(lessons or []),
     }
     data["missions"].append(mission)
 
@@ -199,7 +278,8 @@ def get_experience_hint():
     hints = ["## 历史成功经验"]
     for service, entries in list(data["techniques"].items())[-5:]:
         cves = list(set(e["cve"] for e in entries[-3:]))
-        hints.append(f"- {service}: 可利用 {', '.join(cves)}")
+        # service 可能含目标域名/IP，注入 Brain 提示词前统一脱敏
+        hints.append(f"- {_redact(service)}: 可利用 {', '.join(cves)}")
     return "\n".join(hints)
 
 

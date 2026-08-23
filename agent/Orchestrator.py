@@ -4,11 +4,15 @@ import httpx
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
-
+import datetime
 from agentscope.agent import Agent, ReActConfig
 from agentscope.message import UserMsg
 
-from Tools.AgenticMemory import create_query_memory_tool, save_mission
+from Tools.AgenticMemory import (
+    create_query_memory_tool,
+    extract_lessons,
+    save_mission,
+)
 from TaskState import MissionState, MissionStore, Phase
 from Tools.fingerprint import (
     compute_action_fingerprint,
@@ -797,6 +801,16 @@ def create_orchestrator_agent(
                 item["status"] = "skipped"
         store.checkpoint(mission, "mission_terminal")
         push_plan_update(mission, event_callback)
+        # P0-D：任务终态前确定性提炼失败/成功教训并随长期记忆存档；
+        # 提炼失败不阻断任务收尾（安全降级为空列表）。
+        try:
+            lessons = extract_lessons(
+                failed_paths=mission.failed_paths,
+                attack_chain=mission.attack_chain,
+                success=mission.success,
+            )
+        except Exception:
+            lessons = []
         save_mission(
             target=mission.target,
             goal=mission.goal,
@@ -805,6 +819,7 @@ def create_orchestrator_agent(
             success=mission.success,
             summary=summary,
             flag=mission.flag,
+            lessons=lessons,
         )
         return f"[任务已结束] success={mission.success}, flag={mission.flag or '未发现'}"
     
