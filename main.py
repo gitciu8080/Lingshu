@@ -2281,6 +2281,7 @@ async def run_mission(
         )
         # P5 熔断重试预算：Orchestrator 输出残缺 <tool_call>/空回答时重新注入
         malformed_retry_budget = 2
+        stalled_nudge_budget = 2
         while True:
             try:
                 final_result = await run_interruptible_agent_reply(
@@ -2324,6 +2325,44 @@ async def run_mission(
                         f"[用户中途指令] {pending}\n\n"
                         "请立即确认已收到该新情报，并基于已有证据调整行动方向。"
                         "无需重复已完成的侦察步骤。"
+                    )
+                    continue
+                # P5b：未到终态的纯文本收尾 → 若仍有可推进的工作
+                # （已批准攻击 / 存在 pending 或 in_progress 计划项），
+                # 注入一次推进提示而不是直接退出主循环。
+                if (
+                    stalled_nudge_budget > 0
+                    and mission.phase not in {Phase.COMPLETED, Phase.FAILED}
+                    and (
+                        mission.exploitation_approved
+                        or any(
+                            item.get("status") in {"pending", "in_progress"}
+                            for item in mission.plan_items
+                        )
+                    )
+                ):
+                    stalled_nudge_budget -= 1
+                    mission.record(
+                        "system",
+                        "orchestrator_stalled_nudge",
+                        remaining_budget=stalled_nudge_budget,
+                    )
+                    store.save(mission)
+                    approved_hint = (
+                        "人工批准已生效（exploitation_approved=True），"
+                        f"已选定方案：{(mission.approved_attack_plan or {}).get('selected', {}).get('title', '')}。"
+                        "请立即调用 dispatch_attack 执行该方案。"
+                        if mission.exploitation_approved
+                        else "当前仍存在未完成的计划项。"
+                    )
+                    orch_content = (
+                        "[系统提醒] 你上一条回复以普通文本结束，但任务尚未完成、"
+                        "也没有调用 complete_mission。\n"
+                        f"{approved_hint}\n"
+                        "你现在必须调用工具继续推进：优先 dispatch_attack 执行已批准方案；"
+                        "若确有阻塞，先 dispatch_recon 补齐缺口；"
+                        "只有当任务确实无法继续时才允许调用 complete_mission 如实收尾。"
+                        "禁止再次以纯文本结束回合。"
                     )
                     continue
                 break

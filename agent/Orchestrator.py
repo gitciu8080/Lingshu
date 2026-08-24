@@ -493,7 +493,7 @@ def create_orchestrator_agent(
                 "title": "最小化安全验证",
                 "risk": "低",
                 "summary": "优先使用单次、低影响、可回滚的验证动作确认漏洞，不扩大战果。",
-                "steps": [base_steps[0], "执行最小化 PoC 并保存可复核证据", "获得结论后立即停止"],
+                "steps": [base_steps[0], "执行最小化 PoC 并保存可复核证据", "获得验证结论后调用 complete_mission 或 continue 推进"],
             },
             {
                 "id": "evidence-driven",
@@ -507,7 +507,7 @@ def create_orchestrator_agent(
                 "title": "目标导向验证",
                 "risk": "中高",
                 "summary": f"围绕任务目标“{mission.goal}”优先验证最可能形成完整攻击链的路径。",
-                "steps": ["优先处理最高置信度攻击路径", *base_steps[:2], "达到任务目标或边界条件后立即停止"],
+                "steps": ["优先处理最高置信度攻击路径", *base_steps[:2], "达到任务目标或边界条件后调用 complete_mission 或 continue 推进"],
             },
         ]
 

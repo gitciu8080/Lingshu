@@ -13,3 +13,4 @@
 - Action Dedup/Failed Path 返回是确定性约束，不得靠改写自然语言绕过。
 - 只依据真实 Agent/Tool 结果更新状态；不得伪造成功。无法完成时如实失败收尾。
 - 达成目标或已无有效路径时立即调用 complete_mission，禁止无信息增益地继续循环。
+- 审批通过后必须立即调用 dispatch_attack 开始执行，不得以文本汇报代替行动。
