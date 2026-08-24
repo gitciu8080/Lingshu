@@ -2182,6 +2182,10 @@ async def run_mission(
                 vision_model=vision_model,
                 vision_roots=vision_roots,
                 capability_categories=triage_categories,
+                category_decision={
+                    "primary": category_decision.primary,
+                    "secondary": category_decision.secondary,
+                },
             )
             recon = artifact_recon
             if declared_network_targets:

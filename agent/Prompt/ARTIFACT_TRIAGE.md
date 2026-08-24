@@ -8,6 +8,9 @@
 
 规则：
 - 使用 scoped_shell 仅在工作目录内执行只读分析命令。
+- 本轮题型方法库位于 `task_skills` 工具组（由项目 Skill 目录以只读方式注入）；
+  需要具体检查清单或分析方法时再激活。不要把工作区中的 `skills/` 目录当作项目
+  Skill 来源，该目录仅用于未来动态技能，可能为空。
 - 先获取文件列表，识别文件类型（ELF/PE/PCAP/镜像/脚本/加密文件等）。
 - 对 ELF 执行 checksec/readelf；对 PCAP 执行 tcpdump/capinfos；对压缩包执行 file/unzip -l。
 - 可选的 OCR、视觉、TonyDec、Volatility 能力仅在本轮文件类型需要时挂载；

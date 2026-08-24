@@ -233,7 +233,7 @@ def _build_skill_list(
         FileNotFoundError: 题型已确定但对应 Skill 目录缺失。
     """
     skill_paths: list[str] = []
-    project_path = Path(project_dir) if project_dir else None
+    project_path = Path(project_dir).expanduser().resolve() if project_dir else None
 
     if category_decision and category_decision.get("primary", "unknown") != "unknown":
         primary = category_decision["primary"]
@@ -244,7 +244,7 @@ def _build_skill_list(
                     f"题型 {primary!r} 的 Skill 目录不存在: {path}. "
                     f"请确认 Skills/ctf-skills/ctf-{primary}/ 已安装。"
                 )
-            skill_paths.append(path)
+            skill_paths.append(str((project_path / path).resolve()) if project_path else path)
 
         # secondary 仅供兼容/低置信分类使用；正式执行默认只加载 primary。
         for cat in category_decision.get("secondary", []) if include_secondary else []:
@@ -252,10 +252,11 @@ def _build_skill_list(
                 p = _SKILL_PATH_MAP[cat]
                 if project_path and not (project_path / p).is_dir():
                     continue  # 次要 Skill 缺失不阻塞
-                skill_paths.append(p)
+                skill_paths.append(str((project_path / p).resolve()) if project_path else p)
 
     if include_writeup:
-        skill_paths.append(_SKILL_PATH_MAP["writeup"])
+        writeup = _SKILL_PATH_MAP["writeup"]
+        skill_paths.append(str((project_path / writeup).resolve()) if project_path else writeup)
     # CyberPenda bundles 完整保存在仓库中，但运行时只加载与当前分类相关的目录。
     categories: list[str] = []
     if category_decision:
@@ -270,7 +271,7 @@ def _build_skill_list(
         path = f"{_CYBERPENDA_ROOT}/{name}"
         if project_path and not (project_path / path / "SKILL.md").is_file():
             continue
-        skill_paths.append(path)
+        skill_paths.append(str((project_path / path).resolve()) if project_path else path)
     return skill_paths
 
 

@@ -742,6 +742,93 @@
    "alternatives": []
   },
   {
+   "id": "objdump",
+   "category": "reverse",
+   "command_candidates": [
+    "objdump"
+   ],
+   "version_args": [
+    "--version"
+   ],
+   "roles": [
+    "triage",
+    "reserve",
+    "attack"
+   ],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "ELF/PE 反汇编与节信息分析",
+   "usage_hint": "仅分析当前任务工作区内的文件。",
+   "alternatives": [
+    "radare2"
+   ]
+  },
+  {
+   "id": "readelf",
+   "category": "reverse",
+   "command_candidates": [
+    "readelf"
+   ],
+   "version_args": [
+    "--version"
+   ],
+   "roles": [
+    "triage",
+    "reserve",
+    "attack"
+   ],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "ELF 头、节和符号信息分析",
+   "usage_hint": "仅分析当前任务工作区内的文件。",
+   "alternatives": [
+    "file"
+   ]
+  },
+  {
+   "id": "strings",
+   "category": "reverse",
+   "command_candidates": [
+    "strings"
+   ],
+   "version_args": [
+    "--version"
+   ],
+   "roles": [
+    "triage",
+    "reserve",
+    "attack"
+   ],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "二进制可打印字符串提取",
+   "usage_hint": "仅分析当前任务工作区内的文件。",
+   "alternatives": []
+  },
+  {
+   "id": "rabin2",
+   "category": "reverse",
+   "command_candidates": [
+    "rabin2"
+   ],
+   "version_args": [
+    "-v"
+   ],
+   "roles": [
+    "triage",
+    "reserve",
+    "attack"
+   ],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "PE/ELF 文件头、导入和节信息分析",
+   "usage_hint": "仅分析当前任务工作区内的文件。",
+   "alternatives": [
+    "file",
+    "readelf"
+   ]
+  },
+  {
    "id": "checksec",
    "category": "reverse",
    "command_candidates": [
@@ -775,6 +862,7 @@
     "-v"
    ],
    "roles": [
+    "triage",
     "reserve",
     "attack"
    ],

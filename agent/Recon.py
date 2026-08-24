@@ -10,6 +10,7 @@ from agent.prompt_loader import load_prompt
 from pathlib import Path
 
 from agentscope.agent import Agent, ReActConfig
+from agentscope.tool import ToolGroup
 from Tools.CVE_Search import create_cve_search_tool
 from Tools.OCR import create_tesseract_ocr_tool
 from Tools.ScopeRegistry import ScopeRegistry
@@ -22,6 +23,7 @@ from Tools.tooling import (
     create_scoped_shell_tool,
 )
 from Tools.tool_catalog import append_capability_summary, create_tool_catalog_tools
+from agent.Attack import _build_skill_list
 from agent.experts import ARTIFACT_TRIAGE_EXPERT, NETWORK_RECON_EXPERT
 
 # ---------------------------------------------------------------------------
@@ -92,6 +94,7 @@ def create_artifact_triage_agent(
     vision_model=None,
     vision_roots: tuple[str | Path, ...] = (),
     capability_categories: set[str] | None = None,
+    category_decision: dict | None = None,
 ) -> Agent:
     """创建文件分析 Agent，工作目录约束在 workdir 内。"""
     selected = set(capability_categories or {"forensics", "reverse", "mobile", "misc"})
@@ -111,7 +114,31 @@ def create_artifact_triage_agent(
         "forensics", "misc", "osint", "ai-ml",
     }):
         tools.append(create_vision_analysis_tool(vision_model, vision_roots or (workdir,)))
-    toolkit = StrictJSONToolkit(tools=tools)
+    # 只给首轮文件研判挂载当前题型的精简、只读 Skill；Skill 从项目根目录
+    # 使用绝对路径加载，不依赖会话工作区中预留但默认为空的 skills/ 目录。
+    decision = dict(category_decision or {})
+    primary = str(decision.get("primary") or "").strip().lower()
+    if primary not in {"web", "pwn", "reverse", "crypto", "forensics", "malware", "misc", "osint", "ai-ml"}:
+        priority = ("reverse", "forensics", "malware", "pwn", "crypto", "misc")
+        primary = next((item for item in priority if item in selected), "")
+    project_root = Path(project_dir).expanduser().resolve()
+    skill_list = []
+    if primary and (project_root / "Skills").is_dir():
+        skill_list = _build_skill_list(
+            {"primary": primary},
+            project_root,
+            include_secondary=False,
+            include_writeup=False,
+            include_attack_chain=False,
+        )
+    skill_groups = []
+    if skill_list:
+        skill_groups.append(ToolGroup(
+            name="task_skills",
+            description="当前题型的精简只读方法库；仅在需要分析方法或检查清单时激活。",
+            skills_or_loaders=skill_list,
+        ))
+    toolkit = StrictJSONToolkit(tools=tools, tool_groups=skill_groups)
     return Agent(
         name=ARTIFACT_TRIAGE_EXPERT,
         system_prompt=append_capability_summary(
