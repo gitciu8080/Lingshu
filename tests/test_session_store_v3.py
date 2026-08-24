@@ -128,6 +128,8 @@ class SessionWorkspaceFieldsTest(SessionStoreV3Test):
             conn.execute("ALTER TABLE sessions DROP COLUMN workspace_version")
             conn.execute("ALTER TABLE sessions DROP COLUMN resume_status")
             conn.execute("ALTER TABLE sessions DROP COLUMN checkpoint_seq")
+            conn.execute("ALTER TABLE sessions DROP COLUMN pending_scope_approval")
+            conn.execute("ALTER TABLE sessions DROP COLUMN pending_exploitation_approval")
             conn.commit()
         finally:
             conn.close()
@@ -136,6 +138,8 @@ class SessionWorkspaceFieldsTest(SessionStoreV3Test):
         row = session_store.get_session("sess-legacy")
         self.assertEqual(row["workspace_id"], "")
         self.assertEqual(row["resume_status"], "fresh")
+        self.assertIsNone(row["pending_scope_approval"])
+        self.assertIsNone(row["pending_exploitation_approval"])
 
 
 if __name__ == "__main__":

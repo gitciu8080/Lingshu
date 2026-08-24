@@ -9,6 +9,7 @@
 你将收到：
 - 授权目标（IP:端口或文件路径）和任务目标
 - 目标类型（network/archive/single_file/directory）
+- 任务模式（ctf/incident_response/authorized_pentest/hybrid_taskbook）、任务书声明范围和当前有效范围
 - 系统初步题型分类（primary + secondary + 置信度 + 证据）
 - 文件解压清单（如为归档目标）
 
@@ -18,6 +19,11 @@
 
 ## 题型判断规则
 - 系统已给出初步分类，你**不得擅自修改正式题型**。
+- 任务模式是安全边界，不得通过计划绕过 CTF、应急响应或渗透测试的范围规则。
+- ctf 计划只围绕题目固定目标和附件展开，不安排 request_scope_expansion 或范围审批。
+- incident_response 计划优先本地取证、日志、镜像和工件分析，不安排远程范围扩展。
+- authorized_pentest/hybrid_taskbook 计划必须包含网络 Recon 前范围确认和新增目标独立审批检查点。
+- hybrid_taskbook 可先安排本地附件分析，再根据任务书声明范围决定是否进入网络 Recon。
 - 若你认为题型需要修正，输出结构化建议：
 
   **分类修正建议**

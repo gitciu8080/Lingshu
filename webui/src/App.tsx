@@ -182,6 +182,12 @@ type Mission = Record<string, unknown> & {
   exploitation_approval_decision?: string;
   exploitation_approval_requested_at?: string;
   exploitation_approval_resolved_at?: string;
+  mission_mode?: string;
+  category_decision?: { primary?: string; secondary?: string[]; confidence?: number };
+  declared_scope?: Record<string, unknown>;
+  authorized_scope?: Record<string, unknown>;
+  scope_approval_status?: string;
+  scope_approval_decision?: string;
   report_available?: boolean;
   report_url?: string;
   markdown_available?: boolean;
@@ -1478,6 +1484,10 @@ function ApprovalDialog({
     request?.scan_summary && typeof request.scan_summary === "object"
       ? (request.scan_summary as Record<string, unknown>)
       : {};
+  const approvalType = String(summary.approval_type || request?.approval_type || "exploitation");
+  const isScopeApproval = approvalType === "scope";
+  const scopeRequest = summary.scope_request && typeof summary.scope_request === "object"
+    ? (summary.scope_request as Record<string, unknown>) : {};
   const options = (Array.isArray(summary.approval_options)
     ? summary.approval_options
     : [])
@@ -1540,9 +1550,9 @@ function ApprovalDialog({
           <header>
             <span><ShieldAlert size={21} /></span>
             <div>
-              <Dialog.Title>攻击阶段人工审批</Dialog.Title>
+              <Dialog.Title>{isScopeApproval ? "授权范围人工审批" : "攻击阶段人工审批"}</Dialog.Title>
               <Dialog.Description>
-                Orchestrator 请求进入 EXPLOITATION 阶段
+                {isScopeApproval ? "Orchestrator 请求将新目标纳入有效授权范围" : "Orchestrator 请求进入 EXPLOITATION 阶段"}
               </Dialog.Description>
             </div>
           </header>
@@ -1551,6 +1561,13 @@ function ApprovalDialog({
               <span>授权目标</span>
               <b>{String(summary.target || request.target || "当前任务目标")}</b>
             </section>
+            {isScopeApproval && (
+              <section className="approval-meta">
+                <span>待纳入目标</span>
+                <b>{String(scopeRequest.target || "未指定")}</b>
+                <small>{String(scopeRequest.reason || request.reason || "")}</small>
+              </section>
+            )}
             <section>
               <h3>申请理由</h3>
               <div className="approval-reason">
@@ -1559,7 +1576,7 @@ function ApprovalDialog({
                 </MarkdownContent>
               </div>
             </section>
-            {findings.length > 0 && (
+            {!isScopeApproval && findings.length > 0 && (
               <section>
                 <h3>侦察依据</h3>
                 <div className="approval-items">
@@ -1582,7 +1599,7 @@ function ApprovalDialog({
                 </div>
               </section>
             )}
-            {orderedOptions.length > 0 && (
+            {!isScopeApproval && orderedOptions.length > 0 && (
               <section>
                 <h3>选择攻击方案并调整优先级</h3>
                 <p className="approval-help">单击方案完成选择；使用箭头调整候选方案执行优先级。</p>
@@ -1628,7 +1645,7 @@ function ApprovalDialog({
                 </div>
               </section>
             )}
-            {plans.length > 0 && (
+            {!isScopeApproval && plans.length > 0 && (
               <section>
                 <h3>拟执行计划</h3>
                 <div className="approval-plan">
@@ -1656,19 +1673,19 @@ function ApprovalDialog({
             >
               拒绝
             </button>
-            <button
+            {!isScopeApproval && <button
               className="approval-recon"
               disabled={submitting}
               onClick={() => void decide("补充侦察")}
             >
               补充侦察
-            </button>
+            </button>}
             <button
               className="approval-approve"
               disabled={submitting || (orderedOptions.length > 0 && !selectedId)}
               onClick={() => void decide("批准")}
             >
-              <CheckCircle2 size={16} /> 批准攻击
+              <CheckCircle2 size={16} /> {isScopeApproval ? "批准范围" : "批准攻击"}
             </button>
           </footer>
         </Dialog.Content>
@@ -2418,24 +2435,33 @@ function ConsoleApp() {
           }
           if (eventKind === "approval_required") {
             setPendingApproval(payload);
-            setDetail((value) => ({
-              ...value,
-              exploitation_approved: false,
-              exploitation_approval_status: "pending",
-              exploitation_approval_decision: "",
-            }));
+            const summary = dataOf(event).scan_summary;
+            const approvalType = summary && typeof summary === "object"
+              ? String((summary as Record<string, unknown>).approval_type || "exploitation")
+              : "exploitation";
+            setDetail((value) => approvalType === "scope"
+              ? { ...value, scope_approval_status: "pending", scope_approval_decision: "" }
+              : {
+                  ...value,
+                  exploitation_approved: false,
+                  exploitation_approval_status: "pending",
+                  exploitation_approval_decision: "",
+                });
           }
           if (eventKind === "approval_resolved") {
             setPendingApproval(null);
             const decision = String(payload.decision || "");
-            setDetail((value) => ({
-              ...value,
-              exploitation_approved: payload.approved === true,
-              exploitation_approval_status: payload.approved === true
-                ? "approved"
-                : decision.includes("补充侦察") ? "recon_requested" : "denied",
-              exploitation_approval_decision: decision,
-            }));
+            const approvalType = String(payload.approval_type || "exploitation");
+            setDetail((value) => approvalType === "scope"
+              ? { ...value, scope_approval_status: payload.approved === true ? "approved" : "denied", scope_approval_decision: decision }
+              : {
+                  ...value,
+                  exploitation_approved: payload.approved === true,
+                  exploitation_approval_status: payload.approved === true
+                    ? "approved"
+                    : decision.includes("补充侦察") ? "recon_requested" : "denied",
+                  exploitation_approval_decision: decision,
+                });
           }
           if (eventKind === "report_ready")
             setDetail((value) => ({
@@ -2811,7 +2837,10 @@ function ConsoleApp() {
         <main className="mission-main">
           <header className="mission-header">
             <div className="mission-ident">
-              <small>当前任务</small>
+              <small>
+                当前任务 · 模式：{String(detail.mission_mode || "unknown")}
+                · 题型：{String(detail.category_decision?.primary || "unknown")}
+              </small>
               <b>
                 {current?.title ||
                   (detail.title as string) ||

@@ -62,6 +62,8 @@ def create_orchestrator_agent(
     offloader=None,
     context_config=None,
     state=None,
+    network_recon_agent: Agent | None = None,
+    artifact_recon_agent: Agent | None = None,
 ) -> Agent:
     steering = steering_state if steering_state is not None else {"pending": None, "processed": False, "queue": []}
     steering.setdefault("queue", [])
@@ -81,12 +83,14 @@ def create_orchestrator_agent(
     async def dispatch_recon(
         focus: str = "全面但低影响的信息收集",
         hypothesis_id: str = "",
+        route: str = "auto",
     ) -> str:
         """派遣 Recon 对本次授权目标进行信息收集。
 
         Args:
             focus: 本轮需要补齐的具体信息或扫描重点。
             hypothesis_id: 本动作要验证的结构化假设 ID；纯探索可留空。
+            route: Recon 路由：artifact（本地附件分析）、network（网络侦察）或 auto（由当前能力自动选择）。
         """
         # 入口检查：是否有待处理的用户指令（无需等待子 Agent 取消）
         msg = _check_steering()
@@ -98,21 +102,49 @@ def create_orchestrator_agent(
             Phase.RECON, Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION,
         }:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Recon"
+        route = str(route or "auto").strip().lower()
+        if route not in {"auto", "artifact", "network"}:
+            return "[拒绝] route 只能是 artifact、network 或 auto"
+        mode = mission.mission_mode or (
+            "authorized_pentest"
+            if str((mission.target_spec or {}).get("kind") or "") == "network"
+            else "ctf"
+        )
+        if (
+            mission.scope_approval_status == "denied"
+            and mode in {"authorized_pentest", "hybrid_taskbook"}
+            and (mission.declared_scope or {}).get("targets")
+        ):
+            mission.record("Orchestrator", "capability_blocked", reason="scope_denied", action="dispatch_recon")
+            store.save(mission)
+            return "[阻塞] 网络范围审批未通过，已停止 Recon；请重新授权或安全收尾。"
+        selected_recon = recon_agent
+        if route == "artifact":
+            selected_recon = artifact_recon_agent or recon_agent
+        elif route == "network":
+            if network_recon_agent is None:
+                return "[不可用] 当前任务未挂载 NetworkRecon 能力；请改用 artifact 或先补充网络目标。"
+            selected_recon = network_recon_agent
+        elif network_recon_agent is not None and (
+            str((mission.target_spec or {}).get("kind") or "") == "network"
+            or any(token in focus.lower() for token in ("网络", "端口", "服务", "http", "dns", "ip"))
+        ):
+            selected_recon = network_recon_agent
         attempt = mission.begin_attempt(
             "recon",
-            recon_agent.name,
+            selected_recon.name,
             mission.target,
-            {"focus": focus, "hypothesis_id": hypothesis_id},
+            {"focus": focus, "hypothesis_id": hypothesis_id, "route": route, "agent": selected_recon.name},
         )
         # post_exploitation 中的本地补侦不回退任务阶段，避免完成 Recon 后
         # 远程 Attack 因阶段变成 RECON 而被错误拒绝。
         if mission.phase != Phase.RECON and mission.phase != Phase.POST_EXPLOITATION:
             mission.transition(Phase.RECON, f"需要补充侦察: {focus}")
-        mission.record("Orchestrator", "dispatch_recon", focus=focus)
+        mission.record("Orchestrator", "dispatch_recon", focus=focus, route=route, selected_agent=selected_recon.name)
         store.checkpoint(mission, "recon_dispatch_before")
         try:
             result = await run_interruptible_agent_reply(
-                recon_agent,
+                selected_recon,
                 UserMsg(
                     name="Orchestrator",
                     content=(
@@ -142,7 +174,7 @@ def create_orchestrator_agent(
             raise
         before_evidence = len(mission.evidence_records)
         evidence = mission.add_evidence(
-            recon_agent.name,
+            selected_recon.name,
             "recon_report",
             report,
             category=str((mission.category_decision or {}).get("primary") or ""),
@@ -152,7 +184,7 @@ def create_orchestrator_agent(
         for signal in extract_recon_signals([report]):
             mission.add_fact(
                 signal.content,
-                recon_agent.name,
+                selected_recon.name,
                 [evidence.id],
                 category=signal.category,
                 confidence=signal.confidence,
@@ -203,6 +235,21 @@ def create_orchestrator_agent(
             return msg
         if mission.phase not in {Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION}:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Attack"
+        mode = mission.mission_mode or (
+            "authorized_pentest"
+            if str((mission.target_spec or {}).get("kind") or "") == "network"
+            else "ctf"
+        )
+        if mode in {"authorized_pentest", "hybrid_taskbook"}:
+            declared = list((mission.declared_scope or {}).get("targets") or [])
+            if declared and not any(
+                scope_registry and scope_registry.is_ip_allowed(str(normalized).split(":", 1)[0])
+                for normalized in declared
+            ):
+                mission.scope_approval_status = "pending"
+                mission.record("Orchestrator", "capability_blocked", reason="scope_missing", targets=declared)
+                store.save(mission)
+                return "[阻塞] 当前任务的网络目标尚未进入有效授权范围，请先完成范围审批。"
         # P3 去重（v0.3.0 升级为动作指纹）：工具名+目标+规范化参数+目标
         # 描述+证据版本，防止只改写 objective 措辞绕过；相同动作+相同
         # 错误达到阈值自动熔断。
@@ -540,6 +587,7 @@ def create_orchestrator_agent(
 
         # ── 构建扫描摘要，帮助操作员决策 ──
         scan_summary: dict[str, Any] = {
+            "approval_type": "exploitation",
             "target": mission.target,
             "goal": mission.goal,
             "phase": mission.phase.value,
@@ -623,6 +671,15 @@ def create_orchestrator_agent(
                       （如 "Jolokia remoteAddr=10.42.3.240"）。
             reason: 补充说明为何需要访问该 IP（可选）。
         """
+        mode = mission.mission_mode or (
+            "authorized_pentest"
+            if str((mission.target_spec or {}).get("kind") or "") == "network"
+            else "ctf"
+        )
+        if mode == "ctf":
+            return "[拒绝] CTF 模式使用题目固定范围，不允许调用 request_scope_expansion"
+        if mode == "incident_response":
+            return "[拒绝] 应急响应模式不允许扩展远程授权范围"
         if scope_registry is None:
             return "[拒绝] 授权范围注册表不可用，无法扩容"
         if scope_auditor is None:
@@ -638,9 +695,44 @@ def create_orchestrator_agent(
         except ValueError:
             return f"[拒绝] 无效的 IP/CIDR 格式: {ip_or_cidr}"
 
-        # 已授权直接返回
+        # 幂等短路：已经在有效范围内的目标不应再次触发人工审批。
         if "/" not in ip_or_cidr and scope_registry.is_ip_allowed(ip_or_cidr):
             return f"[已授权] {ip_or_cidr} 已在授权范围内，无需重复申请"
+
+        # 范围扩展必须先经过独立的人工作业审批，再交由 ScopeAuditor
+        # 做证据审计；不能用利用阶段审批替代目标范围审批。
+        scope_summary = {
+            "approval_type": "scope",
+            "target": mission.target,
+            "goal": mission.goal,
+            "scope_request": {
+                "target": ip_or_cidr,
+                "evidence": evidence[:2000],
+                "reason": reason[:1000],
+            },
+            "findings": mission.findings[-5:],
+        }
+        if approval_callback is not None:
+            mission.scope_approval_status = "pending"
+            mission.scope_approval_decision = ""
+            mission.scope_approval_requested_at = datetime.now().astimezone().isoformat()
+            store.save(mission)
+            approval = await approval_callback(
+                f"请求将 {ip_or_cidr} 纳入本次授权范围：{reason or '需要验证任务书声明目标'}",
+                scope_summary,
+            )
+            approved_by_user = bool(approval.get("approved")) if isinstance(approval, dict) else bool(approval)
+            decision = str(approval.get("decision") or ("批准" if approved_by_user else "拒绝")) if isinstance(approval, dict) else ("批准" if approved_by_user else "拒绝")
+            mission.scope_approval_decision = decision
+            mission.scope_approval_resolved_at = datetime.now().astimezone().isoformat()
+            if not approved_by_user:
+                mission.scope_approval_status = "denied"
+                store.save(mission)
+                return f"[拒绝] 用户未批准将 {ip_or_cidr} 纳入授权范围。"
+        else:
+            mission.scope_approval_status = "unavailable"
+            store.save(mission)
+            return "[拒绝] 当前没有范围审批通道，无法扩展授权范围"
 
         # 收集近期证据供 ScopeAuditor 审核
         recent_reports = []
@@ -1033,7 +1125,10 @@ def create_orchestrator_agent(
     target_kind = str((mission.target_spec or {}).get("kind") or "")
     if category in {"pwn", "reverse", "malware"} or target_kind != "network":
         tools.append(AllowedFunctionTool(dispatch_reverse, is_concurrency_safe=False))
-    if target_kind == "network":
+    mode = mission.mission_mode or (
+        "authorized_pentest" if target_kind == "network" else "ctf"
+    )
+    if mode in {"authorized_pentest", "hybrid_taskbook"}:
         tools.append(AllowedFunctionTool(request_scope_expansion, is_concurrency_safe=False))
     if nss_context:
         tools.append(AllowedFunctionTool(submit_nss_flag, is_concurrency_safe=False))
@@ -1042,9 +1137,13 @@ def create_orchestrator_agent(
     enabled_capabilities = [
         "recon", "attack", "hypothesis", "plan", "state", "approval", "memory",
     ]
+    if artifact_recon_agent is not None:
+        enabled_capabilities.append("artifact_recon")
+    if network_recon_agent is not None:
+        enabled_capabilities.append("network_recon")
     if category in {"pwn", "reverse", "malware"} or target_kind != "network":
         enabled_capabilities.append("reverse")
-    if target_kind == "network":
+    if mode in {"authorized_pentest", "hybrid_taskbook"}:
         enabled_capabilities.append("scope_expansion")
     if nss_context:
         enabled_capabilities.append("nss_submit")

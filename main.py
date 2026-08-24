@@ -14,8 +14,14 @@ import json  # 审批方案选择协议与结构化消息解析
 import logging  # 日志记录（Summary 报告等收尾阶段的异常追溯）
 import os  # 环境变量与路径操作
 import re  # 从最终证据中提取 CVE 等标题特征
+import shutil
+import subprocess
 import sys  # 修改模块搜索路径，确保能 import 本目录下的包
+import tempfile
 import uuid  # CLI 模式任务级 mission_id 生成
+import zipfile
+from html import unescape
+from datetime import datetime
 from collections.abc import Callable  # 回调类型注解
 from dataclasses import replace
 from pathlib import Path  # 跨平台路径对象
@@ -41,6 +47,7 @@ from Tools.archive import safe_extract, SafeExtractError  # 安全解压（防�
 from agent.Attack import close_attack_agent, create_attack_agent  # 攻击手 Agent（分析 + 利用）
 from agent.Brain import create_brain_agent  # 战略规划 Agent
 from agent.categorize import (  # 题型自动分类与 Recon 后二次分类
+    ALL_CATEGORIES,
     CategoryDecision,
     classify,
     evaluate_reclassification,
@@ -123,7 +130,7 @@ _APPROVAL_YES = {"y", "yes", "ok", "approve", "approved", "是", "批准", "同�
 # 用户任务描述中的明确目标声明。它只用于补充本次任务的初始授权范围；
 # Agent 从扫描结果、页面内容等运行时证据中发现的新地址，仍必须走 ScopeAuditor。
 _DECLARED_TARGET_LABEL = re.compile(
-    r"(?:目标\s*(?:服务器|主机|地址|域名|IP|信息)?\s*[:：]|"
+    r"(?:目标\s*(?:服务器|主机|地址|域名|IP|信息|资产|环境)?\s*[:：]|"
     r"(?:靶机|服务器|主机|域名)\s*(?:地址|信息)?\s*[:：]|"
     r"\b(?:ip|host|hostname)\s*[:：]|\bssh\s*(?:连接|地址))",
     re.IGNORECASE,
@@ -340,6 +347,94 @@ def _category_dict(decision: CategoryDecision) -> dict[str, Any]:
         "scores": decision.scores,
         "evidence": decision.evidence,
         "stage": decision.stage,
+    }
+
+
+def _extract_brain_category_review(text: str) -> tuple[str, str] | None:
+    """从 Brain 正文中提取可选的分类复核建议，不把自然语言猜测当成决策。"""
+    proposed = re.search(r"(?:proposed_category|建议题型|提议题型)\s*[:：]\s*([\w-]+)", text, re.I)
+    if not proposed:
+        return None
+    category = proposed.group(1).strip().lower()
+    reason_match = re.search(r"(?:reason|依据|理由)\s*[:：]\s*(.+?)(?:\n|$)", text, re.I)
+    reason = reason_match.group(1).strip()[:1200] if reason_match else "Brain 未提供结构化依据"
+    return category, reason
+
+
+def _review_brain_category(
+    mission: MissionState,
+    current: CategoryDecision,
+    plan_text: str,
+) -> CategoryDecision:
+    """由 Orchestrator 确认 Brain 的题型建议；Brain 无权直接改写正式分类。"""
+    review = _extract_brain_category_review(plan_text)
+    if review is None:
+        return current
+    proposed, reason = review
+    allowed = set(ALL_CATEGORIES) | {"unknown"}
+    accepted = (
+        proposed in allowed
+        and proposed != current.primary
+        and (current.primary == "unknown" or proposed in set(current.secondary))
+    )
+    mission.record(
+        "Orchestrator",
+        "brain_category_review_accepted" if accepted else "brain_category_review_rejected",
+        previous=current.primary,
+        proposed=proposed,
+        reason=reason,
+    )
+    if not accepted:
+        return current
+    updated = CategoryDecision(
+        primary=proposed,  # type: ignore[arg-type]
+        secondary=[item for item in current.secondary if item != proposed],
+        confidence=max(current.confidence, 0.6 if current.primary == "unknown" else current.confidence),
+        scores=dict(current.scores),
+        evidence=[*current.evidence, f"Brain 复核建议：{reason}"],
+        stage="manual",
+    )
+    mission.category_decision = _category_dict(updated)
+    mission.category_history.append({
+        "stage": "brain_review",
+        "previous": _category_dict(current),
+        "candidate": _category_dict(updated),
+        "accepted": True,
+        "reason": reason,
+    })
+    return updated
+
+
+def _capability_preflight(
+    mission_mode: str,
+    target_spec: TargetSpec,
+    category: str,
+) -> dict[str, Any]:
+    """启动前检查角色所需系统能力，返回 ready/degraded/blocked 供 Brain 规划回退。"""
+    role = "recon" if target_spec.kind == "network" or mission_mode == "hybrid_taskbook" else "triage"
+    categories = {"recon", "web"} if role == "recon" else {
+        "forensics", "reverse", "mobile", "misc"
+    }
+    available = get_tool_catalog().for_role(role, categories=categories)
+    ids = [str(item["id"]) for item in available]
+    if role == "recon":
+        required = "recon/web 网络侦察命令"
+        blocked = not bool(ids)
+    else:
+        required = f"{category or '通用'} 本地分析命令"
+        blocked = not bool(ids)
+    # scoped_shell/本地分析函数仍可能可用，因此缺少目录命令先标记 degraded，
+    # 交由 Brain 规划替代路径；只有执行工具本身拒绝时才由 Orchestrator 终止动作。
+    status = "degraded" if blocked else "ready"
+    return {
+        "status": status,
+        "role": role,
+        "required": required,
+        "available": ids[:40],
+        "message": (
+            f"未检测到 {required}，必须改用已注册的基础工具或安全收尾。"
+            if blocked else f"已检测到 {len(ids)} 个可用能力。"
+        ),
     }
 
 
@@ -764,6 +859,7 @@ class _ApprovalBroker:
         self._input_queue = input_queue
         self._pending: asyncio.Future[dict[str, Any]] | None = None
         self._current_options: list[dict[str, Any]] = []
+        self._current_approval_type = "exploitation"
         self._recent_inputs: list[str] = []  # 近 5 条未被审批消费的消息，用于审批挂起时回看
 
     @property
@@ -791,7 +887,12 @@ class _ApprovalBroker:
     async def _ask_cli(self, reason: str, scan_summary: dict | None = None) -> dict[str, Any]:
         """CLI 通道：终端询问操作员（executor 中运行避免阻塞事件循环）。"""
         print(f"\n{'='*60}")
-        print(f"[人工审批] Orchestrator 请求进入攻击阶段（EXPLOITATION）")
+        approval_type = str((scan_summary or {}).get("approval_type") or "exploitation")
+        print(
+            "[人工审批] Orchestrator 请求确认授权范围"
+            if approval_type == "scope"
+            else "[人工审批] Orchestrator 请求进入攻击阶段（EXPLOITATION）"
+        )
         if scan_summary:
             target = scan_summary.get("target", "未知")
             print(f"[目标] {target}")
@@ -851,6 +952,7 @@ class _ApprovalBroker:
         if scan_summary:
             payload["scan_summary"] = scan_summary
         self._current_options = list((scan_summary or {}).get("approval_options", []))
+        self._current_approval_type = str((scan_summary or {}).get("approval_type") or "exploitation")
         if self._event_callback is not None:
             self._event_callback("approval_required", **payload)
         loop = asyncio.get_running_loop()
@@ -866,6 +968,7 @@ class _ApprovalBroker:
         finally:
             self._pending = None
             self._current_options = []
+            self._current_approval_type = "exploitation"
 
     def feed(self, user_input: str) -> bool:
         """处理 input_queue 收到的用户消息；返回 True 表示已被审批消费。
@@ -909,6 +1012,7 @@ class _ApprovalBroker:
                 decision=decision,
                 selected_plan_id=selected_plan_id,
                 priority_order=priority_order,
+                approval_type=self._current_approval_type,
                 agent="Orchestrator",
             )
         self._pending.set_result(result)
@@ -983,6 +1087,9 @@ def _extract_declared_network_targets(text: str) -> list[str]:
     与裸域名仅从带有目标语义的行（及其后两行）提取；完整 URL 和 host:port
     则被视为明确目标表达。
     """
+    # Agent 报告常用 Markdown 粗体/代码标记包裹字段（如 **目标服务器**：`10.0.0.1`），
+    # 先去除展示标记，避免确定性目标提取漏掉已明确写出的地址。
+    text = re.sub(r"[`*_]", "", text)
     candidates: dict[str, int | None] = {}
 
     def add(value: str) -> None:
@@ -1021,6 +1128,108 @@ def _extract_declared_network_targets(text: str) -> list[str]:
         f"{host}:{port}" if port is not None else host
         for host, port in candidates.items()
     )
+
+
+def _read_taskbook_text(path: Path | str) -> str:
+    """读取常见任务书格式的可检索文本；失败时安全返回空串。
+
+    仅读取文档结构，不执行文档中的宏、脚本或压缩包内容。
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    try:
+        if suffix in {".md", ".markdown", ".txt", ".rst", ".log", ".csv"}:
+            return path.read_text(encoding="utf-8", errors="ignore")
+        if suffix == ".docx":
+            with zipfile.ZipFile(path) as archive:
+                xml = archive.read("word/document.xml").decode("utf-8", errors="ignore")
+            return unescape(re.sub(r"<[^>]+>", " ", xml))
+        if suffix == ".pdf":
+            try:
+                from pypdf import PdfReader
+                text = "\n".join(page.extract_text() or "" for page in PdfReader(str(path)).pages).strip()
+                if text:
+                    return text
+            except Exception:
+                pass
+            # 扫描版 PDF 无文本层时，使用本机 pdftoppm+tesseract 做受限 OCR。
+            pdftoppm = shutil.which("pdftoppm")
+            tesseract = shutil.which("tesseract")
+            if not pdftoppm or not tesseract:
+                return ""
+            with tempfile.TemporaryDirectory(prefix="lingshu-taskbook-ocr-") as temp_dir:
+                prefix = str(Path(temp_dir) / "page")
+                rendered = subprocess.run(
+                    [pdftoppm, "-r", "150", "-f", "1", "-l", "20", "-png", str(path), prefix],
+                    capture_output=True, text=True, timeout=90, check=False,
+                )
+                if rendered.returncode != 0:
+                    return ""
+                pages = sorted(Path(temp_dir).glob("page-*.png"))
+                chunks: list[str] = []
+                for image in pages:
+                    result = subprocess.run(
+                        [tesseract, str(image), "stdout", "-l", "chi_sim+eng", "--psm", "6"],
+                        capture_output=True, text=True, timeout=30, check=False,
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        chunks.append(result.stdout.strip())
+                return "\n\n".join(chunks)
+        if suffix == ".xlsx":
+            from openpyxl import load_workbook
+            workbook = load_workbook(path, read_only=True, data_only=True)
+            rows: list[str] = []
+            for sheet in workbook.worksheets:
+                rows.append(f"[工作表] {sheet.title}")
+                for values in sheet.iter_rows(values_only=True):
+                    cells = [str(value).strip() for value in values if value is not None and str(value).strip()]
+                    if cells:
+                        rows.append(" | ".join(cells))
+            return "\n".join(rows)
+        if suffix == ".pptx":
+            from pptx import Presentation
+            presentation = Presentation(str(path))
+            slides: list[str] = []
+            for index, slide in enumerate(presentation.slides, 1):
+                texts = [shape.text.strip() for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip()]
+                if texts:
+                    slides.append(f"[幻灯片 {index}]\n" + "\n".join(texts))
+            return "\n\n".join(slides)
+        if suffix in {".html", ".htm"}:
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+            return unescape(re.sub(r"<script.*?</script>|<style.*?</style>|<[^>]+>", " ", raw, flags=re.I | re.S))
+        if suffix == ".zip":
+            allowed = {".md", ".markdown", ".txt", ".rst", ".log", ".csv", ".html", ".htm", ".docx", ".xlsx", ".pptx", ".pdf"}
+            chunks: list[str] = []
+            with zipfile.ZipFile(path) as archive:
+                for member in archive.infolist()[:100]:
+                    member_path = Path(member.filename)
+                    if member.is_dir() or member_path.suffix.lower() not in allowed or member.file_size > 20 * 1024 * 1024:
+                        continue
+                    with tempfile.NamedTemporaryFile(prefix="lingshu-taskbook-", suffix=member_path.suffix) as extracted:
+                        extracted.write(archive.read(member))
+                        extracted.flush()
+                        content = _read_taskbook_text(extracted.name)
+                    if content.strip():
+                        chunks.append(f"[附件] {member.filename}\n{content}")
+            return "\n\n".join(chunks)
+    except (OSError, ValueError, ImportError, zipfile.BadZipFile, subprocess.SubprocessError):
+        return ""
+    return ""
+
+
+def _mission_mode(target_spec: TargetSpec, goal: str, taskbook_text: str = "") -> str:
+    text = f"{goal}\n{taskbook_text}".lower()
+    if any(token in text for token in ("nssctf", "ctf", "题目附件", "challenge")):
+        return "ctf"
+    if any(token in text for token in ("应急响应", "incident response", "取证", "日志分析", "内存镜像")):
+        return "incident_response"
+    pentest = any(token in text for token in ("渗透测试", "penetration test", "安全测试任务书", "授权测试", "漏洞验证"))
+    if pentest and target_spec.kind != "network":
+        return "hybrid_taskbook"
+    if pentest or target_spec.kind == "network":
+        return "authorized_pentest"
+    return "ctf" if target_spec.kind != "network" else "authorized_pentest"
 
 
 async def run_mission(
@@ -1094,14 +1303,17 @@ async def run_mission(
     # 典型场景：上传的应急响应任务书列出 SSH 目标与端口。对纯文本附件
     # 一并检查，避免前端只上传任务书、未将其全文复制到“任务目标”时漏掉授权。
     declared_authorization_text = goal_text
-    if target_spec.kind == "single_file" and target_spec.original_path is not None:
-        try:
-            raw_task_file = target_spec.original_path.read_bytes()[:256 * 1024]
-            if b"\x00" not in raw_task_file:
-                declared_authorization_text += "\n" + raw_task_file.decode("utf-8", errors="ignore")
-        except OSError:
-            pass
+    taskbook_text = ""
+    if target_spec.original_path is not None and target_spec.kind == "single_file":
+        taskbook_text = _read_taskbook_text(target_spec.original_path)
+        declared_authorization_text += "\n" + taskbook_text
     declared_network_targets = _extract_declared_network_targets(declared_authorization_text)
+    mission_mode = _mission_mode(target_spec, goal_text, taskbook_text)
+    execution_target = (
+        declared_network_targets[0]
+        if mission_mode == "hybrid_taskbook" and declared_network_targets
+        else target_str
+    )
 
     # 打印分类结果（主题型 / 候选 / 证据），方便人工审计
     print(
@@ -1149,6 +1361,13 @@ async def run_mission(
                 "会话存在未确认的不确定动作，禁止自动重放；请先确认后重试"
             )
         mission = existing
+        if not mission.mission_mode:
+            mission.mission_mode = _mission_mode(target_spec, goal_text, taskbook_text)
+        if not mission.declared_scope:
+            mission.declared_scope = {
+                "targets": list((mission.target_spec or {}).get("declared_network_targets") or declared_network_targets),
+                "source": "taskbook",
+            }
         mission.resume_status = "running"
         # 从持久化恢复分类决策（重解析目标仅用于推导 workdir 与授权）
         category_decision = SimpleNamespace(
@@ -1176,6 +1395,7 @@ async def run_mission(
             target=target_str,
             goal=goal_text,
             authorized=True,  # 系统默认所有操作均需授权
+            mission_mode=mission_mode,
             target_spec={
                 "kind": target_spec.kind,
                 "host": target_spec.host,
@@ -1183,6 +1403,7 @@ async def run_mission(
                 "original_input": target_spec.original_input,
                 "authorization_scope": target_spec.authorization_scope,
                 "declared_network_targets": declared_network_targets,
+                "mission_mode": mission_mode,
             },
             category_decision={
                 "primary": category_decision.primary,
@@ -1197,8 +1418,10 @@ async def run_mission(
                 "scope": target_spec.authorization_scope,
                 "operator_confirmation": True,  # 操作员已确认
                 "declared_network_targets": declared_network_targets,
-                "declared_targets_auto_trusted": bool(declared_network_targets),
+                "declared_targets_auto_trusted": mission_mode == "ctf",
             },
+            declared_scope={"targets": declared_network_targets, "source": "taskbook"},
+            scope_approval_status=("not_required" if mission_mode in {"ctf", "incident_response"} else "pending" if declared_network_targets else "not_required"),
         )
         # 记录任务创建事件并立即持久化（防止后续异常丢失状态）
         mission.record(
@@ -1245,18 +1468,22 @@ async def run_mission(
     # 从持久化恢复（崩溃恢复场景）
     if mission.authorized_scope:
         scope_registry.restore(mission.authorized_scope)
-    if not resume:
-        # 注册初始目标
-        if target_spec.host:
-            scope_registry.add_base_target(target_spec.host)
+    # 无论新建还是恢复，都必须重新确认原始目标在注册表中。
+    # 旧会话可能没有 authorized_scope 快照，或者快照来自范围审批前；
+    # 原始 target_spec.host 是本次任务的既有授权输入，不属于范围扩展。
+    if target_spec.host:
+        scope_registry.add_base_target(target_spec.host)
+    # CTF 的题目固定目标始终属于初始范围；授权渗透/混合任务书目标
+    # 只有 scope_approval_status=approved 时才可注册。
+    effective_mode = mission.mission_mode or mission_mode
+    if effective_mode == "ctf" or mission.scope_approval_status == "approved":
         for declared_target in declared_network_targets:
-            # 只注册 host，端口信息仍在审计记录中；scoped_shell 以 host/IP
-            # 作为网络范围判断依据，命令本身必须显式写出实际访问对象。
             declared_spec = normalize_target(declared_target)
             if declared_spec.host:
                 scope_registry.add_base_target(declared_spec.host)
-        # 持久化初始快照
-        mission.authorized_scope = scope_registry.snapshot()
+    updated_scope = scope_registry.snapshot()
+    if mission.authorized_scope != updated_scope:
+        mission.authorized_scope = updated_scope
         store.save(mission)
 
     # ── v0.3.0：Workspace v2 标识 ──
@@ -1277,6 +1504,61 @@ async def run_mission(
 
     # ── 人工审批协调器（首次进入攻击阶段前的人工闸门） ──
     approval_broker = _ApprovalBroker(event_callback, input_queue)
+
+    # 任务书声明的网络目标必须在首轮网络 Recon 前经过独立范围审批。
+    # CTF/应急响应模式不进入此分支。
+    scope_denied = False
+    if (
+        not resume
+        and mission_mode in {"authorized_pentest", "hybrid_taskbook"}
+        and declared_network_targets
+    ):
+        mission.scope_approval_status = "pending"
+        mission.scope_approval_requested_at = datetime.now().astimezone().isoformat()
+        store.save(mission)
+        scope_result = await approval_broker.request(
+            "任务书声明了网络执行目标，需要确认本轮允许访问的范围。",
+            {
+                "approval_type": "scope",
+                "target": mission.target,
+                "goal": mission.goal,
+                "scope_request": {
+                    "targets": declared_network_targets,
+                    "source": "taskbook",
+                    "actions": ["recon", "service_enum"],
+                },
+            },
+        )
+        if bool(scope_result.get("approved")):
+            for declared_target in declared_network_targets:
+                declared_spec = normalize_target(declared_target)
+                if declared_spec.host:
+                    scope_registry.add_base_target(declared_spec.host)
+            mission.authorized_scope = scope_registry.snapshot()
+            mission.scope_approval_status = "approved"
+            mission.scope_approval_decision = str(scope_result.get("decision") or "批准")
+            mission.scope_approval_resolved_at = datetime.now().astimezone().isoformat()
+            store.checkpoint(mission, "scope_approval_approved")
+        else:
+            scope_denied = True
+            mission.scope_approval_status = "denied"
+            mission.scope_approval_decision = str(scope_result.get("decision") or "拒绝")
+            mission.scope_approval_resolved_at = datetime.now().astimezone().isoformat()
+            store.save(mission)
+
+    # ── P0：Brain 前能力预检 ──
+    capability_preflight = _capability_preflight(
+        mission.mission_mode or mission_mode,
+        target_spec,
+        str((mission.category_decision or {}).get("primary") or category_decision.primary),
+    )
+    if scope_denied:
+        capability_preflight.update({
+            "status": "blocked",
+            "message": "任务书网络范围未获批准；禁止启动网络 Recon/Attack，只能安全收尾或等待重新授权。",
+        })
+    mission.record("system", "capability_preflight", **capability_preflight)
+    store.save(mission)
 
     def _push_target_info(extra: dict | None = None) -> None:
         """向 SSE 订阅者推送靶机信息快照。"""
@@ -1306,6 +1588,13 @@ async def run_mission(
             payload = {
                 "target": mission.target,
                 "goal": mission.goal,
+                "mission_mode": mission.mission_mode,
+                "category_decision": mission.category_decision,
+                "declared_scope": mission.declared_scope,
+                "authorized_scope": mission.authorized_scope,
+                "scope_approval_status": mission.scope_approval_status,
+                "scope_approval_decision": mission.scope_approval_decision,
+                "capability_preflight": capability_preflight,
                 "phase": mission.phase.value,
                 "exploitation_approved": mission.exploitation_approved,
                 "exploitation_approval_status": mission.exploitation_approval_status,
@@ -1860,14 +2149,16 @@ async def run_mission(
         )
 
         # ── 6. Recon / Triage 路由 ──
-        # 按目标类型选择侦察方式：
-        #   network    → 端口/服务/指纹扫描（scoped_shell）
-        #   file/归档  → 文件静态研判（triage）
+        # 文件目标默认先做 ArtifactTriage，但只要文件/任务书声明了网络目标，
+        # 同时挂载 NetworkRecon；后续由 Orchestrator 的 dispatch_recon(route=...)
+        # 决定继续本地分析还是进入授权网络侦察，不再把 Recon 永久锁死为 Triage。
+        network_recon = None
+        artifact_recon = None
         if target_spec.kind == "network":
-            recon = create_network_recon_agent(
-                model, target_str, project_dir, runtime.command_timeout,
+            network_recon = create_network_recon_agent(
+                model, execution_target, project_dir, runtime.command_timeout,
                 scope_registry=scope_registry,
-                max_iters=_max_react_iters(target_spec.kind, "recon", complexity, thinking=model_ver),
+                max_iters=_max_react_iters("network", "recon", complexity, thinking=model_ver),
                 offloader=workspace,
                 context_config=_role_context("recon"),
                 state=build_role_agent_state(mission_id, "recon") if use_v2_workspace else None,
@@ -1876,11 +2167,12 @@ async def run_mission(
                 vision_roots=vision_roots,
                 include_cve_search=bool(re.search(r"\bCVE-\d{4}-\d+\b", goal_text, re.IGNORECASE)),
             )
+            recon = network_recon
         else:
             triage_categories = set(initial_categories)
             if "unknown" in triage_categories:
                 triage_categories.update({"forensics", "reverse", "misc"})
-            recon = create_artifact_triage_agent(
+            artifact_recon = create_artifact_triage_agent(
                 model, workdir, project_dir, runtime.command_timeout,
                 max_iters=_max_react_iters(target_spec.kind, "recon", complexity, thinking=model_ver),
                 offloader=workspace,
@@ -1891,6 +2183,20 @@ async def run_mission(
                 vision_roots=vision_roots,
                 capability_categories=triage_categories,
             )
+            recon = artifact_recon
+            if declared_network_targets:
+                network_recon = create_network_recon_agent(
+                    model, execution_target, project_dir, runtime.command_timeout,
+                    scope_registry=scope_registry,
+                    max_iters=_max_react_iters("network", "recon", complexity, thinking=model_ver),
+                    offloader=workspace,
+                    context_config=_role_context("recon"),
+                    state=build_role_agent_state(mission_id, "recon-network") if use_v2_workspace else None,
+                    artifact_root=ws_root,
+                    vision_model=vision_model,
+                    vision_roots=vision_roots,
+                    include_cve_search=bool(re.search(r"\bCVE-\d{4}-\d+\b", goal_text, re.IGNORECASE)),
+                )
 
         # ── 6b. 首轮 Recon/Triage 与二次分类 ──
         # 在 Attack/Reserve 创建前完成一次真实侦察，使接受后的分类能够直接
@@ -1903,6 +2209,14 @@ async def run_mission(
                 {"focus": "首轮最小化侦察与题型确认"},
             )
             try:
+                if (
+                    mission.scope_approval_status == "denied"
+                    and mission.mission_mode in {"authorized_pentest", "hybrid_taskbook"}
+                    and (mission.declared_scope or {}).get("targets")
+                ):
+                    # 范围被拒绝时不启动任何网络命令；复用降级分支生成可审计报告，
+                    # 让 Brain/Orchestrator 进入安全收尾路径。
+                    raise AgentMaxIterationsError("任务书网络范围审批未通过")
                 bootstrap_result = await run_interruptible_agent_reply(
                     recon,
                     UserMsg(
@@ -1974,6 +2288,74 @@ async def run_mission(
                     f"accepted={reclassification.accepted}；{reclassification.reason}"
                 )
 
+        # ── 6c. ArtifactTriage 后动态发现网络目标 ──
+        # 归档任务常在启动时无法从压缩包元数据提取目标，目标会在首轮
+        # ArtifactTriage 报告中出现。此时不能继续把网络侦察锁在 Iris 上。
+        if network_recon is None and not resume:
+            discovered_targets = _extract_declared_network_targets(bootstrap_report)
+            if discovered_targets:
+                mission.record(
+                    "Orchestrator", "network_targets_discovered",
+                    targets=discovered_targets, source="artifact_triage_report",
+                )
+                declared_network_targets = sorted(set(declared_network_targets) | set(discovered_targets))
+                mission.declared_scope = {
+                    **(mission.declared_scope or {}),
+                    "targets": declared_network_targets,
+                    "source": "taskbook_or_artifact_triage",
+                }
+                approved_targets = False
+                if mission.mission_mode == "ctf":
+                    approved_targets = True
+                elif mission.mission_mode in {"authorized_pentest", "hybrid_taskbook"}:
+                    mission.scope_approval_status = "pending"
+                    mission.scope_approval_requested_at = datetime.now().astimezone().isoformat()
+                    store.save(mission)
+                    dynamic_scope_result = await approval_broker.request(
+                        "ArtifactTriage 在任务书/附件中发现网络目标，需要确认是否允许启动 NetworkRecon。",
+                        {
+                            "approval_type": "scope",
+                            "target": mission.target,
+                            "goal": mission.goal,
+                            "scope_request": {
+                                "targets": discovered_targets,
+                                "source": "artifact_triage_report",
+                                "actions": ["network_recon", "service_enum"],
+                            },
+                        },
+                    )
+                    approved_targets = bool(dynamic_scope_result.get("approved"))
+                    mission.scope_approval_decision = str(
+                        dynamic_scope_result.get("decision") or ("批准" if approved_targets else "拒绝")
+                    )
+                    mission.scope_approval_resolved_at = datetime.now().astimezone().isoformat()
+                    mission.scope_approval_status = "approved" if approved_targets else "denied"
+                if approved_targets:
+                    for candidate in discovered_targets:
+                        candidate_spec = normalize_target(candidate)
+                        if candidate_spec.host:
+                            scope_registry.add_base_target(candidate_spec.host)
+                    mission.authorized_scope = scope_registry.snapshot()
+                    store.checkpoint(mission, "dynamic_network_scope_approved")
+                    execution_target = discovered_targets[0]
+                    network_recon = create_network_recon_agent(
+                        model, execution_target, project_dir, runtime.command_timeout,
+                        scope_registry=scope_registry,
+                        max_iters=_max_react_iters("network", "recon", complexity, thinking=model_ver),
+                        offloader=workspace,
+                        context_config=_role_context("recon"),
+                        state=build_role_agent_state(mission_id, "recon-network") if use_v2_workspace else None,
+                        artifact_root=ws_root,
+                        vision_model=vision_model,
+                        vision_roots=vision_roots,
+                        include_cve_search=bool(re.search(r"\bCVE-\d{4}-\d+\b", goal_text, re.IGNORECASE)),
+                    )
+                    print(f"[系统] 已动态挂载 NetworkRecon，目标：{execution_target}")
+                else:
+                    scope_denied = True
+                    store.save(mission)
+                    print("[系统] 网络目标范围未获批准，NetworkRecon 保持禁用")
+
         # 首轮 Recon 后再判断知识缺口，保证 Query 使用最终分类与真实 Facts。
         # 该 Context 是参考知识，不写入 Facts/Evidence。
         brain_knowledge_context = await _ensure_knowledge_context(
@@ -1988,6 +2370,10 @@ async def run_mission(
         plan_prompt = (
             f"授权目标：{mission.target}\n"
             f"任务目标：{mission.goal}\n\n"
+            f"任务模式：{mission.mission_mode}\n"
+            f"声明范围：{json.dumps(mission.declared_scope, ensure_ascii=False)}\n"
+            f"有效范围：{json.dumps(mission.authorized_scope, ensure_ascii=False)}\n"
+            f"能力预检：{json.dumps(capability_preflight, ensure_ascii=False)}\n\n"
             f"## 题型分析（系统最终分类）\n"
             f"目标类型：{target_spec.kind}\n"
             f"当前题型：{category_decision.primary}\n"
@@ -2084,6 +2470,8 @@ async def run_mission(
                     )
         # 保存计划文本（无输出时回退到内置四阶段计划）
         mission.plan = plan_text or "使用内置四阶段计划"
+        category_decision = _review_brain_category(mission, category_decision, mission.plan)
+        store.save(mission)
         phase_experts, expert_section = build_expert_assignments(
             category_decision.primary,
             target_spec.kind,
@@ -2140,7 +2528,7 @@ async def run_mission(
             return await create_attack_agent(
                 model,
                 analysis,
-                mission.target,
+                execution_target,
                 project_dir,
                 runtime.command_timeout,
                 category_decision=mission.category_decision,
@@ -2241,6 +2629,8 @@ async def run_mission(
             offloader=workspace,
             context_config=_role_context("orchestrator"),
             state=build_role_agent_state(mission_id, "orchestrator") if use_v2_workspace else None,
+            network_recon_agent=network_recon,
+            artifact_recon_agent=artifact_recon,
         )
         # 结构化计划清单文本（Orchestrator 需要知道条目 id 才能用 UpdatePlan 等工具维护）
         plan_items_text = "\n".join(
@@ -2267,8 +2657,17 @@ async def run_mission(
             )
             store.save(mission)
         # ── Orchestrator 主循环（steering 由 dispatcher 层 + 此处兜底处理） ──
+        mode_policy = {
+            "ctf": "CTF 模式：题目附件/目标即固定授权范围，不得调用 request_scope_expansion，也不等待范围审批。",
+            "incident_response": "应急响应模式：以本地证据、日志和镜像分析为主，不进行远程范围扩展。",
+            "authorized_pentest": "授权渗透模式：网络侦察前必须确认任务书声明范围；新增目标必须先通过独立范围审批，再调用 request_scope_expansion。",
+            "hybrid_taskbook": "混合任务书模式：本地附件分析可先行；涉及任务书声明的网络目标须先通过独立范围审批，新增目标仍需再次审批。",
+        }.get(mission.mission_mode, "按当前任务声明范围执行，任何新增网络目标均不得默认视为已授权。")
         orch_content = (
-            f"执行以下已授权任务。\n目标：{mission.target}\n目标要求：{mission.goal}\n\n"
+            f"执行以下已授权任务。\n任务模式：{mission.mission_mode}\n目标：{mission.target}\n目标要求：{mission.goal}\n"
+            f"模式约束：{mode_policy}\n"
+            f"声明范围：{json.dumps(mission.declared_scope, ensure_ascii=False)}\n"
+            f"有效范围：{json.dumps(mission.authorized_scope, ensure_ascii=False)}\n\n"
             f"Brain 计划摘要：\n{mission.plan[:12000]}\n\n"
             f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
             f"分层决策上下文（Historical 仅含引用，需要时调用 view_mission_state）：\n"

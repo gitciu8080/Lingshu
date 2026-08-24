@@ -470,20 +470,36 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
             ctx.approval_decision_submitted = False
             ctx.pending_approval_request = dict(payload)
             requested_at = datetime.now().astimezone().isoformat()
+            approval_type = str(payload.get("approval_type") or (payload.get("scan_summary") or {}).get("approval_type") or "exploitation")
+            pending_field = "pending_scope_approval" if approval_type == "scope" else "pending_exploitation_approval"
             persistence_operations.append(session_update_operation(
                 session_id,
                 pending_approval=json.dumps(payload, ensure_ascii=False),
-                approval_status="pending",
-                approval_decision="",
-                approval_requested_at=requested_at,
-                approval_resolved_at="",
+                **{pending_field: json.dumps(payload, ensure_ascii=False)},
+                **({
+                    "scope_approval_status": "pending",
+                    "scope_approval_decision": "",
+                    "scope_approval_requested_at": requested_at,
+                    "scope_approval_resolved_at": "",
+                } if approval_type == "scope" else {
+                    "approval_status": "pending",
+                    "approval_decision": "",
+                    "approval_requested_at": requested_at,
+                    "approval_resolved_at": "",
+                }),
             ))
-            persistence_operations.append(target_info_operation(session_id, {
-                "exploitation_approval_status": "pending",
-                "exploitation_approval_decision": "",
-                "exploitation_approval_requested_at": requested_at,
-                "exploitation_approval_resolved_at": "",
-            }))
+            if approval_type == "scope":
+                persistence_operations.append(target_info_operation(session_id, {
+                    "scope_approval_status": "pending",
+                    "scope_approval_request": payload.get("scan_summary", {}).get("scope_request", {}),
+                }))
+            else:
+                persistence_operations.append(target_info_operation(session_id, {
+                    "exploitation_approval_status": "pending",
+                    "exploitation_approval_decision": "",
+                    "exploitation_approval_requested_at": requested_at,
+                    "exploitation_approval_resolved_at": "",
+                }))
         elif event_type == "approval_resolved":
             ctx.approval_decision_submitted = True
             ctx.pending_approval_request = None
@@ -493,19 +509,33 @@ def _make_session_callback(session_id: str, ctx: SessionContext):
                 "recon_requested" if "补充侦察" in decision else "denied"
             )
             resolved_at = datetime.now().astimezone().isoformat()
-            persistence_operations.append(session_update_operation(
-                session_id,
-                pending_approval=None,
-                approval_status=approval_status,
-                approval_decision=decision,
-                approval_resolved_at=resolved_at,
-            ))
-            persistence_operations.append(target_info_operation(session_id, {
-                "exploitation_approved": bool(payload.get("approved")),
-                "exploitation_approval_status": approval_status,
-                "exploitation_approval_decision": decision,
-                "exploitation_approval_resolved_at": resolved_at,
-            }))
+            approval_type = str(payload.get("approval_type") or (payload.get("scan_summary") or {}).get("approval_type") or "exploitation")
+            if approval_type == "scope":
+                persistence_operations.append(session_update_operation(
+                    session_id, pending_approval=None,
+                    pending_scope_approval=None,
+                    scope_approval_status="approved" if payload.get("approved") else "denied",
+                    scope_approval_decision=decision,
+                    scope_approval_resolved_at=resolved_at,
+                ))
+                persistence_operations.append(target_info_operation(session_id, {
+                    "scope_approval_status": "approved" if payload.get("approved") else "denied",
+                    "scope_approval_decision": decision,
+                }))
+            else:
+                persistence_operations.append(session_update_operation(
+                    session_id, pending_approval=None,
+                    pending_exploitation_approval=None,
+                    approval_status=approval_status,
+                    approval_decision=decision,
+                    approval_resolved_at=resolved_at,
+                ))
+                persistence_operations.append(target_info_operation(session_id, {
+                    "exploitation_approved": bool(payload.get("approved")),
+                    "exploitation_approval_status": approval_status,
+                    "exploitation_approval_decision": decision,
+                    "exploitation_approval_resolved_at": resolved_at,
+                }))
 
         if persistence_operations:
             # Docker 版风格：入队批量提交；队列未启动/满载时线程池直写兜底。
@@ -811,13 +841,23 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             "summary": summary,
         }
         stored_approval = await asyncio.to_thread(session_store.get_session, session_id) or {}
-        if stored_approval.get("pending_approval"):
-            terminal_fields["pending_approval"] = None
+        if any(stored_approval.get(key) for key in ("pending_approval", "pending_scope_approval", "pending_exploitation_approval")):
+            terminal_fields.update(
+                pending_approval=None,
+                pending_scope_approval=None,
+                pending_exploitation_approval=None,
+            )
             if stored_approval.get("approval_status") == "pending":
                 terminal_fields.update(
                     approval_status="cancelled",
                     approval_decision="任务结束前审批未完成",
                     approval_resolved_at=datetime.now().astimezone().isoformat(),
+                )
+            if stored_approval.get("scope_approval_status") == "pending":
+                terminal_fields.update(
+                    scope_approval_status="cancelled",
+                    scope_approval_decision="任务结束前审批未完成",
+                    scope_approval_resolved_at=datetime.now().astimezone().isoformat(),
                 )
         await ps.submit([
             session_update_operation(session_id, **terminal_fields),
@@ -1882,12 +1922,24 @@ async def get_session_detail(session_id: str, current_user: dict = Depends(get_c
     target_info.setdefault("target", session.get("target", ""))
     target_info.setdefault("goal", session.get("goal", ""))
     target_info.setdefault("phase", session.get("phase", ""))
+    if mission_state := (session.get("mission_state") or {}):
+        target_info.setdefault("mission_mode", mission_state.get("mission_mode", ""))
+        target_info.setdefault("category_decision", mission_state.get("category_decision", {}))
     if session.get("flag"):
         target_info["flag"] = session["flag"]
     mission_state = session.get("mission_state") or {}
+    legacy_pending = False
+    if session.get("pending_approval"):
+        try:
+            legacy_payload = json.loads(session["pending_approval"])
+            legacy_pending = str(
+                (legacy_payload.get("scan_summary") or {}).get("approval_type", "exploitation")
+            ) != "scope"
+        except (TypeError, json.JSONDecodeError):
+            legacy_pending = True
     approval_status = infer_exploitation_approval_status(
         mission_state,
-        pending=bool(session.get("pending_approval")),
+        pending=bool(session.get("pending_exploitation_approval")) or legacy_pending,
         active=(
             session.get("status") == "active"
             and str(mission_state.get("phase") or session.get("phase") or "")
@@ -2133,17 +2185,34 @@ async def get_pending_approval(
 ):
     """检查会话是否有待处理的审批请求。"""
     await _verify_session_owner(session_id, current_user["id"])
-    # 直接查询 sessions 表的 pending_approval 字段
+    # 新字段按审批类型拆分，pending_approval 保留用于旧会话兼容。
     session = await asyncio.to_thread(session_store.get_session, session_id)
-    if not session or not session.get("pending_approval"):
+    if not session:
+        return {"pending": False}
+    pending_raw = (
+        session.get("pending_scope_approval")
+        or session.get("pending_exploitation_approval")
+        or session.get("pending_approval")
+    )
+    if not pending_raw:
         return {"pending": False}
     if session.get("status") != "active" or session_id not in _active_sessions:
-        fields: dict[str, Any] = {"pending_approval": None}
+        fields: dict[str, Any] = {
+            "pending_approval": None,
+            "pending_scope_approval": None,
+            "pending_exploitation_approval": None,
+        }
         if session.get("approval_status") == "pending":
             fields.update(
                 approval_status="cancelled",
                 approval_decision="任务结束前审批未完成",
                 approval_resolved_at=datetime.now().astimezone().isoformat(),
+            )
+        if session.get("scope_approval_status") == "pending":
+            fields.update(
+                scope_approval_status="cancelled",
+                scope_approval_decision="任务结束前审批未完成",
+                scope_approval_resolved_at=datetime.now().astimezone().isoformat(),
             )
         await ps.submit([
             session_update_operation(session_id, **fields),
@@ -2151,10 +2220,11 @@ async def get_pending_approval(
         return {"pending": False}
     # 解析并返回完整事件数据
     try:
-        payload = json.loads(session["pending_approval"])
+        payload = json.loads(pending_raw)
         event = {
             "session_id": payload.get("session_id", session_id),
             "scan_summary": payload.get("scan_summary", {}),
+            "approval_type": (payload.get("scan_summary") or {}).get("approval_type", "exploitation"),
             "plan_items": payload.get("plan_items", []),
             "reason": payload.get("reason", ""),
             "agent": payload.get("agent", "Orchestrator"),
@@ -2165,6 +2235,8 @@ async def get_pending_approval(
             session_update_operation(
                 session_id,
                 pending_approval=None,
+                pending_scope_approval=None,
+                pending_exploitation_approval=None,
                 approval_status="cancelled",
                 approval_decision="审批请求数据损坏，已安全取消",
                 approval_resolved_at=datetime.now().astimezone().isoformat(),

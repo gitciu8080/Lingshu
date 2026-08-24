@@ -218,6 +218,10 @@ async def reconcile_mission_states(sessions_dir: str | Path) -> int:
             "approval_decision": data.get("exploitation_approval_decision") or "",
             "approval_requested_at": data.get("exploitation_approval_requested_at") or "",
             "approval_resolved_at": data.get("exploitation_approval_resolved_at") or "",
+            "scope_approval_status": data.get("scope_approval_status") or session.get("scope_approval_status") or "not_required",
+            "scope_approval_decision": data.get("scope_approval_decision") or "",
+            "scope_approval_requested_at": data.get("scope_approval_requested_at") or "",
+            "scope_approval_resolved_at": data.get("scope_approval_resolved_at") or "",
         }
         changed = {key: value for key, value in fields.items() if session.get(key) != value}
         if changed:

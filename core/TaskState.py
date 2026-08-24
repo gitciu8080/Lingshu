@@ -256,6 +256,8 @@ class MissionState:
     authorized: bool
     session_id: str = ""
     title: str = ""
+    # 任务模式：ctf / incident_response / authorized_pentest / hybrid_taskbook
+    mission_mode: str = ""
     phase: Phase = Phase.PLANNING
     plan: str = ""
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -290,6 +292,11 @@ class MissionState:
     # 动态授权范围快照（ScopeRegistry.snapshot() 的输出），
     # 崩溃恢复时用于重建 ScopeRegistry
     authorized_scope: dict[str, Any] = field(default_factory=dict)
+    declared_scope: dict[str, Any] = field(default_factory=dict)
+    scope_approval_status: str = "not_required"
+    scope_approval_decision: str = ""
+    scope_approval_requested_at: str = ""
+    scope_approval_resolved_at: str = ""
 
     # 作战计划清单：Brain 经 AddPlan 登记（笼统条目），
     # Orchestrator 经 AddPlan/UpdatePlan/DeletePlan/ListPlan 维护（Tools/Plan.py）
@@ -829,7 +836,7 @@ class MissionState:
 
 # MissionStore 持久化 schema 版本。旧文件缺字段时由 load() 自动迁移，
 # 不回写（保持旧任务只读兼容）。
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # v1: 初始字段（target/goal/phase/plan/findings/attack_chain/flag/...）
 # v2: v0.2.0 新增 target_spec/category_decision/category_history/
@@ -843,6 +850,7 @@ SCHEMA_VERSION = 7
 # v5: 第二批执行闭环新增 hypotheses/action_history/failed_paths 及序列号
 # v6: RAG 有界 Knowledge Context、查询指纹与共享缓存状态
 # v7: 人工利用审批改为可恢复的多态状态，不再以 false 代表所有未批准情况
+# v8: 任务模式、声明/有效范围及独立范围审批状态
 
 
 class MissionStoreCorruptedError(OSError):

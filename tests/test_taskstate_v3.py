@@ -49,6 +49,8 @@ class MissionStateFieldsTest(unittest.TestCase):
         self.assertEqual(mission.last_action_fingerprint, "")
         self.assertEqual(mission.retry_counters, {})
         self.assertEqual(mission.agent_context_refs, {})
+        self.assertEqual(mission.scope_approval_status, "not_required")
+        self.assertEqual(mission.declared_scope, {})
 
     def test_plan_status_interrupted_is_representable(self) -> None:
         mission = MissionState(target="t", goal="g", authorized=True)
@@ -118,6 +120,7 @@ class MissionStoreRoundTripTest(unittest.TestCase):
         self.assertEqual(loaded.phase, Phase.RECON)
         self.assertEqual(loaded.workspace_id, "")  # v3 默认值
         self.assertEqual(loaded.resume_status, "fresh")
+        self.assertEqual(loaded.scope_approval_status, "not_required")
         self.assertEqual(loaded.plan_items, [])  # v2 默认值
 
 

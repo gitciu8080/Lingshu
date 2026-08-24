@@ -726,6 +726,10 @@ def _validate_scoped_command(
                 normalized = str(ipaddress.ip_address(candidate))
             except ValueError:
                 continue
+            # 原始工具 target 本身就是本轮已确认的授权输入。即使旧会话
+            # 尚未持久化 authorized_scope，也不能把它误判为范围外 IP。
+            if target_ip and normalized == target_ip:
+                continue
             if not registry.is_ip_allowed(normalized):
                 foreign_ips.add(normalized)
         if foreign_ips:

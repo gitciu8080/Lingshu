@@ -125,10 +125,16 @@ def init_sessions_db():
         migrations = {
             "target_info": "TEXT DEFAULT NULL",
             "pending_approval": "TEXT DEFAULT NULL",
+            "pending_scope_approval": "TEXT DEFAULT NULL",
+            "pending_exploitation_approval": "TEXT DEFAULT NULL",
             "approval_status": "TEXT DEFAULT 'not_requested'",
             "approval_decision": "TEXT DEFAULT ''",
             "approval_requested_at": "TEXT DEFAULT ''",
             "approval_resolved_at": "TEXT DEFAULT ''",
+            "scope_approval_status": "TEXT DEFAULT 'not_required'",
+            "scope_approval_decision": "TEXT DEFAULT ''",
+            "scope_approval_requested_at": "TEXT DEFAULT ''",
+            "scope_approval_resolved_at": "TEXT DEFAULT ''",
             # ── v0.3.0 Workspace v2 ──
             "workspace_id": "TEXT DEFAULT ''",
             "workspace_version": "INTEGER DEFAULT 0",
@@ -204,9 +210,11 @@ def create_session(
 # update_session 允许更新的字段白名单
 _UPDATABLE_FIELDS = {
     'phase', 'status', 'success', 'flag', 'summary', 'title', 'target_info',
-    'pending_approval', 'updated_at',
+    'pending_approval', 'pending_scope_approval', 'pending_exploitation_approval', 'updated_at',
     'approval_status', 'approval_decision', 'approval_requested_at',
     'approval_resolved_at',
+    'scope_approval_status', 'scope_approval_decision',
+    'scope_approval_requested_at', 'scope_approval_resolved_at',
     # v0.3.0 Workspace v2
     'workspace_id', 'workspace_version', 'resume_status', 'checkpoint_seq',
 }
