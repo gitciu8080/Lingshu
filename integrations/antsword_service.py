@@ -32,13 +32,14 @@ class AntSwordService:
 
     def __init__(
         self,
-        executable: str | Path = _DEFAULT_EXECUTABLE,
+        executable: str | Path | None = None,
         *,
         host: str = "127.0.0.1",
         port: int = 30080,
         startup_timeout: float = 60.0,
     ) -> None:
-        self.executable = Path(executable).expanduser().resolve()
+        configured = executable or os.getenv("LINGSHU_ANTSWORD_EXECUTABLE", "").strip()
+        self.executable = Path(configured or _DEFAULT_EXECUTABLE).expanduser().resolve()
         self.host = host
         self.port = port
         self.startup_timeout = startup_timeout

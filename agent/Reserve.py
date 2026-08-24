@@ -30,10 +30,6 @@ from agent.experts import REVERSE_EXPERT
 RESERVE_SYS_PROMPT = load_prompt("RESERVE")
 
 
-_IDA_DIR = Path("/home/kali/ida-pro-9.1")
-_IDALIB_MCP = Path("/home/kali/.local/bin/idalib-mcp")
-_UVX_FALLBACK = Path("/home/kali/.local/bin/uvx")
-_GDB_MCP_INSTALLED = Path("/home/kali/.local/bin/gdb-multi-mcp")
 _GDB_MCP_SOURCE = (
     "git+https://github.com/Mistyovo/gdb-multi-mcp"
     "@6e8048b8e933bbbae79b6da16fe69249f56fe30d"
@@ -88,6 +84,44 @@ _GDB_RESTRICTED_ENTRY_TOOLS = frozenset({
 })
 
 
+def _resolve_ida_dir() -> Path:
+    """解析 IDA 安装目录，优先使用环境变量，避免绑定客户用户名。"""
+    configured = os.getenv("LINGSHU_IDA_DIR", os.getenv("IDADIR", "")).strip()
+    if configured:
+        candidate = Path(configured).expanduser().resolve()
+        if candidate.is_dir():
+            return candidate
+        raise RuntimeError(f"IDA 安装目录不存在: {configured}")
+    for command in ("idat", "idat64", "ida"):
+        resolved = shutil.which(command)
+        if resolved:
+            return Path(resolved).resolve().parent
+    # 兼容常见的用户目录安装，但不绑定具体用户名或版本号。
+    for candidate in sorted(Path.home().glob("ida-pro-*"), reverse=True):
+        if (candidate / "idat").is_file() or (candidate / "idat64").is_file():
+            return candidate.resolve()
+    raise RuntimeError(
+        "未找到 IDA 安装目录；请设置 LINGSHU_IDA_DIR（或 IDADIR）",
+    )
+
+
+def _resolve_idalib_mcp_command() -> str:
+    """解析 IDA MCP 启动器，优先使用环境变量，其次查找 PATH。"""
+    configured = os.getenv("LINGSHU_IDALIB_MCP_COMMAND", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        resolved = str(candidate.resolve()) if candidate.is_file() else shutil.which(configured)
+        if resolved:
+            return resolved
+        raise RuntimeError(f"IDA MCP 启动器不存在: {configured}")
+    resolved = shutil.which("idalib-mcp")
+    if resolved:
+        return resolved
+    raise RuntimeError(
+        "未找到 idalib-mcp；请设置 LINGSHU_IDALIB_MCP_COMMAND 或将其加入 PATH",
+    )
+
+
 def _resolve_gdb_mcp_command() -> str:
     """返回固定安装的 GDB MCP 启动器，支持环境变量覆盖。"""
     configured = os.getenv("LINGSHU_GDB_MCP_COMMAND", "").strip()
@@ -102,16 +136,16 @@ def _resolve_gdb_mcp_command() -> str:
 
     # 优先使用已安装并缓存依赖的固定可执行文件，避免 systemd 环境下
     # 通过 uvx --offline 重新解析依赖导致 MCP 子进程立即退出。
-    if _GDB_MCP_INSTALLED.is_file():
-        return str(_GDB_MCP_INSTALLED)
-
-    resolved = shutil.which("uvx")
+    resolved = shutil.which("gdb-multi-mcp")
     if resolved:
         return resolved
-    if _UVX_FALLBACK.is_file():
-        return str(_UVX_FALLBACK)
+
+    uvx_command = os.getenv("LINGSHU_UVX_COMMAND", "").strip()
+    resolved = shutil.which(uvx_command) if uvx_command else shutil.which("uvx")
+    if resolved:
+        return resolved
     raise RuntimeError(
-        "uvx 不存在；请先安装 uv，再运行: "
+        "未找到 gdb-multi-mcp 或 uvx；请先安装 uv，再运行: "
         "uv tool install --from git+https://github.com/Mistyovo/gdb-multi-mcp "
         "gdb-multi-mcp",
     )
@@ -163,19 +197,17 @@ async def create_reverse_agent(
         *_IDA_PROFILE_EXTRAS.get(primary, _IDA_PROFILE_EXTRAS["reverse"]),
     ]))
 
-    if not _IDALIB_MCP.is_file():
-        raise RuntimeError(f"IDA MCP 启动器不存在: {_IDALIB_MCP}")
-    if not _IDA_DIR.is_dir():
-        raise RuntimeError(f"IDA 安装目录不存在: {_IDA_DIR}")
+    ida_dir = _resolve_ida_dir()
+    idalib_mcp = _resolve_idalib_mcp_command()
 
     ida_mcp = MCPClient(
         name="IDA_Tool",
         is_stateful=True,
         mcp_config=StdioMCPConfig(
-            command=str(_IDALIB_MCP),
+            command=idalib_mcp,
             args=["--stdio"],
             cwd=project_dir,
-            env={**os.environ, "IDADIR": str(_IDA_DIR)},
+            env={**os.environ, "IDADIR": str(ida_dir)},
         ),
         enable_tools=list(ida_enabled_tools),
         execution_timeout=max(float(timeout), 120.0),
@@ -357,13 +389,13 @@ async def create_reverse_agent(
             database_path = cache_dir / f"{source.stem}-{cache_key}.i64"
             if not database_path.is_file():
                 process = await asyncio.create_subprocess_exec(
-                    str(_IDA_DIR / "idat"),
+                    str(ida_dir / "idat"),
                     "-A",
                     "-B",
                     f"-o{database_path}",
                     str(source),
                     cwd=str(cache_dir),
-                    env={**os.environ, "IDADIR": str(_IDA_DIR)},
+                    env={**os.environ, "IDADIR": str(ida_dir)},
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )

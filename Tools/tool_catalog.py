@@ -6,6 +6,7 @@ AgentScope 会自动向模型公开已经注册的 Function/MCP 工具。本模�
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -83,6 +84,11 @@ class ToolCatalog:
 
     @staticmethod
     def _resolve_candidate(candidate: str) -> str | None:
+        # 目录清单允许使用 ${VAR}，将客户机差异放入 .env；未设置的
+        # 占位符直接视为不可用，不把占位符误报给 Agent。
+        candidate = os.path.expandvars(candidate).strip()
+        if not candidate or "$" in candidate:
+            return None
         if "/" in candidate:
             path = Path(candidate).expanduser()
             return str(path.resolve()) if path.is_file() and path.stat().st_mode & 0o111 else None

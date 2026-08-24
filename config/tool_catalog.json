@@ -500,7 +500,7 @@
    "id": "sage",
    "category": "crypto",
    "command_candidates": [
-    "/home/kali/miniconda3/envs/sage/bin/sage",
+    "${LINGSHU_SAGE_CMD}",
     "sage"
    ],
    "version_args": [
@@ -745,7 +745,7 @@
    "id": "checksec",
    "category": "reverse",
    "command_candidates": [
-    "/home/kali/.local/bin/checksec",
+    "${LINGSHU_CHECKSEC_CMD}",
     "checksec"
    ],
    "version_args": [
@@ -812,7 +812,7 @@
    "id": "pwntools",
    "category": "reverse",
    "command_candidates": [
-    "/home/kali/.local/bin/pwn",
+    "${LINGSHU_PWN_CMD}",
     "pwn"
    ],
    "version_args": [
@@ -891,7 +891,7 @@
    "id": "angr",
    "category": "reverse",
    "command_candidates": [
-    "/home/kali/miniconda3/envs/lingshu-angr/bin/python"
+    "${LINGSHU_ANGR_PYTHON}"
    ],
    "version_args": [
     "-c",

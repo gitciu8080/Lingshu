@@ -67,10 +67,6 @@ def _resolve_sage_command() -> tuple[list[str], str]:
     conda_exe = _resolve_executable(os.getenv("CONDA_EXE", ""))
     if conda_exe is not None:
         candidates.append(conda_exe.parent.parent / "envs" / env_name / "bin" / "sage")
-    candidates.extend([
-        Path("/home/kali/miniconda3/envs") / env_name / "bin" / "sage",
-        Path("/opt/conda/envs") / env_name / "bin" / "sage",
-    ])
     path_sage = _resolve_executable("sage")
     if path_sage is not None:
         candidates.append(path_sage)
