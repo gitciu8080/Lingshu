@@ -2150,7 +2150,7 @@ async def download_session_jsonl(
         ],
         "tool": "Lingshu / AgentScope",
         "agentscope_version": agentscope_version,
-        "note": "完整会话导出；question_numbers 需按竞赛题号补充；raw 字段保留数据库原始事件。",
+        "note": "完整会话导出；文件名直接使用会话 ID；raw 字段保留数据库原始事件。",
     }
 
     def lines():

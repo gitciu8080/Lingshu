@@ -2714,15 +2714,12 @@ function ConsoleApp() {
   };
   const downloadJsonl = async () => {
     if (!active) return;
-    const prefixInput = window.prompt("请输入竞赛题号（可填写多个，例如 01 或 01-03），用于生成文件名前缀：", "");
-    if (prefixInput === null) return;
-    const prefix = prefixInput;
     try {
-      const blob = await api.jsonl(active, prefix);
+      const blob = await api.jsonl(active);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `${prefix.trim() ? `${prefix.trim()}-` : ""}${active}.jsonl`;
+      anchor.download = `${active}.jsonl`;
       anchor.click();
       URL.revokeObjectURL(url);
       toast.success("完整会话 JSONL 已导出");

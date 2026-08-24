@@ -287,10 +287,9 @@ export const api = {
     }
     return response.blob();
   },
-  jsonl: async (id: string, prefix = "") => {
-    const query = prefix ? `?prefix=${encodeURIComponent(prefix)}` : "";
+  jsonl: async (id: string) => {
     const response = await fetch(
-      base + `/api/session/${encodeURIComponent(id)}/jsonl${query}`,
+      base + `/api/session/${encodeURIComponent(id)}/jsonl`,
       { headers: token ? { Authorization: `Bearer ${token}` } : {} },
     );
     if (!response.ok) {
