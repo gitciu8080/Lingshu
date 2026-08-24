@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>灵枢 Lingshu — 多智能体安全测试控制台</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0d1117;
+    --panel-bg: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --gold: #d2991d;
+    --purple: #a371f7;
+    --input-bg: #0d1117;
+    --success: #238636;
+    --danger: #da3633;
+    --warning: #9e6a03;
+  }
+  html, body { height: 100%; font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace; background: var(--bg); color: var(--text); overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+
+  /* ── 顶部标题栏 ── */
+  .header {
+    background: var(--panel-bg); border-bottom: 1px solid var(--border);
+    padding: 12px 24px; display: flex; align-items: center; justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .header h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.5px; }
+  .header h1 span { color: var(--accent); }
+  .header .status-dot { width: 10px; height: 10px; border-radius: 50%; margin-left: 12px; }
+  .header .status-dot.idle { background: var(--text-dim); }
+  .header .status-dot.running { background: var(--green); animation: pulse 1.5s infinite; }
+  .header .status-dot.error { background: var(--red); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  /* ── 主体双栏布局 ── */
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── 左侧面板 ── */
+  .sidebar {
+    width: 360px; flex-shrink: 0; background: var(--panel-bg);
+    border-right: 1px solid var(--border); display: flex; flex-direction: column;
+    overflow-y: auto; padding: 20px;
+  }
+  .sidebar h2 { font-size: 14px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .form-group { margin-bottom: 18px; }
+  .form-group label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 6px; font-weight: 600; }
+  .form-group input, .form-group textarea, .form-group select {
+    width: 100%; padding: 10px 12px; background: var(--input-bg); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-family: inherit; font-size: 13px;
+    outline: none; transition: border-color 0.2s;
+  }
+  .form-group input:focus, .form-group textarea:focus, .form-group select:focus { border-color: var(--accent); }
+  .form-group textarea { resize: vertical; min-height: 60px; }
+  .form-row { display: flex; gap: 12px; }
+  .form-row .form-group { flex: 1; }
+
+  /* 文件上传区域 */
+  .upload-zone {
+    border: 2px dashed var(--border); border-radius: 8px; padding: 24px;
+    text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s;
+    margin-bottom: 18px;
+  }
+  .upload-zone:hover, .upload-zone.dragover { border-color: var(--accent); background: rgba(88,166,255,0.05); }
+  .upload-zone .icon { font-size: 28px; margin-bottom: 8px; }
+  .upload-zone .hint { font-size: 12px; color: var(--text-dim); }
+  .upload-zone .file-name { font-size: 13px; color: var(--green); margin-top: 8px; font-weight: 600; }
+
+  /* 按钮 */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 10px 20px; border: none; border-radius: 6px; font-family: inherit;
+    font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s;
+  }
+  .btn-primary { background: var(--success); color: #fff; width: 100%; }
+  .btn-primary:hover { background: #2ea043; }
+  .btn-primary:disabled { background: var(--border); color: var(--text-dim); cursor: not-allowed; }
+  .btn-danger { background: var(--danger); color: #fff; }
+  .btn-danger:hover { background: #c62828; }
+  .btn-danger:disabled { background: var(--border); color: var(--text-dim); cursor: not-allowed; }
+  .btn-group { display: flex; gap: 10px; margin-top: 8px; }
+  .btn-group .btn { flex: 1; }
+
+  /* ── 右侧日志面板 ── */
+  .log-panel {
+    flex: 1; display: flex; flex-direction: column; overflow: hidden;
+    background: var(--bg);
+  }
+  .log-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px; background: var(--panel-bg); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .log-header h2 { font-size: 14px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; }
+  .log-controls { display: flex; gap: 8px; align-items: center; }
+  .log-controls button {
+    background: var(--border); color: var(--text); border: none; padding: 4px 10px;
+    border-radius: 4px; font-family: inherit; font-size: 11px; cursor: pointer;
+  }
+  .log-controls button:hover { background: #484f58; }
+  .log-controls button.active { background: var(--accent); color: #fff; }
+  /* ── Agent 分栏面板 ── */
+  .agent-panels {
+    flex: 1; display: grid; grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr; gap: 2px; background: var(--border);
+    overflow: hidden;
+  }
+  .agent-panel {
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--bg);
+  }
+  .agent-panel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 12px; font-size: 12px; font-weight: 700;
+    flex-shrink: 0; user-select: none;
+  }
+  .agent-panel-header.brain { background: rgba(163,113,247,0.15); color: var(--purple); }
+  .agent-panel-header.recon { background: rgba(63,185,80,0.15); color: var(--green); }
+  .agent-panel-header.attack { background: rgba(248,81,73,0.15); color: var(--red); }
+  .agent-panel-header.orchestrator { background: rgba(210,153,29,0.15); color: var(--gold); }
+  .agent-panel-header .agent-char-count {
+    font-size: 10px; font-weight: 400; opacity: 0.6;
+    margin-left: auto; margin-right: 8px;
+  }
+  .collapse-btn {
+    background: transparent; border: none; color: inherit;
+    cursor: pointer; font-size: 14px; width: 20px; padding: 0;
+    opacity: 0.6; transition: opacity 0.2s;
+  }
+  .collapse-btn:hover { opacity: 1; }
+  .agent-panel-body {
+    flex: 1; overflow-y: auto; margin: 0;
+    padding: 8px 12px; font-size: 13px; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word;
+    color: var(--text); background: var(--bg);
+    font-family: inherit; border: none; outline: none;
+  }
+  .agent-panel-body .thinking {
+    color: var(--text-dim); font-style: italic;
+  }
+  .agent-panel-body .system-msg {
+    color: var(--text-dim);
+  }
+  .agent-panel.collapsed .agent-panel-body { display: none; }
+
+  /* ── 响应式 ── */
+  @media (max-width: 800px) {
+    .agent-panels { grid-template-columns: 1fr; grid-template-rows: auto; }
+  }
+  .statusbar {
+    background: var(--panel-bg); border-top: 1px solid var(--border);
+    padding: 8px 24px; display: flex; align-items: center; gap: 24px;
+    font-size: 12px; flex-shrink: 0;
+  }
+  .statusbar .stat { display: flex; align-items: center; gap: 6px; }
+  .statusbar .stat-label { color: var(--text-dim); }
+  .statusbar .stat-value { color: var(--text); font-weight: 600; }
+  .copy-btn {
+    display: inline-flex; align-items: center; background: transparent;
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px;
+    cursor: pointer; font-size: 12px; transition: all 0.2s;
+  }
+  .copy-btn:hover { background: var(--border); border-color: var(--accent); }
+  .phase-indicator {
+    display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px;
+    border-radius: 12px; font-size: 11px; font-weight: 700;
+  }
+  .phase-indicator.planning { background: rgba(139,148,158,0.15); color: var(--text-dim); }
+  .phase-indicator.recon { background: rgba(63,185,80,0.15); color: var(--green); }
+  .phase-indicator.analysis { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .phase-indicator.exploitation, .phase-indicator.post_exploitation { background: rgba(248,81,73,0.15); color: var(--red); }
+  .phase-indicator.completed { background: rgba(63,185,80,0.2); color: var(--green); }
+  .phase-indicator.failed { background: rgba(248,81,73,0.2); color: var(--red); }
+  .phase-indicator.idle { background: rgba(139,148,158,0.1); color: var(--text-dim); }
+
+  /* 响应式 */
+  @media (max-width: 800px) {
+    .main { flex-direction: column; }
+    .sidebar { width: 100%; max-height: 45%; border-right: none; border-bottom: 1px solid var(--border); }
+  }
+
+  /* 滚动条 */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+</style>
+</head>
+<body>
+
+<!-- 顶部标题栏 -->
+<header class="header">
+  <div style="display:flex;align-items:center;">
+    <h1><span>灵枢</span> Lingshu</h1>
+    <div id="statusDot" class="status-dot idle" title="就绪"></div>
+  </div>
+  <div style="font-size:12px;color:var(--text-dim);">Multi-Agent Security Testing Console</div>
+</header>
+
+<!-- 主体 -->
+<div class="main">
+
+  <!-- 左侧面板 -->
+  <aside class="sidebar">
+    <h2>🎯 目标配置</h2>
+
+    <!-- 目标类型选择 -->
+    <div class="form-group">
+      <label>目标类型</label>
+      <div style="display:flex;gap:8px;margin-bottom:8px;">
+        <button id="targetTypeIp" class="btn" style="flex:1;background:var(--accent);color:#fff;font-size:12px;padding:6px;" onclick="switchTargetType('ip')">🌐 IP/域名</button>
+        <button id="targetTypeFile" class="btn" style="flex:1;background:var(--border);color:var(--text);font-size:12px;padding:6px;" onclick="switchTargetType('file')">📁 上传文件</button>
+      </div>
+    </div>
+
+    <!-- IP 输入模式 -->
+    <div id="ipInputGroup">
+      <div class="form-group">
+        <label>目标 IP / 域名 / IP:端口</label>
+        <input type="text" id="targetInput" placeholder="例: 192.168.1.100 或 10.0.0.1:8080" value="">
+      </div>
+    </div>
+
+    <!-- 文件上传模式 -->
+    <div id="fileInputGroup" style="display:none;">
+      <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+        <div class="icon">📦</div>
+        <div class="hint">点击或拖拽上传目标文件</div>
+        <div class="hint">（.zip / .tar.gz / .pcapng / .txt 等）</div>
+        <div class="file-name" id="uploadFileName" style="display:none;"></div>
+      </div>
+      <input type="file" id="fileInput" style="display:none;" onchange="handleFileSelect(event)">
+      <input type="hidden" id="filePathInput" value="">
+    </div>
+
+    <!-- 任务目标 -->
+    <div class="form-group">
+      <label>任务目标</label>
+      <textarea id="goalInput" placeholder="获取 Flag">获取 Flag</textarea>
+    </div>
+
+    <h2>⚙️ 模型设置</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>模型提供商</label>
+        <select id="providerSelect">
+          <option value="deepseek" selected>DeepSeek</option>
+          <option value="qwen">Qwen (llama.cpp)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>思考级别</label>
+        <select id="modelSelect">
+          <option value="Low">Low (快速)</option>
+          <option value="Min" selected>Min (默认)</option>
+          <option value="Max">Max (深度推理)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- 操作按钮 -->
+    <div class="btn-group">
+      <button class="btn btn-primary" id="startBtn" onclick="startMission()">▶ 开始任务</button>
+      <button class="btn btn-danger" id="cancelBtn" onclick="cancelMission()" disabled>⏹ 取消</button>
+    </div>
+    <div style="margin-top:12px;padding:10px;background:rgba(248,81,73,0.08);border-radius:6px;font-size:11px;color:var(--red);">
+      ⚠️ 仅限授权目标，所有操作将被审计记录
+    </div>
+  </aside>
+
+  <!-- 右侧日志面板 -->
+  <section class="log-panel">
+    <div class="log-header">
+      <h2>📋 Agent 日志</h2>
+      <div class="log-controls">
+        <button id="autoScrollBtn" class="active" onclick="toggleAutoScroll()">↓ 自动滚动</button>
+        <button onclick="clearLogs()">🗑 清屏</button>
+      </div>
+    </div>
+    <div class="agent-panels" id="agentPanels">
+      <div class="agent-panel" id="panel-brain">
+        <div class="agent-panel-header brain">
+          <span>🧠 Brain</span>
+          <span class="agent-char-count" id="chars-brain">0</span>
+          <button class="collapse-btn" onclick="togglePanel('brain')">−</button>
+        </div>
+        <pre class="agent-panel-body" id="output-brain"></pre>
+      </div>
+      <div class="agent-panel" id="panel-recon">
+        <div class="agent-panel-header recon">
+          <span>🔍 Recon</span>
+          <span class="agent-char-count" id="chars-recon">0</span>
+          <button class="collapse-btn" onclick="togglePanel('recon')">−</button>
+        </div>
+        <pre class="agent-panel-body" id="output-recon"></pre>
+      </div>
+      <div class="agent-panel" id="panel-attack">
+        <div class="agent-panel-header attack">
+          <span>⚔️ Attack</span>
+          <span class="agent-char-count" id="chars-attack">0</span>
+          <button class="collapse-btn" onclick="togglePanel('attack')">−</button>
+        </div>
+        <pre class="agent-panel-body" id="output-attack"></pre>
+      </div>
+      <div class="agent-panel" id="panel-orchestrator">
+        <div class="agent-panel-header orchestrator">
+          <span>🎯 Orchestrator</span>
+          <span class="agent-char-count" id="chars-orchestrator">0</span>
+          <button class="collapse-btn" onclick="togglePanel('orchestrator')">−</button>
+        </div>
+        <pre class="agent-panel-body" id="output-orchestrator"></pre>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<!-- 底部状态栏 -->
+<footer class="statusbar">
+  <div class="stat">
+    <span class="stat-label">阶段</span>
+    <span class="phase-indicator idle" id="phaseIndicator">IDLE</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">发现</span>
+    <span class="stat-value" id="findingsCount">0</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">攻击步骤</span>
+    <span class="stat-value" id="attackStepsCount">0</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Flag</span>
+    <span class="stat-value" id="flagStatus" style="color:var(--text-dim);">--</span>
+    <button id="copyFlagBtn" class="copy-btn" style="display:none;" onclick="copyFlag()" title="复制 Flag">📋</button>
+    <span id="copyFlagMsg" style="display:none;color:var(--green);font-size:11px;margin-left:4px;">已复制</span>
+  </div>
+  <div style="flex:1;"></div>
+  <div class="stat">
+    <span class="stat-label" id="timerLabel">00:00</span>
+  </div>
+</footer>
+
+<script>
+// ── 状态变量 ──
+let targetType = 'ip';
+let uploadedFilePath = '';
+let missionRunning = false;
+let autoScroll = true;
+let currentPhase = 'idle';
+let findingsCount = 0;
+let attackStepsCount = 0;
+let eventSource = null;
+let timerInterval = null;
+let missionStartTime = null;
+let agentCharCounts = { brain: 0, recon: 0, attack: 0, orchestrator: 0 };
+
+// ── 目标类型切换 ──
+function switchTargetType(type) {
+  targetType = type;
+  document.getElementById('targetTypeIp').style.background = type === 'ip' ? 'var(--accent)' : 'var(--border)';
+  document.getElementById('targetTypeIp').style.color = type === 'ip' ? '#fff' : 'var(--text)';
+  document.getElementById('targetTypeFile').style.background = type === 'file' ? 'var(--accent)' : 'var(--border)';
+  document.getElementById('targetTypeFile').style.color = type === 'file' ? '#fff' : 'var(--text)';
+  document.getElementById('ipInputGroup').style.display = type === 'ip' ? 'block' : 'none';
+  document.getElementById('fileInputGroup').style.display = type === 'file' ? 'block' : 'none';
+}
+
+// ── 文件处理 ──
+const uploadZone = document.getElementById('uploadZone');
+uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+uploadZone.addEventListener('dragleave', () => { uploadZone.classList.remove('dragover'); });
+uploadZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  uploadZone.classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) uploadFile(file);
+});
+
+function handleFileSelect(event) {
+  const file = event.target.files[0];
+  if (file) uploadFile(file);
+}
+
+async function uploadFile(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const resp = await fetch('/api/mission/upload', { method: 'POST', body: formData });
+    if (!resp.ok) {
+      const err = await resp.json();
+      appendSystemMsg(`上传失败: ${err.detail || resp.statusText}`);
+      return;
+    }
+    const data = await resp.json();
+    uploadedFilePath = data.path;
+    document.getElementById('filePathInput').value = data.path;
+    document.getElementById('uploadFileName').style.display = 'block';
+    document.getElementById('uploadFileName').textContent = `✅ ${data.filename} (${formatBytes(data.size)})`;
+    appendSystemMsg(`文件已上传: ${data.filename} (${formatBytes(data.size)})`);
+  } catch (e) {
+    appendSystemMsg(`上传错误: ${e.message}`);
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/(1024*1024)).toFixed(1) + ' MB';
+}
+
+// ── 任务控制 ──
+async function startMission() {
+  if (missionRunning) return;
+
+  const target = targetType === 'ip'
+    ? document.getElementById('targetInput').value.trim()
+    : uploadedFilePath || document.getElementById('filePathInput').value.trim();
+
+  if (!target) {
+    appendSystemMsg('❌ 请输入目标 IP/域名 或上传文件');
+    return;
+  }
+
+  const goal = document.getElementById('goalInput').value.trim() || '获取 Flag';
+  const provider = document.getElementById('providerSelect').value;
+  const model = document.getElementById('modelSelect').value;
+
+  setRunning(true);
+  clearLogs();
+
+  // 发起启动请求（同时打开 SSE 连接）
+  try {
+    const resp = await fetch('/api/mission/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target, goal, provider, model }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json();
+      appendSystemMsg(`❌ 启动失败: ${err.detail || resp.statusText}`);
+      setRunning(false);
+      return;
+    }
+
+    // 读取 SSE 流
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const event = JSON.parse(line.slice(6));
+            handleEvent(event);
+          } catch (e) {}
+        }
+      }
+    }
+  } catch (e) {
+    if (missionRunning) {
+      appendSystemMsg(`连接中断: ${e.message}`);
+    }
+  } finally {
+    setRunning(false);
+    stopTimer();
+  }
+}
+
+async function cancelMission() {
+  if (!missionRunning) return;
+  try {
+    await fetch('/api/mission/cancel', { method: 'POST' });
+    appendSystemMsg('⏹ 已发送取消请求');
+    setRunning(false);
+    stopTimer();
+  } catch (e) {
+    appendSystemMsg(`取消请求失败: ${e.message}`);
+  }
+}
+
+// ── SSE 事件处理 ──
+function handleEvent(event) {
+  switch (event.type) {
+    case 'mission_start':
+      appendSystemMsg(`🚀 任务启动: ${event.target} | ${event.goal} | ${event.provider}/${event.model}`);
+      startTimer();
+      break;
+
+    case 'text_start':
+      // 新文本块开始，可以在这里初始化
+      break;
+
+    case 'text_delta':
+      appendToAgent(event.agent, event.delta, false);
+      break;
+
+    case 'text_end':
+      break;
+
+    case 'thinking_delta':
+      appendToAgent(event.agent, event.delta, true);
+      break;
+
+    case 'thinking_start':
+      break;
+
+    case 'thinking_end':
+      break;
+
+    case 'message':
+      break;
+
+    case 'error':
+      appendSystemMsg(`❌ ${event.message}`);
+      break;
+
+    case 'mission_end':
+      appendSystemMsg('🏁 任务已结束');
+      setRunning(false);
+      stopTimer();
+      break;
+
+    case 'mission_cancelled':
+      appendSystemMsg(`⏹ ${event.message}`);
+      setRunning(false);
+      stopTimer();
+      break;
+  }
+}
+
+// ── Agent 分栏输出 ──
+const AGENT_ALIASES = {
+  brain: ['brain'],
+  recon: ['recon'],
+  attack: ['attack', 'analysis', 'cve_search', 'cve'],
+  orchestrator: ['orchestrator'],
+};
+
+function resolveAgent(agent) {
+  const lower = (agent || 'system').toLowerCase();
+  for (const [key, aliases] of Object.entries(AGENT_ALIASES)) {
+    if (aliases.some(a => lower.includes(a))) return key;
+  }
+  return 'orchestrator'; // fallback
+}
+
+function appendToAgent(agent, text, isThinking) {
+  const key = resolveAgent(agent);
+  const panelId = `output-${key}`;
+  const countId = `chars-${key}`;
+  const pre = document.getElementById(panelId);
+  if (!pre) return;
+
+  if (isThinking) {
+    const span = document.createElement('span');
+    span.className = 'thinking';
+    span.textContent = text;
+    pre.appendChild(span);
+  } else {
+    pre.appendChild(document.createTextNode(text));
+  }
+
+  agentCharCounts[key] += text.length;
+  const countEl = document.getElementById(countId);
+  if (countEl) countEl.textContent = agentCharCounts[key];
+
+  if (autoScroll) {
+    pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+function appendSystemMsg(text) {
+  // 系统消息输出到所有有内容的 panel 的最后一个
+  const keys = ['brain', 'recon', 'attack', 'orchestrator'];
+  for (const key of keys) {
+    const pre = document.getElementById(`output-${key}`);
+    if (pre && pre.textContent.trim()) {
+      const div = document.createElement('div');
+      div.className = 'system-msg';
+      div.textContent = text;
+      pre.appendChild(document.createTextNode('\n'));
+      pre.appendChild(div);
+      if (autoScroll) pre.scrollTop = pre.scrollHeight;
+      return;
+    }
+  }
+  // 如果没有活跃 panel，输出到 orchestator
+  const pre = document.getElementById('output-orchestrator');
+  if (pre) {
+    const div = document.createElement('div');
+    div.className = 'system-msg';
+    div.textContent = text;
+    pre.appendChild(div);
+    if (autoScroll) pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+function clearLogs() {
+  const keys = ['brain', 'recon', 'attack', 'orchestrator'];
+  for (const key of keys) {
+    const pre = document.getElementById(`output-${key}`);
+    if (pre) pre.innerHTML = '';
+    const countEl = document.getElementById(`chars-${key}`);
+    if (countEl) countEl.textContent = '0';
+    agentCharCounts[key] = 0;
+  }
+}
+
+function togglePanel(key) {
+  const panel = document.getElementById(`panel-${key}`);
+  const btn = panel.querySelector('.collapse-btn');
+  if (panel.classList.contains('collapsed')) {
+    panel.classList.remove('collapsed');
+    btn.textContent = '−';
+  } else {
+    panel.classList.add('collapsed');
+    btn.textContent = '+';
+  }
+}
+
+// ── UI 状态管理 ──
+function setRunning(running) {
+  missionRunning = running;
+  const startBtn = document.getElementById('startBtn');
+  const cancelBtn = document.getElementById('cancelBtn');
+  const dot = document.getElementById('statusDot');
+
+  startBtn.disabled = running;
+  cancelBtn.disabled = !running;
+  startBtn.textContent = running ? '⏳ 运行中...' : '▶ 开始任务';
+
+  dot.className = 'status-dot ' + (running ? 'running' : 'idle');
+}
+
+function toggleAutoScroll() {
+  autoScroll = !autoScroll;
+  const btn = document.getElementById('autoScrollBtn');
+  btn.classList.toggle('active', autoScroll);
+  btn.textContent = autoScroll ? '↓ 自动滚动' : '↓ 暂停滚动';
+  if (autoScroll) {
+    const keys = ['brain', 'recon', 'attack', 'orchestrator'];
+    for (const key of keys) {
+      const pre = document.getElementById(`output-${key}`);
+      if (pre) pre.scrollTop = pre.scrollHeight;
+    }
+  }
+}
+
+// ── 状态轮询 ──
+async function refreshState() {
+  try {
+    const resp = await fetch('/api/mission/state');
+    const state = await resp.json();
+    updateStatusBar(state);
+  } catch (e) {}
+}
+
+function updateStatusBar(state) {
+  const phase = state.phase || 'idle';
+  if (phase !== currentPhase) {
+    currentPhase = phase;
+    const indicator = document.getElementById('phaseIndicator');
+    indicator.textContent = phase.toUpperCase();
+    indicator.className = 'phase-indicator ' + phase;
+  }
+  if (state.findings) {
+    findingsCount = state.findings.length;
+    document.getElementById('findingsCount').textContent = findingsCount;
+  }
+  if (state.attack_chain) {
+    attackStepsCount = state.attack_chain.length;
+    document.getElementById('attackStepsCount').textContent = attackStepsCount;
+  }
+  if (state.flag) {
+    document.getElementById('flagStatus').textContent = '✅ ' + state.flag;
+    document.getElementById('flagStatus').style.color = 'var(--green)';
+    document.getElementById('copyFlagBtn').style.display = 'inline-flex';
+    window._currentFlag = state.flag;
+  }
+}
+
+// ── 计时器 ──
+function startTimer() {
+  missionStartTime = Date.now();
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(updateTimer, 1000);
+}
+
+function stopTimer() {
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+}
+
+function updateTimer() {
+  if (!missionStartTime) return;
+  const elapsed = Math.floor((Date.now() - missionStartTime) / 1000);
+  const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
+  const secs = (elapsed % 60).toString().padStart(2, '0');
+  document.getElementById('timerLabel').textContent = `${mins}:${secs}`;
+}
+
+// ── 复制 Flag ──
+async function copyFlag() {
+  const flag = window._currentFlag;
+  if (!flag) return;
+  try {
+    await navigator.clipboard.writeText(flag);
+    const msg = document.getElementById('copyFlagMsg');
+    msg.style.display = 'inline';
+    setTimeout(() => { msg.style.display = 'none'; }, 1500);
+  } catch(e) {
+    // 降级方案
+    const ta = document.createElement('textarea');
+    ta.value = flag; ta.style.position = 'fixed'; ta.opacity = 0;
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    const msg = document.getElementById('copyFlagMsg');
+    msg.style.display = 'inline';
+    setTimeout(() => { msg.style.display = 'none'; }, 1500);
+  }
+}
+
+// ── 初始化：定期刷新状态 ──
+setInterval(refreshState, 5000);
+
+// ── 页面加载时检查 ──
+refreshState();
+</script>
+</body>
+</html>

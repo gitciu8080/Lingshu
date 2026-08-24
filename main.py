@@ -50,7 +50,10 @@ from agent.Reserve import close_reverse_agent, create_reverse_agent  # 逆向分
 from agent.ScopeAuditor import create_scope_auditor_agent  # IP 授权审核 Agent
 from agent.experts import build_expert_assignments
 from Tools.Plan import push_plan_update  # 计划变更推送前端（SSE）
-from Tools.Report import generate_mission_pdf  # 任务总结 PDF 报告生成
+from Tools.Report import (
+    generate_mission_pdf,
+    prepare_mission_report_markdown,  # 报告 Markdown 规范化（同步自 origin/2026-08-12）
+)
 from Tools.ScopeRegistry import ScopeRegistry  # 动态授权范围注册表
 from Tools.KnowledgeBase import get_rag_service
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
@@ -536,8 +539,19 @@ async def run_summary_report(
                 content=f"{summary}\n\n> 自动降级原因：{summary_exc}",
             )
 
+    # 移植自 origin/2026-08-12：生成前先规范化 Summary Markdown，
+    # 缺失章节由后端确定性补齐，保证报告结构完整可归档。
+    summary, repaired_sections = prepare_mission_report_markdown(
+        summary,
+        mission.to_dict(),
+    )
     mission.summary = summary
-    mission.record("Summary", "conversation_summarized", message_count=len(messages))
+    mission.record(
+        "Summary",
+        "conversation_summarized",
+        message_count=len(messages),
+        repaired_sections=repaired_sections,
+    )
     if store is not None:
         store.save(mission)
         mission_data = mission.to_dict()

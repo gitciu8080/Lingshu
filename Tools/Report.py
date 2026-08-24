@@ -35,8 +35,8 @@ def prepare_mission_report_markdown(
     return normalize_report_markdown(summary, mission)
 
 # 灵枢·利刃 模板封面/封底要素（与 pentest-report-template skill 一致）
-_COVER_LOGO_URL = (
-    "https://bomeitongpicbed.oss-cn-guangzhou.aliyuncs.com/063e5a7a783845cd5fe381c807702783.jpg"
+_COVER_LOGO_URL = str(
+    Path(__file__).resolve().parents[1] / "frontend" / "lingshu-logo-black.png"
 )
 _COVER_AGENT_NAME = "灵枢·利刃 Agent"
 _COVER_TEAM_INTRO = (
@@ -106,12 +106,14 @@ def _register_pdf_fonts(pdfmetrics: Any, TTFont: Any, UnicodeCIDFont: Any) -> tu
     project_root = Path(__file__).resolve().parents[1]
     regular_candidates = [
         os.getenv("LINGSHU_PDF_FONT_REGULAR", ""),
+        str(project_root / "frontend" / "MSYH.TTC"),
         str(project_root / "webui" / "src" / "MSYH.TTC"),
         "/usr/share/fonts/truetype/msttcorefonts/msyh.ttf",
         "/usr/share/fonts/truetype/microsoft/YaHei.ttf",
     ]
     bold_candidates = [
         os.getenv("LINGSHU_PDF_FONT_BOLD", ""),
+        str(project_root / "frontend" / "MSYHBD.TTC"),
         str(project_root / "webui" / "src" / "MSYHBD.TTC"),
         "/usr/share/fonts/truetype/msttcorefonts/msyhbd.ttf",
         "/usr/share/fonts/truetype/microsoft/YaHeiBold.ttf",
@@ -487,7 +489,6 @@ def _generate_reportlab_pdf(
             ["会话日期", _cover_date_text()],
             ["目标名称", _cover_target_title()],
             ["任务目标", mission.get("goal") or "未记录"],
-            ["最终阶段", mission.get("phase") or "未知"],
             ["执行结果", "成功" if mission.get("success") is True else "失败/未完成"],
         ]
         table = Table(
@@ -510,10 +511,9 @@ def _generate_reportlab_pdf(
     def _template_cover() -> list[Any]:
         """模板观感封面：Logo + 元信息表 + 目标名 H1 + 「安全测试报告」H1 + 日期 + 署名。"""
         flow: list[Any] = []
-        logo = image_flowable(_COVER_LOGO_URL, _COVER_AGENT_NAME, max_width=42 * mm, max_height=42 * mm)
+        logo = image_flowable(_COVER_LOGO_URL, _COVER_AGENT_NAME, max_width=114 * mm, max_height=54 * mm)
         if logo is not None:
             flow.append(logo)
-            flow.append(Paragraph(_COVER_AGENT_NAME, caption))
             flow.append(Spacer(1, 4 * mm))
         flow.append(_cover_meta_table())
         flow.append(Spacer(1, 10 * mm))
@@ -549,10 +549,9 @@ def _generate_reportlab_pdf(
     def _back_cover() -> list[Any]:
         """模板观感封底：Logo + 团队介绍 + 版权。"""
         flow: list[Any] = [PageBreak()]
-        logo = image_flowable(_COVER_LOGO_URL, _COVER_AGENT_NAME, max_width=42 * mm, max_height=42 * mm)
+        logo = image_flowable(_COVER_LOGO_URL, _COVER_AGENT_NAME, max_width=114 * mm, max_height=72 * mm)
         if logo is not None:
             flow.append(logo)
-            flow.append(Paragraph(_COVER_AGENT_NAME, caption))
             flow.append(Spacer(1, 6 * mm))
         flow.append(Paragraph(_COVER_TEAM_INTRO, body.clone("BackIntro", alignment=TA_CENTER)))
         flow.append(Spacer(1, 12 * mm))

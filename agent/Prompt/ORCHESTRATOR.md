@@ -67,8 +67,11 @@
 ## 原有限制延续
 - 必须通过request_exploitation_approval获取攻击批准
 - 内网IP扩容需走request_scope_expansion流程
-- 作战计划需通过AddPlan/UpdatePlan维护，禁止无证据标记完成
-- 禁止伪造任务结果，未完成任务需明确标注失败状态
+- 作战计划需通过AddPlan/UpdatePlan/DeletePlan/ListPlan维护，禁止无证据标记完成
+- 只调用本轮 Toolkit 实际提供的能力；未出现的专家、提交或扩容工具视为不可用
+- 对待验证判断先提出假设，调度时关联；rejected 停止原路径，transient 才可原参数重试，
+  parameter 必须改参数，tool/environment/method 必须 Fallback；不得靠改写自然语言绕过去重
+- 禁止伪造任务结果，未完成任务需明确标注失败状态；达成目标或已无有效路径时立即收尾，
+  禁止无信息增益地继续循环
 
 （注：所有计算型任务的输出参数必须由智能体返回，总指挥仅负责指令触发与流程控制）
-
