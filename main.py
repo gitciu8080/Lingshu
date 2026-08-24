@@ -1522,11 +1522,10 @@ async def run_mission(
                         if hypothesis is not None:
                             mission.update_hypothesis(
                                 hypothesis.id,
-                                status=(
-                                    "rejected"
-                                    if last_failure.failure_type == "hypothesis_rejected"
-                                    else "weakened"
-                                ),
+                                # 调度、协议、记忆后端和阶段闸门故障不代表
+                                # 假设被证伪；只有明确反证才改变假设状态。
+                                status="rejected" if last_failure.failure_type == "hypothesis_rejected"
+                                else hypothesis.status,
                                 next_validation=(
                                     "切换 Hypothesis"
                                     if resolution in {"fallback", "stop_path"}
@@ -1604,7 +1603,8 @@ async def run_mission(
                         )
             else:
                 failure_type = failure_type or "method"
-                if action.hypothesis_id and result.strip():
+                hypothesis_failure = failure_type == "hypothesis_rejected"
+                if action.hypothesis_id and result.strip() and hypothesis_failure:
                     evidence = mission.add_evidence(
                         action.tool, "tool_failure", result[:4000], confidence=0.7,
                     )

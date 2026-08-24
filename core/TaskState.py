@@ -185,6 +185,7 @@ _HYPOTHESIS_STATUSES = {
 }
 _FAILURE_TYPES = {
     "transient", "parameter", "tool", "environment", "method", "hypothesis_rejected",
+    "agent_unavailable", "protocol_error", "memory_backend_error", "phase_blocked",
 }
 
 
@@ -698,13 +699,11 @@ class MissionState:
             )
             self.failed_paths.append(failed)
             self.failed_paths = self.failed_paths[-120:]
-            if action.hypothesis_id:
+            if action.hypothesis_id and failure_type == "hypothesis_rejected":
                 try:
-                    next_status = "rejected" if failure_type == "hypothesis_rejected" else "weakened"
-                    next_confidence = 0.0 if next_status == "rejected" else None
                     self.update_hypothesis(
-                        action.hypothesis_id, status=next_status,
-                        confidence=next_confidence, action_id=action.id,
+                        action.hypothesis_id, status="rejected",
+                        confidence=0.0, action_id=action.id,
                     )
                 except ValueError:
                     pass

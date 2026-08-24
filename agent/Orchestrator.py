@@ -92,7 +92,11 @@ def create_orchestrator_agent(
         msg = _check_steering()
         if msg is not None:
             return msg
-        if mission.phase not in {Phase.RECON, Phase.ANALYSIS, Phase.EXPLOITATION}:
+        # 本地附件分析属于 Recon 能力，即使任务已进入 post_exploitation
+        # 也允许回补；远程利用仍由 Attack 的能力闸门控制。
+        if mission.phase not in {
+            Phase.RECON, Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION,
+        }:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Recon"
         attempt = mission.begin_attempt(
             "recon",
@@ -100,7 +104,9 @@ def create_orchestrator_agent(
             mission.target,
             {"focus": focus, "hypothesis_id": hypothesis_id},
         )
-        if mission.phase != Phase.RECON:
+        # post_exploitation 中的本地补侦不回退任务阶段，避免完成 Recon 后
+        # 远程 Attack 因阶段变成 RECON 而被错误拒绝。
+        if mission.phase != Phase.RECON and mission.phase != Phase.POST_EXPLOITATION:
             mission.transition(Phase.RECON, f"需要补充侦察: {focus}")
         mission.record("Orchestrator", "dispatch_recon", focus=focus)
         store.checkpoint(mission, "recon_dispatch_before")
@@ -272,10 +278,21 @@ def create_orchestrator_agent(
         store.save(mission)
         attack_knowledge = ""
         if knowledge_context_provider is not None:
-            attack_knowledge = await knowledge_context_provider(
-                "Attack",
-                f"本轮目标：{objective[:700]}；服务：{service[:300]}；CVE：{cve[:80]}",
-            )
+            try:
+                attack_knowledge = await knowledge_context_provider(
+                    "Attack",
+                    f"本轮目标：{objective[:700]}；服务：{service[:300]}；CVE：{cve[:80]}",
+                )
+            except UnicodeDecodeError as exc:
+                mission.finish_attempt(attempt, "failure", f"QueryMemory 后端损坏: {exc}")
+                mission.record("Orchestrator", "memory_backend_error", error=str(exc))
+                store.save(mission)
+                return f"[QueryMemory 后端错误] {exc}。不削弱当前 Hypothesis，请改用无记忆上下文重试。"
+            except KeyError as exc:
+                mission.finish_attempt(attempt, "failure", f"知识上下文协议字段缺失: {exc}")
+                mission.record("Orchestrator", "knowledge_protocol_error", missing_field=str(exc))
+                store.save(mission)
+                return f"[协议错误] 知识上下文缺少字段 {exc}，未执行 Attack。"
         knowledge_section = (
             "\n\nKnowledge Context（本地知识库参考，不是当前目标事实/证据）：\n"
             f"{attack_knowledge}\n"
@@ -298,6 +315,11 @@ def create_orchestrator_agent(
                 on_event=event_callback,
             )
             report = result.get_text_content() or "[Attack] 未返回文本结果"
+            if report.strip().strip("\"'") == "task_overview":
+                mission.finish_attempt(attempt, "failure", "Attack 响应缺少结构化 task_overview")
+                mission.record("Orchestrator", "attack_protocol_error", missing_field="task_overview")
+                store.save(mission)
+                return "[Attack 协议错误] 响应仅返回 task_overview，专家本轮不可用；不削弱当前 Hypothesis。"
         except AgentMaxIterationsError as exc:
             # 超迭代：写入失败步骤（保审计 + 供 P3 去重），返回明确结果
             mission.add_attack_step(objective, f"[Attack 超迭代] {exc}，本轮未产出有效结果")
@@ -307,6 +329,11 @@ def create_orchestrator_agent(
                 f"[Attack 超迭代] {exc}。"
                 f"请基于已有证据调整 objective 或补充侦察，避免重复调度。"
             )
+        except KeyError as exc:
+            mission.finish_attempt(attempt, "failure", f"Attack 响应协议字段缺失: {exc}")
+            mission.record("Orchestrator", "attack_protocol_error", missing_field=str(exc))
+            store.save(mission)
+            return f"[Attack 协议错误] 缺少响应字段 {exc}，专家本轮不可用；不削弱当前 Hypothesis。"
         except asyncio.CancelledError:
             # 不在此处消费 steering：统一由主循环捕获 CancelledError 后注入。
             mission.finish_attempt(
