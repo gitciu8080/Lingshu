@@ -53,6 +53,8 @@ def create_orchestrator_agent(
     offloader=None,
     context_config=None,
     state=None,
+    network_recon_agent: Agent | None = None,
+    artifact_recon_agent: Agent | None = None,
 ) -> Agent:
     steering = steering_state if steering_state is not None else {"pending": None, "processed": False, "queue": []}
     steering.setdefault("queue", [])
@@ -69,33 +71,64 @@ def create_orchestrator_agent(
             raise asyncio.CancelledError()
         return None
 
-    async def dispatch_recon(focus: str = "全面但低影响的信息收集") -> str:
+    async def dispatch_recon(
+        focus: str = "全面但低影响的信息收集",
+        recon_type: str = "auto",
+    ) -> str:
         """派遣 Recon 对本次授权目标进行信息收集。
 
         Args:
             focus: 本轮需要补齐的具体信息或扫描重点。
+            recon_type: 选择侦察智能体类型：
+                - "auto"（默认）：沿用任务开始时按目标类型路由的侦察智能体；
+                - "artifact": 文件静态研判（ArtifactTriage），适合分析工作目录内的文件、归档、图片、配置等；
+                - "network": 网络侦察（NetworkRecon），适合对已发现的 IP/域名/端口做主动探测与扫描。
+                当文件 triage 发现 IP、域名、URL 等网络线索时，应改用 "network" 派遣网络侦察。
         """
         # 入口检查：是否有待处理的用户指令（无需等待子 Agent 取消）
         msg = _check_steering()
         if msg is not None:
             return msg
+        # 按 recon_type 解析本轮实际派遣的侦察智能体
+        if recon_type == "network":
+            selected_agent = network_recon_agent
+            finding_source = "NetworkRecon"
+            dispatch_prefix = "[NetworkRecon] "
+        elif recon_type == "artifact":
+            selected_agent = artifact_recon_agent
+            finding_source = "ArtifactTriage"
+            dispatch_prefix = "[ArtifactTriage] "
+        elif recon_type == "auto":
+            selected_agent = recon_agent
+            finding_source = "Recon"
+            dispatch_prefix = "[Recon] "
+        else:
+            return "[拒绝] recon_type 仅支持 auto / artifact / network"
+        if selected_agent is None:
+            return (
+                f"[不可用] 本任务未配置 recon_type={recon_type} 对应的侦察智能体，"
+                "请改用其他 recon_type 或调整侦察重点。"
+            )
         if mission.phase not in {Phase.RECON, Phase.ANALYSIS, Phase.EXPLOITATION}:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Recon"
         if mission.phase != Phase.RECON:
             mission.transition(Phase.RECON, f"需要补充侦察: {focus}")
-        mission.record("Orchestrator", "dispatch_recon", focus=focus)
+        mission.record(
+            "Orchestrator", "dispatch_recon", focus=focus, recon_type=recon_type,
+            agent=getattr(selected_agent, "name", finding_source),
+        )
         store.checkpoint(mission, "recon_dispatch_before")
         try:
             result = await run_interruptible_agent_reply(
-                recon_agent,
+                selected_agent,
                 UserMsg(
                     name="Orchestrator",
                     content=f"授权目标：{mission.target}\n本轮重点：{focus}\n充分使用工具收集证据。当所有必要信息已获取且无更多可探索方向时，输出最终报告。",
                 ),
-                prefix="[Recon] ",
+                prefix=dispatch_prefix,
                 on_event=event_callback,
             )
-            report = result.get_text_content() or "[Recon] 未返回文本结果"
+            report = result.get_text_content() or f"{dispatch_prefix.strip()} 未返回文本结果"
         except AgentMaxIterationsError as exc:
             mission.record("Orchestrator", "recon_max_iters_exceeded", error=str(exc))
             store.save(mission)
@@ -120,10 +153,10 @@ def create_orchestrator_agent(
                 f"[Recon 异常] {type(exc).__name__}: {exc}。"
                 f"请检查工具可用性后重试，或调整 focus 范围重新调度。"
             )
-        mission.add_finding("Recon", report)
+        mission.add_finding(finding_source, report)
         mission.transition(Phase.ANALYSIS, "收到新的侦察证据")
         store.checkpoint(mission, "recon_report_received")
-        return f"[Recon 侦察报告]\n{report}"
+        return f"{dispatch_prefix.strip()} 侦察报告\n{report}"
 
     async def dispatch_attack(
         target_info: str,

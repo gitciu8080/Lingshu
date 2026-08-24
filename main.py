@@ -1389,36 +1389,48 @@ async def run_mission(
         )
 
         # ── 6. Recon / Triage 路由 ──
-        # 按目标类型选择侦察方式：
+        # 首次侦察按目标类型路由：
         #   network    → 端口/服务/指纹扫描（scoped_shell）
         #   file/归档  → 文件静态研判（triage）
+        # 两类侦察 Agent 均预创建：初始规划用路由选中的那个；进入
+        # Orchestrator 循环后，dispatch_recon 可由 Orchestrator 按
+        # recon_type 在 ArtifactTriage 与 NetworkRecon 之间自主选择——
+        # 例如文件 triage 发现 IP/域名等网络线索时，可改派网络侦察，
+        # 而不是被锁死在初始路由的那一个侦察智能体上。
+        # 初始路由选中的侦察智能体沿用 "recon" 会话分区（兼容旧恢复逻辑），
+        # 另一个使用独立分区，避免 offload 产物互相覆盖。
         if target_spec.kind == "network":
-            recon = create_network_recon_agent(
-                light_model, target_str, project_dir, runtime.command_timeout,
-                scope_registry=scope_registry,
-                max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
-                offloader=workspace,
-                context_config=context_config,
-                state=build_role_agent_state(mission_id, "recon"),
-                artifact_root=ws_root,
-                executor=executor,
-                mission=mission,
-                store=store,
-                event_callback=event_callback,
-            )
+            network_state = build_role_agent_state(mission_id, "recon")
+            artifact_state = build_role_agent_state(mission_id, "recon_artifact")
         else:
-            recon = create_artifact_triage_agent(
-                light_model, workdir, project_dir, runtime.command_timeout,
-                max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
-                offloader=workspace,
-                context_config=context_config,
-                state=build_role_agent_state(mission_id, "recon"),
-                artifact_root=ws_root,
-                executor=executor,
-                mission=mission,
-                store=store,
-                event_callback=event_callback,
-            )
+            artifact_state = build_role_agent_state(mission_id, "recon")
+            network_state = build_role_agent_state(mission_id, "recon_network")
+        network_recon = create_network_recon_agent(
+            light_model, target_str, project_dir, runtime.command_timeout,
+            scope_registry=scope_registry,
+            max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
+            offloader=workspace,
+            context_config=context_config,
+            state=network_state,
+            artifact_root=ws_root,
+            executor=executor,
+            mission=mission,
+            store=store,
+            event_callback=event_callback,
+        )
+        artifact_recon = create_artifact_triage_agent(
+            light_model, workdir, project_dir, runtime.command_timeout,
+            max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
+            offloader=workspace,
+            context_config=context_config,
+            state=artifact_state,
+            artifact_root=ws_root,
+            executor=executor,
+            mission=mission,
+            store=store,
+            event_callback=event_callback,
+        )
+        recon = network_recon if target_spec.kind == "network" else artifact_recon
 
         # ── 7. Recon 与规划合并：先侦察后制定计划 ──
         # 把原 Brain 的战略规划职责并入 Recon（Recon 现已携带 SubmitPlan 工具，
@@ -1633,6 +1645,8 @@ async def run_mission(
             recon_agent=recon,
             attack_agent=attack,
             reserve_agent=reserve,
+            network_recon_agent=network_recon,
+            artifact_recon_agent=artifact_recon,
             mission=mission,
             store=store,
             event_callback=event_callback,
