@@ -25,18 +25,20 @@ import {
   Send,
   ShieldAlert,
   RotateCcw,
+  RefreshCw,
   Sparkles,
   Square,
   Sun,
   Swords,
   Terminal,
   Trash2,
+  Wrench,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { accountStream, api, auth, Event, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, Session, stream, SystemUser } from "./api";
+import { accountStream, api, auth, Event, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, Session, stream, SystemUser, ToolStatus } from "./api";
 import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
 
@@ -1854,6 +1856,89 @@ function PlanPanel({ mission, phase }: { mission: Mission; phase?: string }) {
   );
 }
 
+const TOOL_STATUS_LABELS: Record<string, string> = {
+  available: "可用",
+  missing: "缺失",
+  degraded: "降级",
+  disabled: "已禁用",
+};
+
+function Tooling({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [tools, setTools] = useState<ToolStatus[]>([]),
+    [counts, setCounts] = useState<Record<string, number>>({}),
+    [loading, setLoading] = useState(false),
+    [error, setError] = useState("");
+  const load = async (refresh = false) => {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await api.toolingCatalog(refresh);
+      setTools(Array.isArray(result.tools) ? result.tools : []);
+      setCounts(result.counts || {});
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (open) void load();
+  }, [open]);
+  const grouped = useMemo(() => {
+    const groups = new Map<string, ToolStatus[]>();
+    tools.forEach((tool) => {
+      const category = tool.category || "other";
+      groups.set(category, [...(groups.get(category) || []), tool]);
+    });
+    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [tools]);
+  return (
+    <Dialog.Root open={open} onOpenChange={(v) => !v && onClose()}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="overlay" />
+        <Dialog.Content className="knowledge-drawer tooling-drawer">
+          <header>
+            <div><Wrench size={18} /><b>系统工具状态</b></div>
+            <button onClick={onClose} aria-label="关闭工具状态"><X size={18} /></button>
+          </header>
+          <div className="tooling-summary">
+            <span className="ok">可用 {counts.available || 0}</span>
+            <span className="warn">降级 {counts.degraded || 0}</span>
+            <span className="bad">缺失 {counts.missing || 0}</span>
+            <span>禁用 {counts.disabled || 0}</span>
+          </div>
+          {error && <p className="error-note">工具状态读取失败：{error}</p>}
+          <button className="quiet-button full" onClick={() => void load(true)} disabled={loading}>
+            <RefreshCw size={13} className={loading ? "spin" : ""} />
+            {loading ? "正在重新探测…" : "重新探测工具"}
+          </button>
+          <div className="tooling-list">
+            {grouped.map(([category, items]) => (
+              <section key={category}>
+                <h3>{category.toUpperCase()}</h3>
+                {items.map((tool) => {
+                  const state = tool.status || "missing";
+                  return (
+                    <article className="tooling-row" key={tool.id}>
+                      <span className={`tooling-dot ${state}`} />
+                      <div>
+                        <header><b>{tool.id}</b><em className={state}>{TOOL_STATUS_LABELS[state] || state}</em></header>
+                        <small>{tool.command || "未登记命令"}{tool.version ? ` · ${tool.version}` : ""}</small>
+                        <p>{tool.error || tool.description || "无附加说明"}</p>
+                      </div>
+                    </article>
+                  );
+                })}
+              </section>
+            ))}
+            {!loading && !tools.length && <p className="empty-note">暂无工具目录数据</p>}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 function Knowledge({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [status, setStatus] = useState<Record<string, unknown>>({}),
     [query, setQuery] = useState(""),
@@ -2135,6 +2220,7 @@ function ConsoleApp() {
     ),
     [search, setSearch] = useState(""),
     [knowledge, setKnowledge] = useState(false),
+    [tooling, setTooling] = useState(false),
     [mobileIntel, setMobileIntel] = useState(false),
     [missionContextOpen, setMissionContextOpen] = useState(false),
     [rerunOpen, setRerunOpen] = useState(false),
@@ -2938,8 +3024,18 @@ function ConsoleApp() {
               <button
                 className="icon-button"
                 onClick={() => setKnowledge(true)}
+                title="查看本地知识库"
+                aria-label="查看本地知识库"
               >
                 <Database size={17} />
+              </button>
+              <button
+                className="icon-button"
+                onClick={() => setTooling(true)}
+                title="查看系统工具状态"
+                aria-label="查看系统工具状态"
+              >
+                <Wrench size={16} />
               </button>
               {active && (
                 <button
@@ -3156,6 +3252,7 @@ function ConsoleApp() {
         )}
       </div>
       <Knowledge open={knowledge} onClose={() => setKnowledge(false)} />
+      <Tooling open={tooling} onClose={() => setTooling(false)} />
       <MissionContextDialog
         open={missionContextOpen}
         onOpenChange={setMissionContextOpen}

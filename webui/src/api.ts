@@ -79,6 +79,21 @@ export type ModelProviderOption = {
   api_style: string;
   builtin: boolean;
 };
+export type ToolStatus = {
+  id: string;
+  category?: string;
+  kind?: string;
+  status?: string;
+  command?: string;
+  roles?: string[];
+  risk?: string;
+  approval_required?: boolean;
+  description?: string;
+  usage_hint?: string;
+  alternatives?: string[];
+  version?: string;
+  error?: string;
+};
 const base = import.meta.env.VITE_API_BASE_URL || "";
 let token = localStorage.getItem("lingshu_token") || "";
 export const auth = {
@@ -300,6 +315,10 @@ export const api = {
   },
   knowledgeStatus: () =>
     request<Record<string, unknown>>("/api/knowledge/status"),
+  toolingCatalog: (refresh = false) =>
+    request<{ tools: ToolStatus[]; counts: Record<string, number> }>(
+      `/api/tooling/catalog${refresh ? "?refresh=true" : ""}`,
+    ),
   knowledgeSearch: (query: string) =>
     request<{ results: { score: number; source: string; snippet: string }[] }>(
       "/api/knowledge/search",

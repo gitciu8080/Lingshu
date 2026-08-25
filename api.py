@@ -981,23 +981,31 @@ async def antsword_status(current_user: dict = Depends(get_current_user)):
 
 
 @app.get("/api/tooling/catalog")
-async def tooling_catalog(current_user: dict = Depends(get_current_user)):
-    """返回已登录用户可查看的可用能力，不暴露宿主机绝对路径。"""
+async def tooling_catalog(
+    refresh: bool = False,
+    current_user: dict = Depends(get_current_user),
+):
+    """返回登录用户可查看的完整工具健康状态，不暴露宿主机绝对路径。"""
     del current_user
-    items = await asyncio.to_thread(get_tool_catalog().snapshot)
+    items = await asyncio.to_thread(
+        get_tool_catalog().snapshot, refresh=refresh, include_version=True,
+    )
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item["status"]] = counts.get(item["status"], 0) + 1
     return {
         "tools": [
             {
                 key: item[key]
                 for key in (
                     "id", "category", "kind", "status", "command", "roles",
-                    "risk", "approval_required", "description", "usage_hint",
-                    "alternatives",
+                    "risk", "approval_required", "description", "usage_hint", "alternatives",
+                    "version", "error",
                 )
             }
             for item in items
-            if item["status"] == "available"
         ],
+        "counts": counts,
     }
 
 # ── JWT 认证中间件 ──
