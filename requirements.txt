@@ -235,7 +235,7 @@ reportlab==4.5.1
 requests==2.34.2
 requests-oauthlib==2.0.0
 requests-toolbelt==1.0.0
-rich==13.9.4
+rich>=14.0.0
 rich-rst==2.1.0
 ripgrep==15.1.0
 ROPGadget==7.7
