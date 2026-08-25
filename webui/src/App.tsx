@@ -1922,7 +1922,11 @@ function Tooling({ open, onClose }: { open: boolean; onClose: () => void }) {
                     <article className="tooling-row" key={tool.id}>
                       <span className={`tooling-dot ${state}`} />
                       <div>
-                        <header><b>{tool.id}</b><em className={state}>{TOOL_STATUS_LABELS[state] || state}</em></header>
+                        <header>
+                          <b>{tool.id}</b>
+                          {tool.kind?.startsWith("mcp_") && <span className="tooling-kind">MCP · {tool.kind.replace("mcp_", "")}</span>}
+                          <em className={state}>{TOOL_STATUS_LABELS[state] || state}</em>
+                        </header>
                         <small>{tool.command || "未登记命令"}{tool.version ? ` · ${tool.version}` : ""}</small>
                         <p>{tool.error || tool.description || "无附加说明"}</p>
                       </div>

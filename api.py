@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import subprocess
 import time
@@ -980,6 +981,124 @@ async def antsword_status(current_user: dict = Depends(get_current_user)):
     return await get_antsword_service().status()
 
 
+def _mcp_command_path(config_env: str, names: tuple[str, ...]) -> str | None:
+    """解析 MCP 启动器，但仅供健康检查使用，绝不向前端返回绝对路径。"""
+    configured = os.getenv(config_env, "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+        return None
+    for name in names:
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+        candidate = Path.home() / ".local" / "bin" / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+    return None
+
+
+def _mcp_preflight_status() -> list[dict[str, Any]]:
+    """返回 stdio MCP 的无副作用预检结果。
+
+    不在状态页启动 IDA/GDB 子进程，避免一次查看面板就创建数据库或调试会话；
+    真正的 MCP 握手仍在对应专家被调度时完成并由会话事件记录错误。
+    """
+    ida_command = _mcp_command_path("LINGSHU_IDALIB_MCP_COMMAND", ("idalib-mcp",))
+    ida_dir_value = os.getenv("LINGSHU_IDA_DIR", os.getenv("IDADIR", "")).strip()
+    ida_dir = Path(ida_dir_value).expanduser() if ida_dir_value else None
+    if ida_dir is None:
+        for name in ("idat", "idat64", "ida"):
+            discovered = shutil.which(name)
+            if discovered:
+                ida_dir = Path(discovered).resolve().parent
+                break
+    ida_binary_ready = bool(
+        ida_dir and any((ida_dir / name).is_file() for name in ("idat", "idat64", "ida"))
+    )
+    ida_errors = []
+    if not ida_command:
+        ida_errors.append("未找到 idalib-mcp；请设置 LINGSHU_IDALIB_MCP_COMMAND 或加入 PATH")
+    if not ida_binary_ready:
+        ida_errors.append("未找到有效 IDA 目录；请设置 LINGSHU_IDA_DIR")
+
+    gdb_command = _mcp_command_path("LINGSHU_GDB_MCP_COMMAND", ("gdb-multi-mcp",))
+    uvx_command = _mcp_command_path("LINGSHU_UVX_COMMAND", ("uvx",))
+    gdb_binary = shutil.which("gdb")
+    gdb_errors = []
+    if not gdb_binary:
+        gdb_errors.append("未找到 gdb 可执行文件")
+    if not gdb_command and not uvx_command:
+        gdb_errors.append("未找到 gdb-multi-mcp 或 uvx")
+    gdb_fallback = bool(
+        (gdb_command and Path(gdb_command).name.lower().startswith("uvx"))
+        or (not gdb_command and uvx_command)
+    )
+
+    return [
+        {
+            "id": "ida-lib-mcp",
+            "category": "mcp",
+            "kind": "mcp_stdio",
+            "status": "available" if not ida_errors else "missing",
+            "command": "stdio · idalib-mcp",
+            "roles": ["reserve"],
+            "risk": "local_analysis",
+            "approval_required": False,
+            "description": "IDA Lib MCP：为 Reserve 提供只读反编译、反汇编和 IDB 会话能力。",
+            "usage_hint": "调度 Reserve 时再建立 stdio MCP 连接。",
+            "alternatives": ["objdump", "readelf", "rabin2", "radare2"],
+            "version": "启动前检查通过" if not ida_errors else "",
+            "error": "；".join(ida_errors),
+        },
+        {
+            "id": "gdb-multi-mcp",
+            "category": "mcp",
+            "kind": "mcp_stdio",
+            "status": "missing" if gdb_errors else "degraded" if gdb_fallback else "available",
+            "command": "stdio · gdb-multi-mcp" if gdb_command else "stdio · uvx gdb-multi-mcp",
+            "roles": ["reserve"],
+            "risk": "local_analysis",
+            "approval_required": False,
+            "description": "GDB Multi MCP：为 Reserve 提供本地二进制和核心转储调试能力。",
+            "usage_hint": "优先使用已安装的 gdb-multi-mcp；uvx 仅作为离线缓存回退。",
+            "alternatives": ["ida-lib-mcp", "objdump", "readelf"],
+            "version": "启动前检查通过" if not gdb_errors and not gdb_fallback else "uvx 离线回退",
+            "error": "；".join(
+                [*gdb_errors, *( ["未发现已安装的 gdb-multi-mcp；运行时依赖 uvx 本地缓存"] if gdb_fallback else [])],
+            ),
+        },
+    ]
+
+
+async def _mcp_health_snapshot() -> list[dict[str, Any]]:
+    """合并 stdio 预检与 AntSword HTTP MCP 的实时就绪状态。"""
+    items = await asyncio.to_thread(_mcp_preflight_status)
+    antsword = await get_antsword_service().status()
+    ready = bool(antsword.get("ready"))
+    last_error = str(antsword.get("last_error") or "")
+    items.append({
+        "id": "antsword-mcp",
+        "category": "mcp",
+        "kind": "mcp_http",
+        "status": "available" if ready else "degraded",
+        "command": "HTTP/SSE · AntSword MCP",
+        "roles": ["attack"],
+        "risk": "exploitation",
+        "approval_required": True,
+        "description": "API 托管的 AntSword MCP；仅在发现 WebShell 证据后由 Attack 按需连接。",
+        "usage_hint": "服务未就绪时检查 AntSword 启动器、DISPLAY/Xvfb 和 WorkDir/antsword-mcp.log。",
+        "alternatives": [],
+        "version": "服务已就绪" if ready else "服务未就绪",
+        "error": last_error or ("端口服务未监听" if not ready else ""),
+    })
+    return items
+
+
 @app.get("/api/tooling/catalog")
 async def tooling_catalog(
     refresh: bool = False,
@@ -990,6 +1109,7 @@ async def tooling_catalog(
     items = await asyncio.to_thread(
         get_tool_catalog().snapshot, refresh=refresh, include_version=True,
     )
+    items.extend(await _mcp_health_snapshot())
     counts: dict[str, int] = {}
     for item in items:
         counts[item["status"]] = counts.get(item["status"], 0) + 1
