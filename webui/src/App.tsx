@@ -1094,7 +1094,7 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
     [target, setTarget] = useState(""),
     [files, setFiles] = useState<File[]>([]),
     [submitting, setSubmitting] = useState(false),
-    [goal, setGoal] = useState("获取 Flag"),
+    [goal, setGoal] = useState("获取 Flag / 执行任务书内容 / 测试目标"),
     [provider, setProvider] = useState(""),
     [model, setModel] = useState("Min"),
     [qwenToolMode, setQwenToolMode] = useState("simple");
@@ -1257,7 +1257,7 @@ function RerunMission({
 }) {
   const providers = useModelProviders();
   const [target, setTarget] = useState(""),
-    [goal, setGoal] = useState("获取 Flag"),
+    [goal, setGoal] = useState("获取 Flag / 执行任务书内容 / 测试目标"),
     [provider, setProvider] = useState("deepseek"),
     [model, setModel] = useState("Min"),
     [qwenToolMode, setQwenToolMode] = useState("simple"),
@@ -1268,7 +1268,7 @@ function RerunMission({
   useEffect(() => {
     if (!open || !source) return;
     setTarget(String(source.target || ""));
-    setGoal(String(source.goal || "获取 Flag / 执行任务书内容 / 测试目标"));
+    setGoal(String(source.goal || "获取 Flag / 执行任务书内容 / 测试目标 / 执行任务书内容 / 测试目标"));
     setProvider(String(source.provider || "deepseek"));
     setModel(String(source.model || "Min"));
     setWithContext(true);
@@ -1314,7 +1314,7 @@ function RerunMission({
     try {
       const result = await api.create({
         target: target.trim(),
-        goal: goal.trim() || "获取 Flag / 执行任务书内容 / 测试目标",
+        goal: goal.trim() || "获取 Flag / 执行任务书内容 / 测试目标 / 执行任务书内容 / 测试目标",
         provider,
         model,
         ...(provider === "qwen" ? { qwen_tool_call_mode: qwenToolMode } : {}),
