@@ -1268,7 +1268,7 @@ function RerunMission({
   useEffect(() => {
     if (!open || !source) return;
     setTarget(String(source.target || ""));
-    setGoal(String(source.goal || "获取 Flag"));
+    setGoal(String(source.goal || "获取 Flag / 执行任务书内容 / 测试目标"));
     setProvider(String(source.provider || "deepseek"));
     setModel(String(source.model || "Min"));
     setWithContext(true);
@@ -1314,7 +1314,7 @@ function RerunMission({
     try {
       const result = await api.create({
         target: target.trim(),
-        goal: goal.trim() || "获取 Flag",
+        goal: goal.trim() || "获取 Flag / 执行任务书内容 / 测试目标",
         provider,
         model,
         ...(provider === "qwen" ? { qwen_tool_call_mode: qwenToolMode } : {}),
