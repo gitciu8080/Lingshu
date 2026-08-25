@@ -2534,18 +2534,30 @@ async def run_mission(
             *[item.content[:500] for item in mission.facts[-8:]],
         ])
 
+        def _current_attack_capability_context() -> str:
+            """在 Attack 真正懒加载时读取最新 WebShell/CVE 证据。"""
+            return "\n".join([
+                mission.goal[:1500],
+                mission.plan[:5000],
+                *[item.content[:800] for item in mission.facts[-20:]],
+                *[item.content[:800] for item in mission.evidence_records[-20:]],
+                *[str(item.get("report") or "")[:800] for item in mission.findings[-12:]],
+                *[str(item.get("report") or "")[:800] for item in mission.attack_chain[-12:]],
+            ])
+
         async def _load_attack_agent():
             mission.record(
                 "system", "agent_capability_loaded",
                 role="attack", category=(mission.category_decision or {}).get("primary"),
             )
             store.save(mission)
+            current_capability_context = _current_attack_capability_context()
             # Metasploit 按任务路由暴露：授权渗透/混合任务书模式，或
             # 目标/计划/事实中存在明确 CVE 编号（利用证据）时才开放。
             framework_allowed = (
                 getattr(mission, "mission_mode", "")
                 in {"authorized_pentest", "hybrid_taskbook"}
-                or bool(re.search(r"CVE-\d{4}-\d+", capability_context))
+                or bool(re.search(r"CVE-\d{4}-\d+", current_capability_context))
             )
             return await create_attack_agent(
                 model,
@@ -2576,7 +2588,7 @@ async def run_mission(
                 vision_roots=vision_roots,
                 forensic_roots=vision_roots,
                 target_kind=target_spec.kind,
-                capability_context=capability_context,
+                capability_context=current_capability_context,
                 enable_framework=framework_allowed,
                 command_workdir=command_workdir,
             )

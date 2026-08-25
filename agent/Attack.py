@@ -91,23 +91,6 @@ _CYBERPENDA_SKILL_MAP: dict[str, list[str]] = {
 }
 _CYBERPENDA_ROOT = "Skills/cyberpenda-bundles"
 
-_ANTSWORD_PROFILE_TOOLS: dict[str, tuple[str, ...]] = {
-    "info": (
-        "shell_list", "shell_get", "shell_capabilities", "base_info",
-        "base_probedb", "mcp_status",
-    ),
-    "command": ("cmd_exec", "cmd_list", "cmd_quote"),
-    "files": (
-        "file_dir", "file_read", "file_write", "file_hash", "file_upload",
-        "file_download", "file_copy", "file_rename", "file_chmod", "file_mkdir",
-    ),
-    "database": (
-        "db_list_confs", "db_get_conf", "db_show_databases", "db_show_tables",
-        "db_show_columns", "db_query",
-    ),
-    "raw": ("raw_request",),
-}
-
 _ATTACK_CATALOG_CATEGORIES: dict[str, set[str]] = {
     # web 附加 credential（仅 hydra 一个工具）：授权 Web 任务按需暴露
     # 凭证爆破能力，不影响其他分类。
@@ -125,7 +108,7 @@ _ATTACK_CATALOG_CATEGORIES: dict[str, set[str]] = {
 
 
 def select_antsword_tools(context: str) -> tuple[str, ...]:
-    """按任务目标/证据选择 AntSword schema 子集；无 WebShell 信号则不连接。"""
+    """有 WebShell 证据时挂载完整 AntSword MCP 工具集。"""
     lowered = context.lower()
     # Recon/计划经常包含“未发现 WebShell”这类否定结论；先剔除否定片段，
     # 避免仅因出现关键词就初始化整个外部 MCP。
@@ -139,20 +122,11 @@ def select_antsword_tools(context: str) -> tuple[str, ...]:
         "webshell", "web shell", "antsword", "蚁剑", "shell_id", "shell 密码",
     )):
         return ()
-    profiles = {"info"}
-    if any(term in lowered for term in ("命令", "command", "cmd", "shell", "flag")):
-        profiles.add("command")
-    if any(term in lowered for term in ("文件", "file", "upload", "download", "目录")):
-        profiles.add("files")
-    if any(term in lowered for term in ("数据库", "database", "sql", "db_")):
-        profiles.add("database")
-    if "raw_request" in lowered or "原始请求" in lowered:
-        profiles.add("raw")
-    selected: list[str] = []
-    for profile in ("info", "command", "files", "database", "raw"):
-        if profile in profiles:
-            selected.extend(_ANTSWORD_PROFILE_TOOLS[profile])
-    return tuple(dict.fromkeys(selected))
+    # 不能按当前文本中的“命令/文件/数据库”等关键词裁剪 schema：WebShell
+    # 会话通常先 shell_list，后续才知道需要文件或数据库能力。裁剪会造成
+    # Attack 已识别 WebShell 却反馈“没有工具”的断层。写入/执行类仍由下面
+    # 的实时审批钩子控制。
+    return _ANTSWORD_TOOLS
 
 
 async def _connect_antsword_mcp(
@@ -160,7 +134,7 @@ async def _connect_antsword_mcp(
     exploitation_approved: Callable[[], bool] | None = None,
     enabled_tools: tuple[str, ...] | None = None,
 ) -> tuple[MCPClient, list]:
-    """连接 API 托管的 AntSword SSE MCP，并只查询本轮需要的 schema。"""
+    """连接 API 托管的 AntSword SSE MCP，并注册本轮完整工具集。"""
     selected_tools = tuple(enabled_tools) if enabled_tools is not None else _ANTSWORD_TOOLS
     url = os.getenv("LINGSHU_ANTSWORD_MCP_URL", _ANTSWORD_MCP_URL).strip()
     client = MCPClient(
@@ -177,9 +151,14 @@ async def _connect_antsword_mcp(
         available = {tool.name.rsplit("__", 1)[-1] for tool in tools}
         missing = set(selected_tools) - available
         if missing:
-            raise RuntimeError(
-                f"AntSword MCP 缺少工具: {', '.join(sorted(missing))}",
+            # AntSword 发行版可能不含管理扩展。不能因一项可选扩展缺失就
+            # 丢弃已经返回的整组 WebShell 工具；实际可用集合仍会注册给 Agent。
+            logger.warning(
+                "AntSword MCP 未提供 %d 项声明工具，继续注册 %d 项可用工具: %s",
+                len(missing), len(tools), ", ".join(sorted(missing)),
             )
+        if not tools:
+            raise RuntimeError("AntSword MCP 未返回任何可用工具")
     except BaseException:
         # stateless MCP 没有需要由外层关闭的连接上下文。
         raise
