@@ -9,7 +9,7 @@ CHECK_ONLY=0
 usage() {
   printf '%s\n' \
     '用法: sudo ./scripts/install-security-tools.sh [--profile core|extended] [--dry-run|--check]' \
-    '  core      高频侦察、Web、取证、逆向辅助工具（默认）' \
+    '  core      高频侦察、Web、取证、逆向辅助工具与 OpenJDK JDK（默认）' \
     '  extended  在 core 基础上增加 Ghidra、Bettercap、Wine 等重型/特权组件' \
     '  --check   只检查包状态，不安装'
 }
@@ -32,7 +32,7 @@ esac
 
 CORE_PACKAGES=(
   subfinder feroxbuster joomscan foremost ropper apktool steghide stegseek zbar-tools
-  strace python3-pytesseract
+  strace python3-pytesseract default-jdk
 )
 EXTENDED_PACKAGES=(ghidra bettercap wine wine64 wine32)
 # 当前源可能缺失的可选工具：逐个容错安装，失败不阻断整体。
@@ -50,6 +50,54 @@ for package in "${PACKAGES[@]}"; do
     printf '  [缺失]   %s\n' "$package"
   fi
 done
+
+# Java 工具依赖 JDK 而不仅是 JRE：java 能运行程序，但 javac 缺失会导致
+# APK/Java 分析与编译路径不完整。包管理器状态之外再做命令级验证。
+for command in java javac; do
+  if command -v "$command" >/dev/null 2>&1; then
+    printf '  [可用]   %s (%s)\n' "$command" "$(command -v "$command")"
+  else
+    printf '  [缺失]   %s\n' "$command"
+  fi
+done
+
+# requirements.txt 由项目运行解释器安装。优先允许部署人员显式指定，
+# 其次自动识别项目 .venv 和常见 Conda 的 agentscope 环境，最后才退回
+# 系统 python3；避免把“系统 Python 有包”误报成运行中的 AgentScope 环境有包。
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${LINGSHU_PYTHON_BIN:-}"
+if [ -z "$PYTHON_BIN" ] && [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
+  PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
+fi
+if [ -z "$PYTHON_BIN" ]; then
+  INSTALL_USER="${SUDO_USER:-$USER}"
+  INSTALL_HOME="$(getent passwd "$INSTALL_USER" 2>/dev/null | cut -d: -f6 || true)"
+  for candidate in \
+    "${CONDA_PREFIX:-}/envs/agentscope/bin/python" \
+    "${INSTALL_HOME:-}/miniconda3/envs/agentscope/bin/python" \
+    "${INSTALL_HOME:-}/miniforge3/envs/agentscope/bin/python" \
+    "${INSTALL_HOME:-}/anaconda3/envs/agentscope/bin/python"; do
+    if [ -x "$candidate" ]; then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$PYTHON_BIN" ]; then
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
+if [ -n "$PYTHON_BIN" ] && [ -x "$PYTHON_BIN" ]; then
+  printf 'Python 安全分析依赖检查（%s）:\n' "$PYTHON_BIN"
+  for module in pwn capstone elftools pefile Crypto pytesseract; do
+    if "$PYTHON_BIN" -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$module') else 1)"; then
+      printf '  [可用]   %s\n' "$module"
+    else
+      printf '  [缺失]   %s（运行 %s -m pip install -r %s/requirements.txt）\n' "$module" "$PYTHON_BIN" "$PROJECT_ROOT"
+    fi
+  done
+else
+  printf '  [跳过]   未找到 Python；无法检查 requirements.txt 中的安全分析依赖\n'
+fi
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
   exit 0
@@ -72,4 +120,4 @@ for package in "${OPTIONAL_PACKAGES[@]}"; do
     printf '[可选] %s 在当前源不可用，已跳过\n' "$package"
   fi
 done
-printf '%s\n' '安装完成。请通过 GET /api/superadmin/tooling/status?refresh=true 刷新健康状态。'
+printf '%s\n' '安装完成。请通过 Web“系统工具状态”或 GET /api/tooling/catalog?refresh=true 刷新健康状态。'

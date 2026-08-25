@@ -36,6 +36,12 @@ def _catalog() -> ToolCatalog:
                 "risk": "local_analysis", "approval_required": False,
                 "description": "缺失命令", "usage_hint": "不可调用", "alternatives": [],
             },
+            {
+                "id": "python-ok", "category": "runtime",
+                "python_modules": [{"module": "json", "distribution": "json"}],
+                "roles": [], "risk": "local_analysis", "approval_required": False,
+                "description": "Python 运行时依赖", "usage_hint": "仅状态检查", "alternatives": [],
+            },
         ],
     }), encoding="utf-8")
     return ToolCatalog(manifest, cache_ttl=3600)
@@ -54,6 +60,12 @@ class ToolCatalogTest(unittest.IsolatedAsyncioTestCase):
         summary = _catalog().capability_summary("recon")
         self.assertIn("shell-ok", summary)
         self.assertNotIn("definitely-missing", summary)
+
+    def test_python_module_is_checked_without_shell_command(self) -> None:
+        item = next(item for item in _catalog().snapshot(include_version=True) if item["id"] == "python-ok")
+        self.assertEqual(item["status"], "available")
+        self.assertEqual(item["kind"], "python_module")
+        self.assertIn("Python", item["command"])
 
     async def test_agent_query_hides_unavailable_tools(self) -> None:
         tools = {tool.name: tool for tool in create_tool_catalog_tools("recon", _catalog())}

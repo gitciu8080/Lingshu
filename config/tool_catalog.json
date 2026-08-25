@@ -2,6 +2,96 @@
  "schema_version": 1,
  "tools": [
   {
+   "id": "openjdk-runtime",
+   "category": "runtime",
+   "command_candidates": ["java"],
+   "version_args": ["-version"],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "OpenJDK Java 运行环境（JRE）",
+   "usage_hint": "供 APK/Java 工具运行；仅有 JRE 时不能编译 Java 或完整运行部分分析工具。",
+   "alternatives": ["openjdk-jdk"]
+  },
+  {
+   "id": "openjdk-jdk",
+   "category": "runtime",
+   "command_candidates": ["javac"],
+   "version_args": ["-version"],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "OpenJDK Java 开发环境（JDK）",
+   "usage_hint": "APK 反编译、Java 代码编译和部分安全工具需要 javac；安全工具安装器的 core profile 会安装 default-jdk。",
+   "alternatives": ["openjdk-runtime"]
+  },
+  {
+   "id": "python-pwntools",
+   "category": "python_runtime",
+   "python_modules": [{"module": "pwn", "distribution": "pwntools"}],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "pwntools：PWN 二进制分析与利用辅助 Python 库",
+   "usage_hint": "由项目 requirements.txt 管理；检测基于运行 API 的 Python 环境。",
+   "alternatives": ["ropper"]
+  },
+  {
+   "id": "python-capstone",
+   "category": "python_runtime",
+   "python_modules": [{"module": "capstone", "distribution": "capstone"}],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "Capstone：多架构反汇编 Python 库",
+   "usage_hint": "由项目 requirements.txt 管理；供本地逆向分析组件使用。",
+   "alternatives": ["objdump", "radare2"]
+  },
+  {
+   "id": "python-pyelftools",
+   "category": "python_runtime",
+   "python_modules": [{"module": "elftools", "distribution": "pyelftools"}],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "pyelftools：ELF 解析 Python 库",
+   "usage_hint": "由项目 requirements.txt 管理；供本地二进制元数据分析使用。",
+   "alternatives": ["readelf"]
+  },
+  {
+   "id": "python-pefile",
+   "category": "python_runtime",
+   "python_modules": [{"module": "pefile", "distribution": "pefile"}],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "pefile：PE 文件解析 Python 库",
+   "usage_hint": "由项目 requirements.txt 管理；供 Windows 二进制静态分析使用。",
+   "alternatives": ["rabin2"]
+  },
+  {
+   "id": "python-pycryptodome",
+   "category": "python_runtime",
+   "python_modules": [{"module": "Crypto", "distribution": "pycryptodome"}],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "PyCryptodome：密码学分析 Python 库",
+   "usage_hint": "由项目 requirements.txt 管理；供本地密码题和数据解密辅助使用。",
+   "alternatives": []
+  },
+  {
+   "id": "python-pytesseract",
+   "category": "python_runtime",
+   "python_modules": [{"module": "pytesseract", "distribution": "pytesseract"}],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "pytesseract：Tesseract OCR Python 绑定",
+   "usage_hint": "还需要系统 tesseract 与语言包；由项目 requirements.txt 管理。",
+   "alternatives": ["tesseract"]
+  },
+  {
    "id": "nmap",
    "category": "recon",
    "command_candidates": [

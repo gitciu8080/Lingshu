@@ -6,6 +6,8 @@ AgentScope 会自动向模型公开已经注册的 Function/MCP 工具。本模�
 from __future__ import annotations
 
 import json
+import importlib.metadata
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -34,6 +36,9 @@ class ToolCapability:
     description: str
     usage_hint: str
     alternatives: tuple[str, ...]
+    # Python 库并不是 shell 命令。将它们登记到同一目录，可让状态面板
+    # 使用运行 API 的解释器检测依赖，而不是误用系统 Python 的安装状态。
+    python_modules: tuple[tuple[str, str], ...] = ()
     enabled: bool = True
 
     @classmethod
@@ -42,8 +47,21 @@ class ToolCapability:
         if not tool_id or not tool_id.replace("-", "").replace("_", "").isalnum():
             raise ValueError(f"非法工具 id: {tool_id!r}")
         candidates = tuple(str(item).strip() for item in data.get("command_candidates", []) if str(item).strip())
-        if not candidates:
-            raise ValueError(f"工具 {tool_id} 缺少 command_candidates")
+        modules: list[tuple[str, str]] = []
+        for raw_module in data.get("python_modules", []):
+            if isinstance(raw_module, str):
+                module = raw_module.strip()
+                distribution = module
+            elif isinstance(raw_module, dict):
+                module = str(raw_module.get("module", "")).strip()
+                distribution = str(raw_module.get("distribution") or module).strip()
+            else:
+                raise ValueError(f"工具 {tool_id} 的 python_modules 项格式无效")
+            if not module or not distribution:
+                raise ValueError(f"工具 {tool_id} 的 Python 模块声明不完整")
+            modules.append((module, distribution))
+        if not candidates and not modules:
+            raise ValueError(f"工具 {tool_id} 至少需要 command_candidates 或 python_modules")
         return cls(
             id=tool_id,
             category=str(data.get("category", "other")).strip().lower() or "other",
@@ -55,6 +73,7 @@ class ToolCapability:
             description=str(data.get("description", "")).strip(),
             usage_hint=str(data.get("usage_hint", "")).strip(),
             alternatives=tuple(str(item).strip().lower() for item in data.get("alternatives", []) if str(item).strip()),
+            python_modules=tuple(modules),
             enabled=bool(data.get("enabled", True)),
         )
 
@@ -96,9 +115,21 @@ class ToolCatalog:
 
     def _inspect_one(self, spec: ToolCapability, *, include_version: bool) -> dict[str, Any]:
         path = next((resolved for item in spec.command_candidates if (resolved := self._resolve_candidate(item))), None)
-        status = "available" if spec.enabled and path else ("disabled" if not spec.enabled else "missing")
+        missing_modules = [
+            (module, distribution)
+            for module, distribution in spec.python_modules
+            if importlib.util.find_spec(module) is None
+        ]
+        command_ready = not spec.command_candidates or path is not None
+        modules_ready = not missing_modules
+        ready = command_ready and modules_ready
+        status = "available" if spec.enabled and ready else ("disabled" if not spec.enabled else "missing")
         version = ""
-        error = "" if path else "未找到可执行文件"
+        errors: list[str] = []
+        if spec.command_candidates and not path:
+            errors.append("未找到可执行文件")
+        if missing_modules:
+            errors.append("缺少 Python 模块: " + ", ".join(distribution for _, distribution in missing_modules))
         if path and include_version and spec.version_args:
             try:
                 completed = subprocess.run(
@@ -109,19 +140,33 @@ class ToolCatalog:
                 version = output.splitlines()[0][:240] if output else ""
                 # 许多安全工具的 --help 会以非零码退出；存在可执行文件仍算健康。
                 if completed.returncode < 0:
-                    status, error = "degraded", f"版本检测被信号终止: {completed.returncode}"
+                    status = "degraded"
+                    errors.append(f"版本检测被信号终止: {completed.returncode}")
             except (OSError, subprocess.TimeoutExpired) as exc:
                 # 某些 Kali 工具（如 wpscan/msfconsole）仅加载运行时就可能
                 # 超过探测时限。可执行文件存在仍可提供给 Agent，版本探测
                 # 失败作为诊断告警返回，不能反向污染能力缓存使工具消失。
-                error = f"版本检测失败: {exc}"
+                errors.append(f"版本检测失败: {exc}")
+        if not version and include_version and spec.python_modules and modules_ready:
+            versions: list[str] = []
+            for module, distribution in spec.python_modules:
+                try:
+                    versions.append(f"{distribution} {importlib.metadata.version(distribution)}")
+                except importlib.metadata.PackageNotFoundError:
+                    versions.append(module)
+            version = "; ".join(versions)[:240]
+        command = (
+            Path(path).name if path
+            else (f"Python · {', '.join(distribution for _, distribution in spec.python_modules)}"
+                  if spec.python_modules else spec.command_candidates[0])
+        )
         return {
             "id": spec.id,
             "category": spec.category,
-            "kind": "shell_command",
+            "kind": "python_module" if not spec.command_candidates else "shell_command",
             "status": status,
             "version": version,
-            "command": Path(path).name if path else spec.command_candidates[0],
+            "command": command,
             "path": path or "",
             "roles": list(spec.roles),
             "risk": spec.risk,
@@ -129,7 +174,7 @@ class ToolCatalog:
             "description": spec.description,
             "usage_hint": spec.usage_hint,
             "alternatives": list(spec.alternatives),
-            "error": error,
+            "error": "；".join(errors),
         }
 
     def snapshot(self, *, refresh: bool = False, include_version: bool = False) -> list[dict[str, Any]]:
