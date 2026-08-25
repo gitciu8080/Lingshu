@@ -2536,6 +2536,13 @@ async def run_mission(
                 role="attack", category=(mission.category_decision or {}).get("primary"),
             )
             store.save(mission)
+            # Metasploit 按任务路由暴露：授权渗透/混合任务书模式，或
+            # 目标/计划/事实中存在明确 CVE 编号（利用证据）时才开放。
+            framework_allowed = (
+                getattr(mission, "mission_mode", "")
+                in {"authorized_pentest", "hybrid_taskbook"}
+                or bool(re.search(r"CVE-\d{4}-\d+", capability_context))
+            )
             return await create_attack_agent(
                 model,
                 analysis,
@@ -2566,6 +2573,7 @@ async def run_mission(
                 forensic_roots=vision_roots,
                 target_kind=target_spec.kind,
                 capability_context=capability_context,
+                enable_framework=framework_allowed,
             )
 
         attack = LazyAgent(

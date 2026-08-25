@@ -109,9 +109,12 @@ _ANTSWORD_PROFILE_TOOLS: dict[str, tuple[str, ...]] = {
 }
 
 _ATTACK_CATALOG_CATEGORIES: dict[str, set[str]] = {
-    "web": {"recon", "web"},
+    # web 附加 credential（仅 hydra 一个工具）：授权 Web 任务按需暴露
+    # 凭证爆破能力，不影响其他分类。
+    "web": {"recon", "web", "credential"},
     "pwn": {"reverse"},
     "reverse": {"reverse"},
+    "mobile": {"mobile", "reverse"},
     "crypto": {"crypto"},
     "forensics": {"forensics"},
     "malware": {"forensics", "reverse"},
@@ -298,6 +301,7 @@ async def create_attack_agent(
     forensic_roots: tuple[str | Path, ...] = (),
     target_kind: str = "",
     capability_context: str = "",
+    enable_framework: bool = False,
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -354,6 +358,21 @@ async def create_attack_agent(
     ))
     if primary == "unknown":
         catalog_categories = {"recon", "web", "forensics", "reverse"}
+    # Android 逆向任务的 Attack 路由补充：apktool 在 Reserve/Triage 侧经
+    # mobile 目录可达，此处让 Attack 在明确 Android 信号时同样获得该目录，
+    # 避免跨专家交接断层。
+    route_text = str(capability_context or "").lower()
+    if (
+        "mobile" in categories
+        or (primary == "reverse" and re.search(
+            r"\.apk\b|\.apk|\.dex\b|smali|android|安卓|jadx", route_text,
+        ))
+    ):
+        catalog_categories.add("mobile")
+    # Metasploit 按任务路由暴露：仅授权渗透/混合任务书模式或存在明确 CVE
+    # 利用证据时开放 framework 目录（其中仅 msfconsole 一项），由调用方计算。
+    if enable_framework:
+        catalog_categories.add("framework")
 
     antsword_mcp: MCPClient | None = None
     antsword_tools: list = []

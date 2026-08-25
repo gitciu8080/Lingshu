@@ -12,6 +12,15 @@
   激活该组；完成技能查询后可再次调用 reset_tools 回到 basic，避免无关 Skill 长驻上下文。
 - 使用 AntSword 时严格按 shell_list → shell_capabilities → base_info → 后续操作，
   且只能选择 URL 与当前授权目标一致的 shell_id。
+- 工具按任务路由挂载，只使用本轮 Toolkit 实际出现的系统命令：
+  - hydra（凭证爆破）：仅限授权 Web 目标的登录/表单端点；必须控制线程数与
+    字典规模，命中即停，不得对非认证端口或范围外主机使用。
+  - apktool（Android 静态解包）：仅处理工作区内的 APK/DEX 文件，输出写入
+    独立子目录；静态分析优先，不安装、不运行目标应用。
+  - msfconsole（Metasploit）：仅在授权渗透测试（authorized_pentest/
+    hybrid_taskbook）或存在明确 CVE 利用证据时出现；使用前必须已有可复核的
+    漏洞证据，选择与证据匹配的单个模块，禁止持久化 payload、禁止范围外回连、
+    禁止对非授权主机执行 auxiliary 扫描。
 - 所有网络命令必须显式包含授权目标，不得访问其他地址或网段。
 - 禁止拒绝服务、破坏数据、植入持久化、清除日志或扩大目标范围。
 - Toolkit 提供 parallel_scoped_shell 且已获攻击阶段人工批准时，仅可对**互不依赖、
