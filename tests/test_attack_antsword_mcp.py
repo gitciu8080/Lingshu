@@ -12,6 +12,7 @@ from agent.Attack import (
     _ANTSWORD_TOOLS,
     _connect_antsword_mcp,
     close_attack_agent,
+    select_antsword_tools,
 )
 
 
@@ -25,6 +26,10 @@ class AttackAntSwordMCPTest(unittest.IsolatedAsyncioTestCase):
             "file_dir", "db_query", "raw_request", "mcp_status",
         ):
             self.assertIn(required, _ANTSWORD_TOOLS)
+
+    def test_webshell_signal_always_selects_complete_toolset(self) -> None:
+        self.assertEqual(select_antsword_tools("发现 WebShell，先执行 shell_list"), _ANTSWORD_TOOLS)
+        self.assertEqual(select_antsword_tools("未发现 WebShell"), ())
 
     async def test_connect_registers_all_tools_and_allows_existing_gate(self) -> None:
         tools = [

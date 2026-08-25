@@ -2540,7 +2540,9 @@ async def run_mission(
                 mission.goal[:1500],
                 mission.plan[:5000],
                 *[item.content[:800] for item in mission.facts[-20:]],
-                *[item.content[:800] for item in mission.evidence_records[-20:]],
+                # EvidenceRecord 保存的是摘要字段；这里在 Attack 懒加载前汇总
+                # 最新证据，不能按 FactRecord 的 content 字段读取。
+                *[str(item.summary or "")[:800] for item in mission.evidence_records[-20:]],
                 *[str(item.get("report") or "")[:800] for item in mission.findings[-12:]],
                 *[str(item.get("report") or "")[:800] for item in mission.attack_chain[-12:]],
             ])
