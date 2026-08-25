@@ -115,7 +115,7 @@ sudo ./scripts/install-security-tools.sh --profile core
 sudo ./scripts/install-security-tools.sh --check
 ```
 
-`install.sh` 会顺序调用基础环境与安全工具安装器，并统一在 Miniconda 的 `agentscope` 环境安装 `requirements.txt`；不会在系统 Python 或 `.venv` 中混装依赖。它还会安装 PDF 报告的 WeasyPrint 图形库、中文字体后备和 Mermaid SVG 渲染依赖。可通过 `--skip-system-environment`、`--skip-security-tools` 或 `--security-profile extended` 控制范围。
+`install.sh` 会顺序调用基础环境与安全工具安装器，并统一在 Miniconda 的 `agentscope` 环境安装 `requirements.txt`；不会在系统 Python 或 `.venv` 中混装依赖。它还会安装 PDF 报告的 WeasyPrint 图形库、扫描 PDF OCR 所需的 Poppler、AntSword Electron 运行库、中文字体后备、`uv/uvx`、固定版本的 GDB Multi MCP 和 Mermaid SVG 渲染依赖。可通过 `--skip-system-environment`、`--skip-security-tools` 或 `--security-profile extended` 控制范围。
 
 ## 配置 `.env`
 

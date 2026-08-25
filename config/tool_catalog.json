@@ -1212,6 +1212,7 @@
    "id": "wine",
    "category": "reverse",
    "command_candidates": [
+    "${LINGSHU_WINE_CMD}",
     "wine64",
     "wine"
    ],
@@ -1224,8 +1225,37 @@
    ],
    "risk": "local_execution",
    "approval_required": true,
-   "description": "Windows 程序兼容执行层",
-   "usage_hint": "只在无网络隔离环境执行工作区样本。",
+   "description": "Wine 64 位 Windows 程序兼容执行层（Reverse / PWN）",
+   "usage_hint": "仅 Reverse 专家与 PWN 攻击专家可用。仅执行工作区内的 64 位 Windows 样本；须先获得动作审批，保持网络隔离，不适用于 32 位样本。",
+   "alternatives": []
+  },
+  {
+   "id": "qemu-system-x86",
+   "category": "reverse",
+   "command_candidates": [
+    "${LINGSHU_QEMU_CMD}",
+    "qemu-system-x86_64"
+   ],
+   "version_args": [
+    "--version"
+   ],
+   "health_check_args": [
+    "--version"
+   ],
+   "health_check_contains": [
+    "qemu emulator version"
+   ],
+   "environment": {
+    "LD_LIBRARY_PATH": "${LINGSHU_QEMU_LIB_DIR}"
+   },
+   "roles": [
+    "reserve",
+    "attack"
+   ],
+   "risk": "local_execution",
+   "approval_required": true,
+   "description": "QEMU x86/x86_64 本地样本仿真器（Reverse / PWN）",
+   "usage_hint": "仅 Reverse 专家与 PWN 攻击专家可用。仅对工作区内授权样本做本地仿真；须先获得动作审批，默认使用 -net none 禁止客户机网络。",
    "alternatives": []
   },
   {

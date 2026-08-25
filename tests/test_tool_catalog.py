@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import importlib.metadata
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from Tools.tool_catalog import ToolCatalog, create_tool_catalog_tools, python_environment_snapshot
 
@@ -64,6 +66,15 @@ def _catalog() -> ToolCatalog:
                 "roles": [], "risk": "local_analysis", "approval_required": False,
                 "description": "组合命令检查", "usage_hint": "仅用于测试", "alternatives": [],
             },
+            {
+                "id": "configured-runtime", "category": "runtime",
+                "command_candidates": ["sh"], "version_args": [],
+                "health_check_args": ["-c", "printf \"$LINGSHU_TEST_RUNTIME\""],
+                "health_check_contains": ["ready"],
+                "environment": {"LINGSHU_TEST_RUNTIME": "ready"},
+                "roles": [], "risk": "local_analysis", "approval_required": False,
+                "description": "隔离环境检查", "usage_hint": "仅用于测试", "alternatives": [],
+            },
         ],
     }), encoding="utf-8")
     return ToolCatalog(manifest, cache_ttl=3600)
@@ -116,6 +127,28 @@ class ToolCatalogTest(unittest.IsolatedAsyncioTestCase):
         item = next(item for item in _catalog().snapshot() if item["id"] == "required-command-missing")
         self.assertEqual(item["status"], "missing")
         self.assertIn("缺少必需命令", item["error"])
+
+    def test_catalog_applies_declared_runtime_environment(self) -> None:
+        item = next(item for item in _catalog().snapshot() if item["id"] == "configured-runtime")
+        self.assertEqual(item["status"], "available")
+
+    def test_catalog_resolves_command_from_environment_path(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="lingshu-catalog-env-"))
+        manifest = root / "tools.json"
+        manifest.write_text(json.dumps({
+            "schema_version": 1,
+            "tools": [{
+                "id": "configured-wine", "category": "reverse",
+                "command_candidates": ["${LINGSHU_TEST_WINE_CMD}"],
+                "version_args": ["--version"], "roles": ["reserve", "attack"],
+                "risk": "local_execution", "approval_required": True,
+                "description": "测试 Wine", "usage_hint": "仅测试", "alternatives": [],
+            }],
+        }), encoding="utf-8")
+        with patch.dict(os.environ, {"LINGSHU_TEST_WINE_CMD": "/bin/sh"}):
+            item = ToolCatalog(manifest, cache_ttl=3600).snapshot()[0]
+        self.assertEqual(item["status"], "available")
+        self.assertEqual(item["path"], str(Path("/bin/sh").resolve()))
 
     async def test_agent_query_hides_unavailable_tools(self) -> None:
         tools = {tool.name: tool for tool in create_tool_catalog_tools("recon", _catalog())}

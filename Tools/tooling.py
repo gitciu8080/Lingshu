@@ -803,9 +803,39 @@ async def _run_scoped_command(
         stdout_path = tool_dir / "stdout.txt"
         stderr_path = tool_dir / "stderr.txt"
 
+    # 部署可将独立 Wine/QEMU 运行时置于项目之外。仅把受信任 .env 中的
+    # 目录及 QEMU 私有库注入子进程：目录清单能通过绝对路径发现可用性，
+    # Agent 仍可使用稳定命令，不必知道客户机绝对路径。不会修改父进程环境。
+    command_env = os.environ.copy()
+    runtime_dirs: list[str] = []
+    for bin_dir_var, command_var in (
+        ("LINGSHU_WINE_BIN_DIR", "LINGSHU_WINE_CMD"),
+        ("LINGSHU_QEMU_BIN_DIR", "LINGSHU_QEMU_CMD"),
+    ):
+        configured_bin_dir = os.getenv(bin_dir_var, "").strip()
+        configured_command = os.getenv(command_var, "").strip()
+        if configured_bin_dir:
+            runtime_dirs.append(configured_bin_dir)
+        if configured_command and os.path.isabs(configured_command):
+            runtime_dirs.append(str(Path(configured_command).expanduser().parent))
+    valid_runtime_dirs = [
+        directory for directory in dict.fromkeys(runtime_dirs)
+        if Path(directory).expanduser().is_dir()
+    ]
+    if valid_runtime_dirs:
+        inherited_path = command_env.get("PATH", "")
+        command_env["PATH"] = os.pathsep.join([*valid_runtime_dirs, inherited_path])
+    qemu_library_dir = os.getenv("LINGSHU_QEMU_LIB_DIR", "").strip()
+    if qemu_library_dir and Path(qemu_library_dir).expanduser().is_dir():
+        inherited_libraries = command_env.get("LD_LIBRARY_PATH", "")
+        command_env["LD_LIBRARY_PATH"] = os.pathsep.join(
+            item for item in (qemu_library_dir, inherited_libraries) if item
+        )
+
     proc = await asyncio.create_subprocess_shell(
         command,
         cwd=workdir,
+        env=command_env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,

@@ -10,6 +10,7 @@ import importlib
 import importlib.metadata
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -141,6 +142,9 @@ class ToolCapability:
     import_check_modules: tuple[str, ...] = ()
     # 少数系统能力需要端到端验证；当前仅支持 PDF 报告链路，执行结果有缓存。
     runtime_check: str = ""
+    # 个别便携式工具会携带自己的动态库（如客户机本地 QEMU）。仅用于
+    # 无副作用的版本/健康检查；实际 Agent 子进程由 tooling.py 使用相同配置。
+    environment: tuple[tuple[str, str], ...] = ()
     enabled: bool = True
 
     @classmethod
@@ -179,6 +183,17 @@ class ToolCapability:
             raise ValueError(f"工具 {tool_id} 声明了未知运行时健康检查: {runtime_check}")
         if not candidates and not modules and not required_files and not required_commands and not runtime_check:
             raise ValueError(f"工具 {tool_id} 至少需要一种可检测的能力声明")
+        raw_environment = data.get("environment", {})
+        if not isinstance(raw_environment, dict):
+            raise ValueError(f"工具 {tool_id} 的 environment 必须为对象")
+        environment: list[tuple[str, str]] = []
+        for raw_name, raw_value in raw_environment.items():
+            name = str(raw_name).strip()
+            value = str(raw_value).strip()
+            if not name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"工具 {tool_id} 的环境变量名无效: {name!r}")
+            if value:
+                environment.append((name, value))
         return cls(
             id=tool_id,
             category=str(data.get("category", "other")).strip().lower() or "other",
@@ -197,6 +212,7 @@ class ToolCapability:
             required_commands=required_commands,
             import_check_modules=import_check_modules,
             runtime_check=runtime_check,
+            environment=tuple(environment),
             enabled=bool(data.get("enabled", True)),
         )
 
@@ -376,6 +392,17 @@ class ToolCatalog:
             return str(path.resolve()) if path.is_file() and path.stat().st_mode & 0o111 else None
         return shutil.which(candidate)
 
+    @staticmethod
+    def _execution_environment(spec: ToolCapability) -> dict[str, str]:
+        """构造目录声明的命令探测环境，未配置项保持宿主环境不变。"""
+        environment = os.environ.copy()
+        for name, raw_value in spec.environment:
+            value = os.path.expandvars(raw_value).strip()
+            # 未配置的 ${VAR} 不应传递为字面量，健康检查将自然失败并提示。
+            if value and "$" not in value:
+                environment[name] = value
+        return environment
+
     def _inspect_one(self, spec: ToolCapability, *, include_version: bool) -> dict[str, Any]:
         path = next((resolved for item in spec.command_candidates if (resolved := self._resolve_candidate(item))), None)
         missing_modules = [
@@ -427,6 +454,7 @@ class ToolCatalog:
                 checked = subprocess.run(
                     [path, *spec.health_check_args], capture_output=True, text=True,
                     errors="replace", timeout=4, check=False,
+                    env=self._execution_environment(spec),
                 )
                 health_output = "\n".join((checked.stdout or "", checked.stderr or "")).lower()
                 unavailable = [
@@ -446,6 +474,7 @@ class ToolCatalog:
                 completed = subprocess.run(
                     [path, *spec.version_args], capture_output=True, text=True,
                     errors="replace", timeout=4, check=False,
+                    env=self._execution_environment(spec),
                 )
                 output = (completed.stdout or completed.stderr).strip()
                 version = output.splitlines()[0][:240] if output else ""
