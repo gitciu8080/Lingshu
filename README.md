@@ -50,10 +50,10 @@ CTF 模式不需要 `request_scope_expansion`，但进入实际利用阶段仍�
 ## 环境要求
 
 - Kali Linux、Debian 或 Ubuntu。
-- 推荐 Python **3.13**；项目当前开发环境为 Miniconda 的 `agentscope` 环境。
+- 项目当前开发环境为 Miniconda 的 `agentscope` 环境；一键部署默认创建 Python **3.14** 环境，可按客户环境覆盖。
 - Node.js 20+ 与 pnpm 10.14+（仅重新构建前端时需要）。
 - 一个已启用的 LLM Provider（推荐通过 Web 超级管理员页面配置）。
-- 可选：IDA Pro + 合法许可证、`idalib-mcp`、GDB、`gdb-multi-mcp`、AntSword、Tesseract 等。
+- 可选：IDA Pro + 合法许可证、`idalib-mcp`、GDB、`gdb-multi-mcp`、AntSword；OCR 需要 Tesseract 及 `eng`、`chi_sim`、`chi_tra` 语言包。
 
 > `requirements.txt` 固定 `agentscope==2.0.6`。请始终使用同一个 Python 环境启动服务和安装依赖。
 
@@ -105,14 +105,17 @@ sudo ./scripts/install.sh
 # 安装并启用 systemd 服务
 sudo ./scripts/install.sh --with-systemd
 
-# 安装常用安全分析工具
+# 仅安装基础系统、Miniconda 和 agentscope Conda 环境
+sudo ./scripts/install-system-environment.sh
+
+# 仅安装常用安全分析工具、OCR 语言包和 JDK
 sudo ./scripts/install-security-tools.sh --profile core
 
 # 查看工具是否已安装，不修改系统
 sudo ./scripts/install-security-tools.sh --check
 ```
 
-脚本默认创建 `.venv`；若采用 Miniconda，建议按上一节手动安装并在 systemd 的 `ExecStart` 中使用 Conda Python 绝对路径。
+`install.sh` 会顺序调用基础环境与安全工具安装器，并统一在 Miniconda 的 `agentscope` 环境安装 `requirements.txt`；不会在系统 Python 或 `.venv` 中混装依赖。可通过 `--skip-system-environment`、`--skip-security-tools` 或 `--security-profile extended` 控制范围。
 
 ## 配置 `.env`
 

@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import json
+import importlib.metadata
 import tempfile
 import unittest
 from pathlib import Path
 
-from Tools.tool_catalog import ToolCatalog, create_tool_catalog_tools
+from Tools.tool_catalog import ToolCatalog, create_tool_catalog_tools, python_environment_snapshot
 
 
 def _text(result) -> str:
@@ -42,6 +43,14 @@ def _catalog() -> ToolCatalog:
                 "roles": [], "risk": "local_analysis", "approval_required": False,
                 "description": "Python 运行时依赖", "usage_hint": "仅状态检查", "alternatives": [],
             },
+            {
+                "id": "health-check-missing", "category": "runtime",
+                "command_candidates": ["sh"], "version_args": [],
+                "health_check_args": ["-c", "printf available"],
+                "health_check_contains": ["missing-component"],
+                "roles": [], "risk": "local_analysis", "approval_required": False,
+                "description": "运行组件检查", "usage_hint": "仅状态检查", "alternatives": [],
+            },
         ],
     }), encoding="utf-8")
     return ToolCatalog(manifest, cache_ttl=3600)
@@ -66,6 +75,24 @@ class ToolCatalogTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["status"], "available")
         self.assertEqual(item["kind"], "python_module")
         self.assertIn("Python", item["command"])
+
+    def test_python_environment_snapshot_reports_lock_coverage(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="lingshu-requirements-") as root:
+            requirements = Path(root) / "requirements.txt"
+            requirements.write_text(
+                "packaging==" + importlib.metadata.version("packaging") + "\n"
+                "lingshu-package-that-does-not-exist==1.0\n",
+                encoding="utf-8",
+            )
+            snapshot = python_environment_snapshot(requirements)
+        states = {item["name"].lower(): item["status"] for item in snapshot["packages"]}
+        self.assertEqual(states["packaging"], "matched")
+        self.assertEqual(states["lingshu-package-that-does-not-exist"], "missing")
+
+    def test_health_check_can_mark_existing_command_missing(self) -> None:
+        item = next(item for item in _catalog().snapshot() if item["id"] == "health-check-missing")
+        self.assertEqual(item["status"], "missing")
+        self.assertIn("缺少运行时组件", item["error"])
 
     async def test_agent_query_hides_unavailable_tools(self) -> None:
         tools = {tool.name: tool for tool in create_tool_catalog_tools("recon", _catalog())}

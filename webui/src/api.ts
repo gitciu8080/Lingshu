@@ -94,6 +94,25 @@ export type ToolStatus = {
   version?: string;
   error?: string;
 };
+export type PythonPackageStatus = {
+  name: string;
+  version: string;
+  required?: string;
+  status: "matched" | "untracked" | "missing" | "version_mismatch";
+};
+export type PythonEnvironmentStatus = {
+  interpreter: string;
+  package_count: number;
+  requirements_count: number;
+  counts: Record<string, number>;
+  packages: PythonPackageStatus[];
+  ignored_requirement_lines?: string[];
+};
+export type ToolingCatalog = {
+  tools: ToolStatus[];
+  counts: Record<string, number>;
+  environment?: { python?: PythonEnvironmentStatus };
+};
 const base = import.meta.env.VITE_API_BASE_URL || "";
 let token = localStorage.getItem("lingshu_token") || "";
 export const auth = {
@@ -316,7 +335,7 @@ export const api = {
   knowledgeStatus: () =>
     request<Record<string, unknown>>("/api/knowledge/status"),
   toolingCatalog: (refresh = false) =>
-    request<{ tools: ToolStatus[]; counts: Record<string, number> }>(
+    request<ToolingCatalog>(
       `/api/tooling/catalog${refresh ? "?refresh=true" : ""}`,
     ),
   knowledgeSearch: (query: string) =>

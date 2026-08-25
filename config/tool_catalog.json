@@ -88,7 +88,7 @@
    "risk": "local_analysis",
    "approval_required": false,
    "description": "pytesseract：Tesseract OCR Python 绑定",
-   "usage_hint": "还需要系统 tesseract 与语言包；由项目 requirements.txt 管理。",
+   "usage_hint": "由 AgentScope Conda 环境的 requirements.txt 管理；还需要系统 tesseract 与语言包。",
    "alternatives": ["tesseract"]
   },
   {
@@ -728,6 +728,47 @@
    "approval_required": false,
    "description": "图片 OCR 识别",
    "usage_hint": "优先通过 ocr_image 结构化工具调用。",
+   "alternatives": []
+  },
+  {
+   "id": "tesseract-ocr-eng",
+   "category": "forensics",
+   "command_candidates": ["tesseract"],
+   "version_args": ["--version"],
+   "health_check_args": ["--list-langs"],
+   "health_check_contains": ["eng"],
+   "roles": ["triage", "recon", "attack", "reserve"],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "Tesseract 英文 OCR 语言数据",
+   "usage_hint": "OCR 英文文本前自动检查 eng 语言包；由 tesseract-ocr-eng 提供。",
+   "alternatives": []
+  },
+  {
+   "id": "tesseract-ocr-chi-sim",
+   "category": "forensics",
+   "command_candidates": ["tesseract"],
+   "version_args": ["--version"],
+   "health_check_args": ["--list-langs"],
+   "health_check_contains": ["chi_sim"],
+   "roles": ["triage", "recon", "attack", "reserve"],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "Tesseract 简体中文 OCR 语言数据",
+   "usage_hint": "OCR 简体中文文本前自动检查 chi_sim 语言包；由 tesseract-ocr-chi-sim 提供。",
+   "alternatives": []
+  },
+  {
+   "id": "tesseract-ocr-chi-tra",
+   "category": "forensics",
+   "command_candidates": ["tesseract"],
+   "version_args": ["--version"],
+   "health_check_args": ["--list-langs"],
+   "health_check_contains": ["chi_tra"],
+   "roles": ["triage", "recon", "attack", "reserve"],
+   "approval_required": false,
+   "description": "Tesseract 繁体中文 OCR 语言数据",
+   "usage_hint": "OCR 繁体中文文本前自动检查 chi_tra 语言包；由 tesseract-ocr-chi-tra 提供。",
    "alternatives": []
   },
   {

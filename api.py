@@ -72,7 +72,7 @@ from integrations.agentscope_service.account_events import publish_account_event
 from integrations.antsword_service import get_antsword_service
 from Tools.KnowledgeBase import get_rag_service
 from core.TaskState import infer_exploitation_approval_status
-from Tools.tool_catalog import get_tool_catalog
+from Tools.tool_catalog import get_tool_catalog, python_environment_snapshot
 from Tools.target import normalize_target
 from core.model_registry import (
     ModelRegistryError,
@@ -1110,6 +1110,7 @@ async def tooling_catalog(
         get_tool_catalog().snapshot, refresh=refresh, include_version=True,
     )
     items.extend(await _mcp_health_snapshot())
+    python_environment = await asyncio.to_thread(python_environment_snapshot)
     counts: dict[str, int] = {}
     for item in items:
         counts[item["status"]] = counts.get(item["status"], 0) + 1
@@ -1126,6 +1127,7 @@ async def tooling_catalog(
             for item in items
         ],
         "counts": counts,
+        "environment": {"python": python_environment},
     }
 
 # ── JWT 认证中间件 ──

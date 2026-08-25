@@ -11,6 +11,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -18,10 +19,94 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+
 from Tools.tooling import AllowedFunctionTool
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_MANIFEST = _PROJECT_ROOT / "config" / "tool_catalog.json"
+_DEFAULT_REQUIREMENTS = _PROJECT_ROOT / "requirements.txt"
+
+
+def python_environment_snapshot(
+    requirements_path: str | Path = _DEFAULT_REQUIREMENTS,
+) -> dict[str, Any]:
+    """Return the running interpreter's distribution inventory and lock coverage.
+
+    The API process is the authority here: checking ``python3`` or a distro
+    package database can report a different environment from the AgentScope
+    Conda environment that actually imports the project.
+    """
+    declared: dict[str, Requirement] = {}
+    ignored_lines: list[str] = []
+    path = Path(requirements_path)
+    if path.is_file():
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith(("-r", "--")):
+                continue
+            try:
+                requirement = Requirement(line)
+            except InvalidRequirement:
+                ignored_lines.append(line[:160])
+                continue
+            declared[canonicalize_name(requirement.name)] = requirement
+
+    installed: dict[str, tuple[str, str]] = {}
+    for distribution in importlib.metadata.distributions():
+        name = str(distribution.metadata.get("Name") or "").strip()
+        if not name:
+            continue
+        key = canonicalize_name(name)
+        # 同名 distribution 不应出现；若出现则保留版本号较长的可读记录，
+        # 不尝试导入或比较版本，避免状态面板产生副作用。
+        installed.setdefault(key, (name, str(distribution.version)))
+
+    packages: list[dict[str, str]] = []
+    matched = mismatched = untracked = 0
+    for key, (name, version) in installed.items():
+        requirement = declared.get(key)
+        if requirement is None:
+            state, required = "untracked", ""
+            untracked += 1
+        elif not requirement.specifier or requirement.specifier.contains(version, prereleases=True):
+            state, required = "matched", str(requirement)
+            matched += 1
+        else:
+            state, required = "version_mismatch", str(requirement)
+            mismatched += 1
+        packages.append({
+            "name": name,
+            "version": version,
+            "required": required,
+            "status": state,
+        })
+
+    missing = 0
+    for key, requirement in declared.items():
+        if key not in installed:
+            missing += 1
+            packages.append({
+                "name": requirement.name,
+                "version": "",
+                "required": str(requirement),
+                "status": "missing",
+            })
+    packages.sort(key=lambda item: (item["status"] != "missing", item["name"].lower()))
+    return {
+        "interpreter": f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "package_count": len(installed),
+        "requirements_count": len(declared),
+        "counts": {
+            "matched": matched,
+            "untracked": untracked,
+            "missing": missing,
+            "version_mismatch": mismatched,
+        },
+        "packages": packages,
+        "ignored_requirement_lines": ignored_lines,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +124,10 @@ class ToolCapability:
     # Python 库并不是 shell 命令。将它们登记到同一目录，可让状态面板
     # 使用运行 API 的解释器检测依赖，而不是误用系统 Python 的安装状态。
     python_modules: tuple[tuple[str, str], ...] = ()
+    # 可执行文件存在并不等于运行组件完整，例如 tesseract 的语言数据包。
+    # 通过无副作用命令检查其输出中是否存在指定能力标记。
+    health_check_args: tuple[str, ...] = ()
+    health_check_contains: tuple[str, ...] = ()
     enabled: bool = True
 
     @classmethod
@@ -62,6 +151,10 @@ class ToolCapability:
             modules.append((module, distribution))
         if not candidates and not modules:
             raise ValueError(f"工具 {tool_id} 至少需要 command_candidates 或 python_modules")
+        health_args = tuple(str(item).strip() for item in data.get("health_check_args", []) if str(item).strip())
+        health_contains = tuple(str(item).strip() for item in data.get("health_check_contains", []) if str(item).strip())
+        if bool(health_args) != bool(health_contains):
+            raise ValueError(f"工具 {tool_id} 的健康检查必须同时声明参数和预期输出")
         return cls(
             id=tool_id,
             category=str(data.get("category", "other")).strip().lower() or "other",
@@ -74,6 +167,8 @@ class ToolCapability:
             usage_hint=str(data.get("usage_hint", "")).strip(),
             alternatives=tuple(str(item).strip().lower() for item in data.get("alternatives", []) if str(item).strip()),
             python_modules=tuple(modules),
+            health_check_args=health_args,
+            health_check_contains=health_contains,
             enabled=bool(data.get("enabled", True)),
         )
 
@@ -130,6 +225,25 @@ class ToolCatalog:
             errors.append("未找到可执行文件")
         if missing_modules:
             errors.append("缺少 Python 模块: " + ", ".join(distribution for _, distribution in missing_modules))
+        if path and spec.health_check_args:
+            try:
+                checked = subprocess.run(
+                    [path, *spec.health_check_args], capture_output=True, text=True,
+                    errors="replace", timeout=4, check=False,
+                )
+                health_output = "\n".join((checked.stdout or "", checked.stderr or "")).lower()
+                unavailable = [
+                    item for item in spec.health_check_contains
+                    if item.lower() not in health_output
+                ]
+                if unavailable:
+                    if spec.enabled:
+                        status = "missing"
+                    errors.append("缺少运行时组件: " + ", ".join(unavailable))
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                if spec.enabled:
+                    status = "degraded"
+                errors.append(f"健康检查失败: {exc}")
         if path and include_version and spec.version_args:
             try:
                 completed = subprocess.run(

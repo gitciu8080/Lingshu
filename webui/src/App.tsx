@@ -38,7 +38,7 @@ import {
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { accountStream, api, auth, Event, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, Session, stream, SystemUser, ToolStatus } from "./api";
+import { accountStream, api, auth, Event, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, PythonEnvironmentStatus, Session, stream, SystemUser, ToolStatus } from "./api";
 import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
 
@@ -1862,10 +1862,19 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
   degraded: "降级",
   disabled: "已禁用",
 };
+const PYTHON_PACKAGE_STATUS_LABELS: Record<string, string> = {
+  matched: "符合 requirements",
+  untracked: "环境额外",
+  missing: "requirements 缺失",
+  version_mismatch: "版本不匹配",
+};
+const SYSTEM_TOOL_CATEGORIES = new Set(["runtime", "python_runtime", "mcp"]);
 
 function Tooling({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [tools, setTools] = useState<ToolStatus[]>([]),
-    [counts, setCounts] = useState<Record<string, number>>({}),
+    [pythonEnvironment, setPythonEnvironment] = useState<PythonEnvironmentStatus | null>(null),
+    [tab, setTab] = useState<"ctf" | "system">("ctf"),
+    [packageSearch, setPackageSearch] = useState(""),
     [loading, setLoading] = useState(false),
     [error, setError] = useState("");
   const load = async (refresh = false) => {
@@ -1874,7 +1883,7 @@ function Tooling({ open, onClose }: { open: boolean; onClose: () => void }) {
     try {
       const result = await api.toolingCatalog(refresh);
       setTools(Array.isArray(result.tools) ? result.tools : []);
-      setCounts(result.counts || {});
+      setPythonEnvironment(result.environment?.python || null);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1884,28 +1893,57 @@ function Tooling({ open, onClose }: { open: boolean; onClose: () => void }) {
   useEffect(() => {
     if (open) void load();
   }, [open]);
+  const ctfTools = useMemo(
+    () => tools.filter((tool) => !SYSTEM_TOOL_CATEGORIES.has(tool.category || "other")),
+    [tools],
+  );
+  const systemTools = useMemo(
+    () => tools.filter((tool) => SYSTEM_TOOL_CATEGORIES.has(tool.category || "other")),
+    [tools],
+  );
+  const visibleTools = tab === "ctf" ? ctfTools : systemTools;
+  const tabCounts = useMemo(() => visibleTools.reduce<Record<string, number>>((acc, tool) => {
+    const state = tool.status || "missing";
+    acc[state] = (acc[state] || 0) + 1;
+    return acc;
+  }, {}), [visibleTools]);
   const grouped = useMemo(() => {
     const groups = new Map<string, ToolStatus[]>();
-    tools.forEach((tool) => {
+    visibleTools.forEach((tool) => {
       const category = tool.category || "other";
       groups.set(category, [...(groups.get(category) || []), tool]);
     });
     return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [tools]);
+  }, [visibleTools]);
+  const visiblePackages = useMemo(() => {
+    const keyword = packageSearch.trim().toLowerCase();
+    const packages = pythonEnvironment?.packages || [];
+    return keyword
+      ? packages.filter((item) => `${item.name} ${item.version} ${item.required || ""}`.toLowerCase().includes(keyword))
+      : packages;
+  }, [packageSearch, pythonEnvironment]);
   return (
     <Dialog.Root open={open} onOpenChange={(v) => !v && onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="overlay" />
         <Dialog.Content className="knowledge-drawer tooling-drawer">
           <header>
-            <div><Wrench size={18} /><b>系统工具状态</b></div>
+            <div><Wrench size={18} /><b>工具与系统环境</b></div>
             <button onClick={onClose} aria-label="关闭工具状态"><X size={18} /></button>
           </header>
+          <div className="tooling-tabs" role="tablist" aria-label="工具状态分类">
+            <button className={tab === "ctf" ? "active" : ""} onClick={() => setTab("ctf")} role="tab" aria-selected={tab === "ctf"}>
+              CTF 工具 <span>{ctfTools.length}</span>
+            </button>
+            <button className={tab === "system" ? "active" : ""} onClick={() => setTab("system")} role="tab" aria-selected={tab === "system"}>
+              系统环境 <span>{systemTools.length + (pythonEnvironment?.package_count || 0)}</span>
+            </button>
+          </div>
           <div className="tooling-summary">
-            <span className="ok">可用 {counts.available || 0}</span>
-            <span className="warn">降级 {counts.degraded || 0}</span>
-            <span className="bad">缺失 {counts.missing || 0}</span>
-            <span>禁用 {counts.disabled || 0}</span>
+            <span className="ok">可用 {tabCounts.available || 0}</span>
+            <span className="warn">降级 {tabCounts.degraded || 0}</span>
+            <span className="bad">缺失 {tabCounts.missing || 0}</span>
+            <span>禁用 {tabCounts.disabled || 0}</span>
           </div>
           {error && <p className="error-note">工具状态读取失败：{error}</p>}
           <button className="quiet-button full" onClick={() => void load(true)} disabled={loading}>
@@ -1913,6 +1951,38 @@ function Tooling({ open, onClose }: { open: boolean; onClose: () => void }) {
             {loading ? "正在重新探测…" : "重新探测工具"}
           </button>
           <div className="tooling-list">
+            {tab === "system" && pythonEnvironment && (
+              <section className="python-environment">
+                <header>
+                  <div>
+                    <h3>AGENTSCOPE PYTHON 扩展库</h3>
+                    <small>{pythonEnvironment.interpreter} · 已安装 {pythonEnvironment.package_count} · requirements {pythonEnvironment.requirements_count}</small>
+                  </div>
+                  <span>{visiblePackages.length} / {pythonEnvironment.packages.length}</span>
+                </header>
+                <div className="python-package-summary">
+                  <span className="ok">匹配 {pythonEnvironment.counts.matched || 0}</span>
+                  <span className="warn">环境额外 {pythonEnvironment.counts.untracked || 0}</span>
+                  <span className="bad">缺失 {(pythonEnvironment.counts.missing || 0) + (pythonEnvironment.counts.version_mismatch || 0)}</span>
+                </div>
+                <label className="python-package-search">
+                  <Search size={13} />
+                  <input value={packageSearch} onChange={(event) => setPackageSearch(event.target.value)} placeholder="搜索扩展库、版本或 requirements…" />
+                </label>
+                <div className="python-package-list">
+                  {visiblePackages.map((item) => (
+                    <article className="python-package-row" key={`${item.name}-${item.version || item.required}`}>
+                      <div>
+                        <b>{item.name}</b>
+                        <small>{item.version || "未安装"}{item.required ? ` · ${item.required}` : ""}</small>
+                      </div>
+                      <em className={item.status}>{PYTHON_PACKAGE_STATUS_LABELS[item.status] || item.status}</em>
+                    </article>
+                  ))}
+                  {!visiblePackages.length && <p className="empty-note">没有匹配的 Python 扩展库。</p>}
+                </div>
+              </section>
+            )}
             {grouped.map(([category, items]) => (
               <section key={category}>
                 <h3>{category.toUpperCase()}</h3>
@@ -1935,7 +2005,8 @@ function Tooling({ open, onClose }: { open: boolean; onClose: () => void }) {
                 })}
               </section>
             ))}
-            {!loading && !tools.length && <p className="empty-note">暂无工具目录数据</p>}
+            {!loading && !visibleTools.length && tab === "ctf" && <p className="empty-note">暂无 CTF 工具目录数据</p>}
+            {!loading && !visibleTools.length && tab === "system" && !pythonEnvironment && <p className="empty-note">暂无系统环境数据</p>}
           </div>
         </Dialog.Content>
       </Dialog.Portal>

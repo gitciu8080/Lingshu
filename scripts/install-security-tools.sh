@@ -9,7 +9,7 @@ CHECK_ONLY=0
 usage() {
   printf '%s\n' \
     '用法: sudo ./scripts/install-security-tools.sh [--profile core|extended] [--dry-run|--check]' \
-    '  core      高频侦察、Web、取证、逆向辅助工具与 OpenJDK JDK（默认）' \
+    '  core      高频侦察、Web、取证、OCR 语言包、逆向辅助工具与 OpenJDK JDK（默认）' \
     '  extended  在 core 基础上增加 Ghidra、Bettercap、Wine 等重型/特权组件' \
     '  --check   只检查包状态，不安装'
 }
@@ -32,7 +32,7 @@ esac
 
 CORE_PACKAGES=(
   subfinder feroxbuster joomscan foremost ropper apktool steghide stegseek zbar-tools
-  strace python3-pytesseract default-jdk
+  strace default-jdk tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-chi-tra
 )
 EXTENDED_PACKAGES=(ghidra bettercap wine wine64 wine32)
 # 当前源可能缺失的可选工具：逐个容错安装，失败不阻断整体。
@@ -60,6 +60,20 @@ for command in java javac; do
     printf '  [缺失]   %s\n' "$command"
   fi
 done
+
+if command -v tesseract >/dev/null 2>&1; then
+  printf 'Tesseract 语言包检查:\n'
+  available_languages="$(tesseract --list-langs 2>/dev/null || true)"
+  for language in eng chi_sim chi_tra; do
+    if printf '%s\n' "$available_languages" | grep -Fxq "$language"; then
+      printf '  [可用]   %s\n' "$language"
+    else
+      printf '  [缺失]   %s\n' "$language"
+    fi
+  done
+else
+  printf '  [缺失]   tesseract（无法检查 OCR 语言包）\n'
+fi
 
 # requirements.txt 由项目运行解释器安装。优先允许部署人员显式指定，
 # 其次自动识别项目 .venv 和常见 Conda 的 agentscope 环境，最后才退回
