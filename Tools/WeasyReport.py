@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import html
 import ipaddress
-import logging
 import mimetypes
 import os
 import re
@@ -23,23 +22,13 @@ from jinja2 import Environment, select_autoescape
 from markdown_it import MarkdownIt
 
 
-logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _FRONTEND_DIR = _PROJECT_ROOT / "frontend"
 _WORKDIR = _PROJECT_ROOT / "WorkDir"
 _MERMAID_RENDERER = (
     _PROJECT_ROOT / "Skills" / "beautiful-mermaid" / "scripts" / "render.js"
 )
-_DEFAULT_REPORT_LOGO_URL = (
-    "https://lingshuzhidun.oss-rg-china-mainland.aliyuncs.com/"
-    "lingshu-logo-black.png?Expires=1787324974&"
-    "OSSAccessKeyId=TMP.3Ky2ZiUuPiBWLM2SyujdSNFXmtfK1YuiVmHo4PXtNUQ6DXBVJWh3nzcUktTGY2Dz76eT9XqtTkCuww3rkDUuJ5SUd3WS36&"
-    "Signature=p%2BtwaM%2BHrIXAQJzYBq7dqCLZY58%3D"
-)
-_REPORT_LOGO_URL = (
-    os.getenv("LINGSHU_REPORT_LOGO_URL", "").strip()
-    or _DEFAULT_REPORT_LOGO_URL
-)
+_REPORT_LOGO_PATH = _FRONTEND_DIR / "lingshu-logo-black.png"
 _PAGE_BREAK_MARKER = "LINGSHU_INTERNAL_PAGE_BREAK_8F4D1C"
 _MERMAID_MARKER_PREFIX = "LINGSHU_INTERNAL_MERMAID_"
 _DANGEROUS_HTML_BLOCK_RE = re.compile(
@@ -585,29 +574,12 @@ def _font_path(name: str, fallback: str) -> Path:
 
 
 def _materialize_report_logo(asset_dir: Path) -> str:
-    """把远程 Logo 固化为本地报告资源，失败时保留可见的项目 Logo。
-
-    WeasyPrint 对图片加载失败默认只记录日志并继续生成，容易产生“PDF 成功但
-    Logo 消失”的假成功。这里先显式校验并下载；部署方可通过
-    ``LINGSHU_REPORT_LOGO_URL`` 更新 OSS 地址，无须再次改代码。
-    """
-    try:
-        response = _url_fetcher((asset_dir,))(_REPORT_LOGO_URL)
-        body = response.body
-        data = body.read() if hasattr(body, "read") else bytes(body or b"")
-        if not data:
-            raise ValueError("远程 Logo 内容为空")
-        mime = str(response.headers.get("Content-Type") or "image/png")
-        suffix = mimetypes.guess_extension(mime.split(";", 1)[0]) or ".img"
-        logo_path = asset_dir / f"report-logo{suffix}"
-        logo_path.write_bytes(data)
-        return logo_path.as_uri()
-    except Exception as exc:
-        fallback = (_PROJECT_ROOT / "webui" / "src" / "logo2.png").resolve()
-        if not fallback.is_file():
-            raise RuntimeError(f"报告 Logo 加载失败且本地回退不存在: {exc}") from exc
-        logger.warning("远程报告 Logo 加载失败，使用本地回退: %s", exc)
-        return fallback.as_uri()
+    """返回版本化的本地报告 Logo，避免远程签名过期导致图片缺失。"""
+    del asset_dir
+    logo_path = _REPORT_LOGO_PATH.resolve()
+    if not logo_path.is_file():
+        raise RuntimeError(f"报告 Logo 不存在: {logo_path}")
+    return logo_path.as_uri()
 
 
 def generate_weasyprint_pdf(

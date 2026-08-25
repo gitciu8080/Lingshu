@@ -1,20 +1,29 @@
 """
-session_store.py — SQLite 会话存储层
+session_store.py — 会话存储层
 
 管理 sessions 和 session_messages 两张表的 CRUD 操作。
-复用 core/auth.py 的 get_db() 获取数据库连接。
+复用 core/database.py 的 PostgreSQL 连接工厂。
 """
 
 import uuid
 from datetime import datetime
 
-from core.auth import get_db
+from core.database import get_db, table_columns
+
+
+def _lock_message_sequence(conn, session_id: str) -> None:
+    """串行化同一会话的序号分配，避免 PostgreSQL 并发写入发生 seq 冲突。"""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+        (session_id,),
+    )
 
 
 def init_sessions_db():
     """初始化 sessions 和 session_messages 两张表（幂等操作）。"""
     conn = get_db()
     try:
+        identity = "BIGSERIAL PRIMARY KEY"
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -36,9 +45,9 @@ def init_sessions_db():
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS session_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {identity},
                 session_id TEXT NOT NULL,
                 seq INTEGER NOT NULL,
                 role TEXT NOT NULL,
@@ -66,9 +75,9 @@ def init_sessions_db():
         """)
         # blob 引用表：session_id/sha256/original_name/size；删除最后一个
         # 引用后才删除共享 blob（内容寻址存储，多会话可共享同一文件）。
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS blob_refs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {identity},
                 session_id TEXT NOT NULL,
                 sha256 TEXT NOT NULL,
                 original_name TEXT DEFAULT '',
@@ -82,9 +91,7 @@ def init_sessions_db():
             "CREATE INDEX IF NOT EXISTS idx_blob_refs_sha ON blob_refs(sha256)"
         )
         # CREATE TABLE IF NOT EXISTS 不会给旧表补列，显式执行幂等迁移。
-        session_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
-        }
+        session_columns = table_columns(conn, "sessions")
         migrations = {
             "target_info": "TEXT DEFAULT NULL",
             "pending_approval": "TEXT DEFAULT NULL",
@@ -103,9 +110,7 @@ def init_sessions_db():
                 conn.execute(
                     f"ALTER TABLE sessions ADD COLUMN {column} {definition}"
                 )
-        message_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(session_messages)").fetchall()
-        }
+        message_columns = table_columns(conn, "session_messages")
         if "source_id" not in message_columns:
             conn.execute(
                 "ALTER TABLE session_messages ADD COLUMN source_id TEXT DEFAULT ''"
@@ -144,12 +149,13 @@ def create_session(
         session_id = uuid.uuid4().hex[:16]
     if not title:
         title = target
+    vision_value = 1 if str(vision).strip().lower() in {"1", "true", "yes", "on"} else 0
     conn = get_db()
     try:
         conn.execute(
             """INSERT INTO sessions (id, user_id, title, target, goal, provider, model, thinking_intensity, vision)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, user_id, title, target, goal, provider, model, thinking_intensity, vision or ''),
+            (session_id, user_id, title, target, goal, provider, model, thinking_intensity, vision_value),
         )
         conn.commit()
     finally:
@@ -247,10 +253,10 @@ def delete_session(session_id: str) -> list[str]:
         # 4) 判定孤儿：其他会话是否还引用同一 blob
         for (sha256,) in refs:
             remaining = conn.execute(
-                "SELECT COUNT(*) FROM blob_refs WHERE sha256 = ?",
+                "SELECT COUNT(*) AS total FROM blob_refs WHERE sha256 = ?",
                 (sha256,),
             ).fetchone()
-            if (remaining[0] or 0) == 0:
+            if (remaining["total"] or 0) == 0:
                 orphaned.append(sha256)
     finally:
         conn.close()
@@ -262,9 +268,8 @@ def add_blob_ref(session_id: str, sha256: str, original_name: str = '', size: in
     conn = get_db()
     try:
         conn.execute(
-            """INSERT OR IGNORE INTO blob_refs
-               (session_id, sha256, original_name, size)
-               VALUES (?, ?, ?, ?)""",
+            """INSERT INTO blob_refs (session_id, sha256, original_name, size)
+               VALUES (?, ?, ?, ?) ON CONFLICT(session_id, sha256) DO NOTHING""",
             (session_id, sha256, original_name, size),
         )
         conn.commit()
@@ -296,17 +301,18 @@ def add_message(
 ) -> int:
     """追加一条消息到会话，自动计算 seq，返回 seq 值。
 
-    使用 BEGIN IMMEDIATE 保证 SELECT MAX(seq) + INSERT 的原子性，
+    使用 PostgreSQL 事务保证 SELECT MAX(seq) + INSERT 的原子性，
     防止并发写入导致 seq 冲突。
     """
     conn = get_db()
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("BEGIN")
+        _lock_message_sequence(conn, session_id)
         row = conn.execute(
-            "SELECT COALESCE(MAX(seq), 0) FROM session_messages WHERE session_id = ?",
+            "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM session_messages WHERE session_id = ?",
             (session_id,),
         ).fetchone()
-        next_seq = (row[0] or 0) + 1
+        next_seq = (row["max_seq"] or 0) + 1
         conn.execute(
             """INSERT INTO session_messages
                (session_id, seq, role, content, event_type, agent_name, source_id)
@@ -326,7 +332,7 @@ def apply_persistence_batch(operations: list[dict]) -> list[int | None]:
     """在单个事务中顺序应用消息和流快照操作。
 
     返回值与 operations 对齐；只有 message 操作返回分配到的 seq。
-    BEGIN IMMEDIATE 保证本批次与用户消息等其他写入者之间不会产生序号
+    PostgreSQL 事务保证本批次与用户消息等其他写入者之间不会产生序号
     冲突，同时把多次 fsync 合并为一次事务提交。
     """
     if not operations:
@@ -335,18 +341,19 @@ def apply_persistence_batch(operations: list[dict]) -> list[int | None]:
     results: list[int | None] = []
     next_sequences: dict[str, int] = {}
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("BEGIN")
         for operation in operations:
             operation_type = operation.get("type")
             session_id = str(operation.get("session_id") or "")
             if operation_type == "message":
                 if session_id not in next_sequences:
+                    _lock_message_sequence(conn, session_id)
                     row = conn.execute(
-                        "SELECT COALESCE(MAX(seq), 0) FROM session_messages "
+                        "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM session_messages "
                         "WHERE session_id = ?",
                         (session_id,),
                     ).fetchone()
-                    next_sequences[session_id] = int(row[0] or 0)
+                    next_sequences[session_id] = int(row["max_seq"] or 0)
                 next_sequences[session_id] += 1
                 seq = next_sequences[session_id]
                 conn.execute(

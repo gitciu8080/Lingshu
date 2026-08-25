@@ -1,7 +1,8 @@
-"""灵枢本地 Markdown 知识库。
+"""灵枢的容器化 RAG 与文件型字典查询。
 
-`.RAG` 是只读语料源；向量库、哈希清单均写入 `.TaskMemory/rag`。
-服务配置或可选依赖缺失时安全降级，主任务链不受影响。
+`.RAG` 始终是只读语料源：通用安全知识和脱敏长期记忆分别写入 Qdrant
+collection；`.RAG/13-字典库` 不参与向量化，只提供精确匹配查询。增量同步
+清单是可重建的派生状态，保存在 `.TaskMemory/rag`。
 """
 from __future__ import annotations
 
@@ -14,8 +15,24 @@ from typing import Any
 from core.config import RuntimeConfig
 
 
+_COLLECTIONS = {
+    "knowledge": {
+        "collection": "lingshu_security_knowledge",
+        "name": "lingshu-security-knowledge",
+        "description": "灵枢安全测试、漏洞与 CTF Writeup 知识库",
+    },
+    "memory": {
+        "collection": "lingshu_agent_memory",
+        "name": "lingshu-agent-memory",
+        "description": "灵枢脱敏的历史任务经验，仅供当前授权任务参考",
+    },
+}
+_MEMORY_PREFIX = "long-memory/"
+_DICTIONARY_DIR = "13-字典库"
+
+
 class RAGService:
-    """Own the KnowledgeBase runtime and incremental Markdown indexing."""
+    """管理 Qdrant collection、Markdown 增量索引与字典精确查询。"""
 
     def __init__(
         self,
@@ -25,33 +42,38 @@ class RAGService:
     ) -> None:
         self.project_root = project_root
         self.source_dir = project_root / ".RAG"
-        # 默认与主系统共享派生索引；CLI 等离线调用方可通过 state_dir 指定独立目录，
-        # 避免与运行中的服务争用 Milvus Lite 的单进程文件锁。
+        self.dictionary_dir = self.source_dir / _DICTIONARY_DIR
         self.state_dir = state_dir or (project_root / ".TaskMemory" / "rag")
-        self.manifest_path = self.state_dir / "manifest.json"
+        self.manifest_paths = {
+            key: self.state_dir / f"{key}_manifest.json"
+            for key in _COLLECTIONS
+        }
         self.runtime = runtime or RuntimeConfig.from_env()
+        # ``knowledge`` 和 ``store`` 保留为兼容属性，指向通用知识 collection。
         self.knowledge: Any | None = None
         self.store: Any | None = None
+        self.knowledge_bases: dict[str, Any] = {}
+        self.stores: dict[str, Any] = {}
+        self._qdrant_admin: Any | None = None
         self.available = False
         self.started = False
         self.error: str | None = None
         self.last_sync: dict[str, Any] = {}
         self.configured_dimensions = self.runtime.embedding_dimensions
         self.effective_dimensions: int | None = None
-        self.collection_dimensions: int | None = None
-        self.dimension_migration: dict[str, Any] | None = None
+        self.collection_dimensions: dict[str, int | None] = {
+            key: None for key in _COLLECTIONS
+        }
+        self.dimension_migration: dict[str, dict[str, int]] = {}
         self._lock = asyncio.Lock()
 
     async def start(self, progress_callback=None) -> None:
-        """Initialize the optional RAG runtime, then synchronize the corpus.
-
-        ``progress_callback`` is forwarded to :meth:`sync` when provided.
-        """
+        """连接 Qdrant、建立知识库句柄并同步 `.RAG` 的 Markdown。"""
         if self.started:
             return
         self.started = True
         self.error = None
-        self.dimension_migration = None
+        self.dimension_migration = {}
         config_error = self.runtime.embedding_error()
         if config_error:
             self.error = config_error
@@ -59,12 +81,11 @@ class RAGService:
         try:
             from agentscope.credential import OpenAICredential
             from agentscope.embedding import OpenAIEmbeddingModel
-            from agentscope.rag import KnowledgeBase, MilvusLiteStore
+            from agentscope.rag import KnowledgeBase, QdrantStore
             from pydantic import SecretStr
+            from qdrant_client import AsyncQdrantClient
 
             self.state_dir.mkdir(parents=True, exist_ok=True)
-            self.store = MilvusLiteStore(uri=str(self.state_dir / "knowledge.db"))
-            await self.store.__aenter__()
             embedding = OpenAIEmbeddingModel(
                 credential=OpenAICredential(
                     api_key=SecretStr(self.runtime.embedding_api_key),
@@ -76,67 +97,99 @@ class RAGService:
                 max_retries=int(self.runtime.embedding_model_settings.get("max_retries", 3)),
                 context_size=int(self.runtime.embedding_model_settings.get("context_size", 8191)),
             )
-            # 兼容端点可能忽略 dimensions 参数，不能直接把配置值当成真实维度。
-            # 先用单条探测文本取得实际向量长度，再以真实维度创建/校验 collection。
-            actual_dimensions = await self._probe_embedding_dimensions(embedding)
-            self.effective_dimensions = actual_dimensions
-            embedding.dimensions = actual_dimensions
-            await self._ensure_collection_dimensions(actual_dimensions)
-            await self._load_collection()
-            self.knowledge = KnowledgeBase(
-                name="lingshu-rag",
-                description="灵枢本地安全测试与 CTF Writeup 知识库",
-                embedding_model=embedding,
-                vector_store=self.store,
-                collection="lingshu_rag",
-            )
+            # 兼容端点可能忽略 dimensions；以实际探测到的长度作为 collection 约束。
+            self.effective_dimensions = await self._probe_embedding_dimensions(embedding)
+            embedding.dimensions = self.effective_dimensions
+            self._qdrant_admin = AsyncQdrantClient(url=self.runtime.qdrant_url)
+
+            for key, spec in _COLLECTIONS.items():
+                await self._ensure_collection_dimensions(key, self.effective_dimensions)
+                store = QdrantStore(url=self.runtime.qdrant_url)
+                await store.__aenter__()
+                self.stores[key] = store
+                self.knowledge_bases[key] = KnowledgeBase(
+                    name=spec["name"],
+                    description=spec["description"],
+                    embedding_model=embedding,
+                    vector_store=store,
+                    collection=spec["collection"],
+                )
+
+            self.store = self.stores["knowledge"]
+            self.knowledge = self.knowledge_bases["knowledge"]
             self.available = True
             await self.sync(progress_callback=progress_callback)
-        except Exception as exc:  # optional subsystem must never block mission startup
+        except Exception as exc:  # 可选子系统不得阻断主任务启动
             self.error = f"知识库初始化失败: {exc}"
             self.available = False
-            if self.store is not None:
-                await self.store.__aexit__(None, None, None)
-                self.store = None
+            await self._close_resources()
+
+    async def _close_resources(self) -> None:
+        for store in self.stores.values():
+            try:
+                await store.__aexit__(None, None, None)
+            except Exception:
+                pass
+        self.stores = {}
+        self.knowledge_bases = {}
+        self.store = self.knowledge = None
+        if self._qdrant_admin is not None:
+            try:
+                await self._qdrant_admin.close()
+            except Exception:
+                pass
+        self._qdrant_admin = None
 
     async def close(self) -> None:
-        if self.store is not None:
-            await self.store.__aexit__(None, None, None)
-        self.store = self.knowledge = None
+        await self._close_resources()
         self.available = False
         self.started = False
 
     async def restart(self) -> None:
-        """关闭并重新初始化失败的 RAG 服务，供重建接口进行运行时恢复。"""
+        """重新连接 Qdrant 并重试初始化，供重建接口恢复可选 RAG 服务。"""
         await self.close()
         await self.start()
 
     async def reload_runtime(self) -> None:
-        """重新读取管理员/环境配置，并用新的嵌入端点重建运行时。"""
+        """重新读取嵌入与 Qdrant 配置。"""
         await self.close()
         self.runtime = RuntimeConfig.from_env()
         self.configured_dimensions = self.runtime.embedding_dimensions
         self.effective_dimensions = None
-        self.collection_dimensions = None
-        self.dimension_migration = None
+        self.collection_dimensions = {key: None for key in _COLLECTIONS}
+        self.dimension_migration = {}
         await self.start()
 
     def status(self) -> dict[str, Any]:
+        documents = {key: len(self._load_manifest(key)) for key in _COLLECTIONS}
         return {
             "available": self.available,
             "error": self.error,
             "source_dir": ".RAG",
-            "documents": len(self._load_manifest()),
+            "vector_store": "qdrant",
+            "qdrant_url": self.runtime.qdrant_url,
+            "documents": sum(documents.values()),
+            "collections": {
+                key: {
+                    "name": spec["collection"],
+                    "documents": documents[key],
+                    "dimensions": self.collection_dimensions[key],
+                }
+                for key, spec in _COLLECTIONS.items()
+            },
+            "dictionary": {
+                "source_dir": f".RAG/{_DICTIONARY_DIR}",
+                "indexed": False,
+                "query_mode": "exact_file_match",
+            },
             "last_sync": self.last_sync,
             "embedding_model": self.runtime.embedding_model,
             "configured_dimensions": self.configured_dimensions,
             "effective_dimensions": self.effective_dimensions,
-            "collection_dimensions": self.collection_dimensions,
-            "dimension_migration": self.dimension_migration,
+            "dimension_migration": self.dimension_migration or None,
         }
 
     async def _probe_embedding_dimensions(self, embedding: Any) -> int:
-        """调用一次 Embedding API，返回供应商实际输出的向量维度。"""
         response = await embedding(["灵枢知识库向量维度探测"])
         vectors = getattr(response, "embeddings", None)
         if not vectors or not vectors[0]:
@@ -147,231 +200,229 @@ class RAGService:
         return actual
 
     @staticmethod
-    def _extract_vector_dimension(description: Any) -> int | None:
-        """兼容不同 pymilvus 版本的 describe_collection 返回结构。"""
-        if not isinstance(description, dict):
+    def _qdrant_vector_dimension(info: Any) -> int | None:
+        """从 qdrant-client 的 collection 信息中读取单向量字段维度。"""
+        vectors = getattr(getattr(getattr(info, "config", None), "params", None), "vectors", None)
+        if isinstance(vectors, dict):
+            vectors = next(iter(vectors.values()), None)
+        size = getattr(vectors, "size", None)
+        try:
+            return int(size) if size is not None and int(size) > 0 else None
+        except (TypeError, ValueError):
             return None
-        schema = description.get("schema")
-        candidates = [description.get("fields")]
-        if isinstance(schema, dict):
-            candidates.append(schema.get("fields"))
-        for fields in candidates:
-            if not isinstance(fields, list):
-                continue
-            for field in fields:
-                if not isinstance(field, dict) or field.get("name") != "vector":
-                    continue
-                values = [
-                    field.get("dim"),
-                    (field.get("params") or {}).get("dim") if isinstance(field.get("params"), dict) else None,
-                    (field.get("type_params") or {}).get("dim") if isinstance(field.get("type_params"), dict) else None,
-                ]
-                for value in values:
-                    try:
-                        if value is not None and int(value) > 0:
-                            return int(value)
-                    except (TypeError, ValueError):
-                        continue
-        return None
 
-    async def _ensure_collection_dimensions(self, actual_dimensions: int) -> None:
-        """校验 collection；维度变化时删除派生索引并从 `.RAG` 自动重建。"""
-        if self.store is None:
-            raise RuntimeError("Milvus 向量存储尚未初始化")
-        collection = "lingshu_rag"
-        exists = await self.store.has_collection(collection)
+    async def _ensure_collection_dimensions(self, key: str, actual_dimensions: int) -> None:
+        """维度改变时删除对应的派生 Qdrant collection 后全量重建。"""
+        if self._qdrant_admin is None:
+            raise RuntimeError("Qdrant 管理客户端尚未初始化")
+        collection = str(_COLLECTIONS[key]["collection"])
+        exists = await self._qdrant_admin.collection_exists(collection)
         if not exists:
-            # collection 被手工删除后旧 manifest 也必须清空，否则增量同步会误判无需写入。
-            if self._load_manifest():
-                self._write_manifest({})
-            self.collection_dimensions = actual_dimensions
+            if self._load_manifest(key):
+                self._write_manifest(key, {})
+            self.collection_dimensions[key] = actual_dimensions
             return
 
-        description = await asyncio.to_thread(
-            self.store.get_client().describe_collection,
-            collection_name=collection,
+        current_dimensions = self._qdrant_vector_dimension(
+            await self._qdrant_admin.get_collection(collection),
         )
-        current_dimensions = self._extract_vector_dimension(description)
         if current_dimensions is None:
-            raise RuntimeError("无法读取 Milvus collection 的 vector 维度")
-        self.collection_dimensions = current_dimensions
+            raise RuntimeError(f"无法读取 Qdrant collection {collection!r} 的向量维度")
+        self.collection_dimensions[key] = current_dimensions
         if current_dimensions == actual_dimensions:
             return
 
-        # Milvus 的向量字段维度不可原地修改；该数据库只是 `.RAG` 的派生缓存，
-        # 因而删除 collection 并清空 manifest，随后 sync 会从 Markdown 完整重建。
-        source_documents = len(self._sources())
-        await self.store.delete_collection(collection)
-        self._write_manifest({})
-        self.dimension_migration = {
-            "recreated": True,
+        await self._qdrant_admin.delete_collection(collection)
+        self._write_manifest(key, {})
+        self.collection_dimensions[key] = actual_dimensions
+        self.dimension_migration[key] = {
             "from": current_dimensions,
             "to": actual_dimensions,
-            "source_documents": source_documents,
+            "source_documents": len(self._sources_by_collection()[key]),
         }
-        self.collection_dimensions = actual_dimensions
-
-    async def _load_collection(self) -> None:
-        """确保 Milvus Lite collection 处于可检索的 loaded 状态。
-
-        Milvus Lite 在同一数据库被其它 client 关闭或释放后，collection 仍然
-        存在但会变为 ``released``。这种状态下 status/sync 看起来正常，search
-        却会报 code=101，因此加载操作必须在搜索前重复执行且保持幂等。
-        """
-        if self.store is None:
-            raise RuntimeError("Milvus 向量存储尚未初始化")
-        collection = "lingshu_rag"
-        if not await self.store.has_collection(collection):
-            return
-        await asyncio.to_thread(
-            self.store.get_client().load_collection,
-            collection_name=collection,
-        )
 
     def middleware(self):
-        """Return agentic middleware, or None when RAG is unavailable."""
-        if not self.available or self.knowledge is None:
+        """将通用知识与长期经验作为独立知识库挂载到 AgentScope。"""
+        if not self.available or not self.knowledge_bases:
             return None
         from agentscope.middleware import RAGMiddleware
 
         return RAGMiddleware(
-            knowledge_bases=[self.knowledge],
+            knowledge_bases=list(self.knowledge_bases.values()),
             parameters=RAGMiddleware.Parameters(mode="agentic", top_k=3),
         )
 
-    def _load_manifest(self) -> dict[str, dict[str, str]]:
+    def _manifest_path(self, key: str) -> Path:
+        return self.manifest_paths[key]
+
+    def _load_manifest(self, key: str) -> dict[str, dict[str, str]]:
         try:
-            raw = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            raw = json.loads(self._manifest_path(key).read_text(encoding="utf-8"))
             return raw if isinstance(raw, dict) else {}
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
-    def _write_manifest(self, manifest: dict[str, dict[str, str]]) -> None:
+    def _write_manifest(self, key: str, manifest: dict[str, dict[str, str]]) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        temporary = self.manifest_path.with_suffix(".tmp")
+        path = self._manifest_path(key)
+        temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(self.manifest_path)
+        temporary.replace(path)
 
-    def _sources(self) -> dict[str, tuple[Path, str]]:
+    def _sources_by_collection(self) -> dict[str, dict[str, tuple[Path, str]]]:
+        """将 `long-memory` 与其余 Markdown 拆分，字典 `.txt` 永不向量化。"""
+        result: dict[str, dict[str, tuple[Path, str]]] = {key: {} for key in _COLLECTIONS}
         if not self.source_dir.is_dir():
-            return {}
-        result: dict[str, tuple[Path, str]] = {}
+            return result
         for path in self.source_dir.rglob("*.md"):
-            if path.is_file():
-                content = path.read_bytes()
-                result[path.relative_to(self.source_dir).as_posix()] = (
-                    path,
-                    hashlib.sha256(content).hexdigest(),
-                )
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self.source_dir).as_posix()
+            key = "memory" if rel.startswith(_MEMORY_PREFIX) else "knowledge"
+            content = path.read_bytes()
+            result[key][rel] = (path, hashlib.sha256(content).hexdigest())
         return result
 
     async def sync(self, progress_callback=None) -> dict[str, Any]:
-        """Incrementally synchronize Markdown sources and remove stale documents.
-
-        ``progress_callback(done, total, rel, stats)`` is invoked after each
-        source file is processed (inserted, updated, or skipped); ``stats`` is
-        a dict with the running ``added``/``updated``/``removed`` counters.
-        """
-        if not self.available or self.knowledge is None:
+        """按 collection 增量同步 Markdown，删除已移除的派生向量。"""
+        if not self.available or not self.knowledge_bases:
             return self.status()
         async with self._lock:
             from agentscope.rag import ApproxTokenChunker, TextParser
 
-            old = self._load_manifest()
-            sources = self._sources()
+            sources_by_collection = self._sources_by_collection()
             parser, chunker = TextParser(), ApproxTokenChunker(chunk_size=512, overlap=64)
-            added = updated = removed = 0
-            for rel, entry in old.items():
-                if rel not in sources or sources[rel][1] != entry.get("sha256"):
-                    await self.knowledge.delete_document(entry["document_id"])
-                    removed += int(rel not in sources)
-            new_manifest: dict[str, dict[str, str]] = {}
-            total = len(sources)
+            per_collection: dict[str, dict[str, int]] = {}
+            total = sum(len(sources) for sources in sources_by_collection.values())
             done = 0
-            for rel, (path, digest) in sources.items():
-                old_entry = old.get(rel)
-                if old_entry and old_entry.get("sha256") == digest:
-                    new_manifest[rel] = old_entry
-                else:
-                    sections = await parser.parse(file=path.read_bytes(), filename=rel)
-                    chunks = await chunker.chunk(sections)
-                    document_id = await self.knowledge.insert_document(
-                        chunks, document_metadata={"source": rel, "sha256": digest},
-                    )
-                    new_manifest[rel] = {"sha256": digest, "document_id": document_id}
-                    if old_entry:
-                        updated += 1
+            for key, sources in sources_by_collection.items():
+                old = self._load_manifest(key)
+                knowledge = self.knowledge_bases[key]
+                added = updated = removed = 0
+                for rel, entry in old.items():
+                    if rel not in sources or sources[rel][1] != entry.get("sha256"):
+                        await knowledge.delete_document(entry["document_id"])
+                        removed += int(rel not in sources)
+
+                new_manifest: dict[str, dict[str, str]] = {}
+                for rel, (path, digest) in sources.items():
+                    old_entry = old.get(rel)
+                    if old_entry and old_entry.get("sha256") == digest:
+                        new_manifest[rel] = old_entry
                     else:
-                        added += 1
-                done += 1
-                if progress_callback is not None:
-                    progress_callback(done, total, rel, {
-                        "added": added, "updated": updated, "removed": removed,
-                    })
-            self._write_manifest(new_manifest)
+                        sections = await parser.parse(file=path.read_bytes(), filename=rel)
+                        chunks = await chunker.chunk(sections)
+                        document_id = await knowledge.insert_document(
+                            chunks,
+                            document_metadata={"source": rel, "sha256": digest, "corpus": key},
+                        )
+                        new_manifest[rel] = {"sha256": digest, "document_id": document_id}
+                        if old_entry:
+                            updated += 1
+                        else:
+                            added += 1
+                    done += 1
+                    if progress_callback is not None:
+                        progress_callback(done, total, rel, {
+                            "added": added,
+                            "updated": updated,
+                            "removed": removed,
+                            "collection": key,
+                        })
+                self._write_manifest(key, new_manifest)
+                per_collection[key] = {"added": added, "updated": updated, "removed": removed}
+
             self.last_sync = {
-                "added": added,
-                "updated": updated,
-                "removed": removed,
+                "added": sum(item["added"] for item in per_collection.values()),
+                "updated": sum(item["updated"] for item in per_collection.values()),
+                "removed": sum(item["removed"] for item in per_collection.values()),
+                "collections": per_collection,
                 "dimensions": self.effective_dimensions,
                 "collection_recreated": bool(self.dimension_migration),
             }
             return self.status()
 
+    async def rebuild(self, progress_callback=None) -> dict[str, Any]:
+        """删除两个派生 Qdrant collection 后，从 `.RAG` 全量重建。"""
+        await self.close()
+        from qdrant_client import AsyncQdrantClient
+
+        client = AsyncQdrantClient(url=self.runtime.qdrant_url)
+        try:
+            for key, spec in _COLLECTIONS.items():
+                collection = str(spec["collection"])
+                if await client.collection_exists(collection):
+                    await client.delete_collection(collection)
+                self._write_manifest(key, {})
+        finally:
+            await client.close()
+        await self.start(progress_callback=progress_callback)
+        return self.status()
+
     async def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
-        if not self.available or self.knowledge is None:
+        """跨两个 collection 检索后按相似度统一排序。"""
+        if not self.available or not self.knowledge_bases:
             raise RuntimeError(self.error or "知识库不可用")
         from agentscope.message import TextBlock
 
         normalized_query = query.strip()
         if not normalized_query:
             return []
-
-        # KnowledgeBase 和 Milvus Lite 都会复用同一个 client；与同步索引并发时
-        # 某些 pymilvus 版本会返回不完整的记录。因此检索也使用同一把锁。
+        limit = max(1, min(top_k, 10))
+        ranked: list[tuple[str, Any]] = []
         async with self._lock:
-            await self._load_collection()
-            try:
-                results = await self.knowledge.search(
-                    queries=[normalized_query],
-                    top_k=max(1, min(top_k, 10)),
-                )
-            except Exception as exc:
-                # 另一个 Lite client 恰好释放 collection 时，重载并仅重试一次。
-                # 其它错误（如 Embedding API 或维度异常）原样交给 API 层处理。
-                if "released" not in str(exc).lower():
-                    raise
-                await self._load_collection()
-                results = await self.knowledge.search(
-                    queries=[normalized_query],
-                    top_k=max(1, min(top_k, 10)),
-                )
+            for key, knowledge in self.knowledge_bases.items():
+                results = await knowledge.search(queries=[normalized_query], top_k=limit)
+                ranked.extend((key, result) for result in results)
 
+        ranked.sort(key=lambda item: float(getattr(item[1], "score", 0.0) or 0.0), reverse=True)
         output = []
-        for result in results:
+        for corpus, result in ranked[:limit]:
             chunk = getattr(result, "chunk", None)
             content = getattr(chunk, "content", None)
-            if isinstance(content, TextBlock):
-                text = content.text
-            else:
-                # 仅 Markdown 入库时通常均为 TextBlock；保留降级逻辑，防止单条
-                # 异常/非文本 chunk 让整个搜索接口变成 500。
-                text = str(getattr(content, "text", "") or "")
+            text = content.text if isinstance(content, TextBlock) else str(getattr(content, "text", "") or "")
             metadata = getattr(chunk, "metadata", None)
-            if not isinstance(metadata, dict):
-                metadata = {}
-            source = (
-                metadata.get("source")
-                or getattr(chunk, "source", None)
-                or getattr(result, "document_id", None)
-                or "未知来源"
-            )
+            metadata = metadata if isinstance(metadata, dict) else {}
+            source = metadata.get("source") or getattr(chunk, "source", None) or getattr(result, "document_id", None) or "未知来源"
             output.append({
                 "score": float(getattr(result, "score", 0.0) or 0.0),
                 "source": str(source),
+                "corpus": corpus,
                 "snippet": text[:1200],
             })
         return output
+
+    async def search_dictionary(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        """在 `.RAG/13-字典库` 的文本文件中作逐行、大小写无关的精确匹配。"""
+        normalized_query = query.strip()
+        if not normalized_query or not self.dictionary_dir.is_dir():
+            return []
+        return await asyncio.to_thread(
+            self._search_dictionary_sync,
+            normalized_query.casefold(),
+            max(1, min(limit, 100)),
+        )
+
+    def _search_dictionary_sync(self, needle: str, limit: int) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for path in sorted(self.dictionary_dir.rglob("*.txt")):
+            if not path.is_file():
+                continue
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    for line_number, line in enumerate(handle, start=1):
+                        value = line.strip()
+                        if value and value.casefold() == needle:
+                            results.append({
+                                "source": path.relative_to(self.source_dir).as_posix(),
+                                "line": line_number,
+                                "value": value[:1000],
+                            })
+                            if len(results) >= limit:
+                                return results
+            except OSError:
+                continue
+        return results
 
 
 _service: RAGService | None = None

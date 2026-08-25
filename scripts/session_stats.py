@@ -4,8 +4,8 @@
 session_stats.py — 灵枢 Agent 会话数据统计脚本
 
 数据源:
-  1. data/users.db  (SQLite: sessions / session_messages / users 表, 权威数据)
-  2. .TaskMemory/sessions/*.json  (任务状态快照, 含 category_decision 题型判定)
+  1. PostgreSQL（sessions / session_messages / users 表, 权威数据）
+  2. .TaskMemory/sessions/*.json  （任务状态快照, 含 category_decision 题型判定）
 
 输出:
   1. 控制台摘要
@@ -17,13 +17,17 @@ session_stats.py — 灵枢 Agent 会话数据统计脚本
 import json
 import os
 import re
-import sqlite3
 import statistics
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(ROOT, "data", "users.db")
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from core.database import get_db
+
 SNAPSHOT_DIR = os.path.join(ROOT, ".TaskMemory", "sessions")
 OUT_PATH = os.path.join(ROOT, "docs", "session_statistics.md")
 
@@ -36,9 +40,7 @@ UTC8 = timezone(timedelta(hours=8))
 def parse_ts(s: str, is_updated: bool = False) -> datetime | None:
     """解析时间戳为 UTC datetime。
 
-    created_at 由 SQLite CURRENT_TIMESTAMP 写入, 为 naive UTC；
-    updated_at 由 datetime.now().isoformat() 写入, 为 naive 本地时间
-    (系统时区 CST/UTC+8)。带时区后缀的按自身时区解析。
+    兼容历史数据的 naive 时间与 PostgreSQL 返回的带时区时间。
     """
     if not s:
         return None
@@ -80,8 +82,7 @@ def classify_target(t: str) -> str:
 
 
 def main():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_db()
     cur = conn.cursor()
 
     # ── 1. 会话基本数据 ──────────────────────────────────────────────
@@ -298,7 +299,7 @@ def main():
     w("# 灵枢 Agent 会话数据统计报告")
     w("")
     w(f"> 生成时间: {datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)")
-    w(f"> 数据源: `data/users.db` (SQLite) + `.TaskMemory/sessions/` (任务快照, 读取 {snap_ok} 个)")
+    w(f"> 数据源: PostgreSQL + `.TaskMemory/sessions/` (任务快照, 读取 {snap_ok} 个)")
     w("")
     w("## 一、总体概览")
     w("")
@@ -509,7 +510,7 @@ def main():
     w("")
     err_by_sid = Counter()
     for r in cur.execute("SELECT session_id FROM session_messages WHERE event_type='error'"):
-        err_by_sid[r[0]] += 1
+        err_by_sid[r["session_id"]] += 1
     w(f"| 含 error 事件的会话数 | {len(err_by_sid)} |")
     w(f"| error 事件总数 | {evt_counts['error']} |")
     w("")
@@ -555,6 +556,7 @@ def main():
     print(f"CSV 明细已写入: {csv_path}")
     print(f"报告已写入: {OUT_PATH}")
     print("\n".join(L[:60]))
+    conn.close()
 
 
 if __name__ == "__main__":

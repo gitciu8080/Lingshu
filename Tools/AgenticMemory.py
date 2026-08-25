@@ -129,6 +129,15 @@ def save_mission(target, goal, plan, attack_chain, success, summary, flag=None):
     }
     data["missions"].append(mission)
 
+    # 将本次任务同步生成一张脱敏经验卡片。此前只有热记忆溢出时才写入
+    # `.RAG/long-memory`，导致绝大多数刚完成的任务不能被 RAG 检索到。
+    # 卡片经 _redact 处理，不包含原始目标、Flag、凭据或完整工具输出。
+    try:
+        _archive_cold_mission(mission)
+    except OSError:
+        # RAG 归档是派生数据；热记忆仍会保存，后续任务可以再次尝试归档。
+        pass
+
     # 如果成功，记录技术映射
     if success and attack_chain:
         for step in attack_chain:

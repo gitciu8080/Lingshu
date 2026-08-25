@@ -42,6 +42,20 @@ import darkLogo from "./logored.png";
 
 type ThemeMode = "light" | "dark" | "liquid";
 
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  // WebKit may cancel a just-started download when its object URL is revoked
+  // within the same event turn.  Attaching the link also keeps this reliable
+  // for browsers that require a connected element for programmatic downloads.
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
 // Safari/WebKit 检测：注入 data-safari，供 CSS 做平衡降级（规避 SVG 折射、filter 动画等昂贵路径）
 if (typeof document !== "undefined") {
   const ua = navigator.userAgent;
@@ -2461,12 +2475,7 @@ function ConsoleApp() {
     if (!active) return;
     try {
       const blob = await api.report(active);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `lingshu-report-${active}.pdf`;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      triggerBlobDownload(blob, `lingshu-report-${active}.pdf`);
     } catch (err) {
       toast.error(`报告下载失败：${String(err)}`);
     }
@@ -2475,12 +2484,7 @@ function ConsoleApp() {
     if (!active) return;
     try {
       const blob = await api.reportMarkdown(active);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `lingshu-report-${active}.md`;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      triggerBlobDownload(blob, `lingshu-report-${active}.md`);
     } catch (err) {
       toast.error(`Markdown 报告下载失败：${String(err)}`);
     }
@@ -2492,12 +2496,10 @@ function ConsoleApp() {
     const prefix = prefixInput;
     try {
       const blob = await api.jsonl(active, prefix);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `${prefix.trim() ? `${prefix.trim()}-` : ""}${active}.jsonl`;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      triggerBlobDownload(
+        blob,
+        `${prefix.trim() ? `${prefix.trim()}-` : ""}${active}.jsonl`,
+      );
       toast.success("完整会话 JSONL 已导出");
     } catch (err) {
       toast.error(`JSONL 导出失败：${String(err)}`);

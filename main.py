@@ -312,7 +312,7 @@ def _iter_budget(
 
 # ── Summary 报告（任务收尾阶段）──
 # 报告阶段刻意放在任务终态固化之后：总结 Agent 失败/中断不得改变主任务结论。
-# 会话事件在 run_mission 内统一收集（CLI/API 同源），不依赖 api.py 的 SQLite
+# 会话事件在 run_mission 内统一收集（CLI/API 同源），不依赖 api.py 的持久化层
 # 持久化层，因此也天然规避了异步写入队列的竞速问题。
 _SUMMARY_TRANSCRIPT_TYPES = {
     "", "message", "text_end", "user_message", "phase_change", "error",
@@ -977,8 +977,8 @@ async def run_mission(
       3. 初始题型分类（classify，供 Attack 参考）
       4. 初始化运行时配置与任务状态，持久化到 .TaskMemory/
       5. 创建模型与基础 Agent（Analysis）
-      6. 按目标类型路由创建 Recon（网络侦察 或 文件 triage，携带 SubmitPlan）
-      7. Recon 先侦察后制定战略计划（合并原 Brain 职责；可提出题型修正建议，
+      6. 按目标类型选择首轮侦察；文件任务额外保留网络 Recon 供 Orchestrator 调度
+      7. 首轮侦察先侦察后制定战略计划（合并原 Brain 职责；可提出题型修正建议，
          并由侦察证据触发 reclassify 提升初始题目识别准确性）
       8. 延迟创建 Attack（携带分类结果，动态加载 Skill）
       9. Orchestrator 主循环调度，直至任务进入终态
@@ -1061,7 +1061,7 @@ async def run_mission(
 
     # ── 4a. 会话事件收集器（Summary 报告数据源，CLI/API 同源）──
     # 包装事件回调同步收集 message/text_end/审批/计划等会话事件，任务收尾时
-    # 交给 run_summary_report 生成报告；不依赖 api.py 的 SQLite 持久化层。
+    # 交给 run_summary_report 生成报告；不依赖 api.py 的持久化层。
     _runtime_messages: list[dict] = []
     event_callback = _make_summary_collector(event_callback, _runtime_messages)
 
@@ -1388,12 +1388,15 @@ async def run_mission(
             state=build_role_agent_state(mission_id, "analysis"),
         )
 
-        # ── 6. Recon / Triage 路由 ──
-        # 按目标类型选择侦察方式：
-        #   network    → 端口/服务/指纹扫描（scoped_shell）
-        #   file/归档  → 文件静态研判（triage）
+        # ── 6. 首轮侦察与后续可调度角色 ──
+        # 网络任务首轮使用 NetworkRecon。文件/归档任务首轮必须先用
+        # ArtifactTriage 做本地静态研判，但同时创建 NetworkRecon：文件中
+        # 出现已授权网络线索时，后续由 Orchestrator 决定是否调度它。
+        # 不再把 ArtifactTriage 伪装成唯一的 recon_agent，避免后续
+        # dispatch_recon 被锁死为本地文件分析。
+        artifact_triage = None
         if target_spec.kind == "network":
-            recon = create_network_recon_agent(
+            network_recon = create_network_recon_agent(
                 light_model, target_str, project_dir, runtime.command_timeout,
                 scope_registry=scope_registry,
                 max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
@@ -1406,19 +1409,37 @@ async def run_mission(
                 store=store,
                 event_callback=event_callback,
             )
+            initial_recon = network_recon
         else:
-            recon = create_artifact_triage_agent(
+            artifact_triage = create_artifact_triage_agent(
                 light_model, workdir, project_dir, runtime.command_timeout,
                 max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
                 offloader=workspace,
                 context_config=context_config,
-                state=build_role_agent_state(mission_id, "recon"),
+                state=build_role_agent_state(mission_id, "artifact_triage"),
                 artifact_root=ws_root,
                 executor=executor,
                 mission=mission,
                 store=store,
                 event_callback=event_callback,
             )
+            # 文件任务的网络 Recon 不参与首轮 triage。它使用同一个
+            # ScopeRegistry，只有 Orchestrator 提供的已授权网络目标能通过
+            # scoped_shell；文件路径仅作为工具的兼容性回退目标。
+            network_recon = create_network_recon_agent(
+                light_model, target_str, project_dir, runtime.command_timeout,
+                scope_registry=scope_registry,
+                max_iters=_iter_budget(target_spec.kind, "recon", model_ver),
+                offloader=workspace,
+                context_config=context_config,
+                state=build_role_agent_state(mission_id, "network_recon"),
+                artifact_root=ws_root,
+                executor=executor,
+                mission=mission,
+                store=store,
+                event_callback=event_callback,
+            )
+            initial_recon = artifact_triage
 
         # ── 7. Recon 与规划合并：先侦察后制定计划 ──
         # 把原 Brain 的战略规划职责并入 Recon（Recon 现已携带 SubmitPlan 工具，
@@ -1469,9 +1490,9 @@ async def run_mission(
         while True:
             try:
                 plan_result = await run_interruptible_agent_reply(
-                    recon,
+                    initial_recon,
                     UserMsg(name="user", content=planning_recon_prompt),
-                    prefix="[Recon] ",
+                    prefix=f"[{initial_recon.name}] ",
                     on_event=event_callback,
                 )
                 plan_text = plan_result.get_text_content() or ""
@@ -1505,7 +1526,7 @@ async def run_mission(
                     event_callback(
                         "message",
                         content="已接收操作员新情报，正在据此更新侦察与计划。",
-                        agent=recon.name,
+                        agent=initial_recon.name,
                         event_type="agent_acknowledged",
                     )
         # 用真实侦察证据对初始题型做二次分类，提升识别准确性。
@@ -1542,7 +1563,7 @@ async def run_mission(
             category_decision.primary,
             target_spec.kind,
             mission.plan,
-            recon.name,
+            initial_recon.name,
         )
         mission.plan = f"{mission.plan.rstrip()}\n\n{expert_section}"
         for item in mission.plan_items:
@@ -1559,15 +1580,15 @@ async def run_mission(
                 mission.plan,
             ),
         )
-        mission.record("recon", "plan_created", plan_items_count=len(mission.plan_items))
-        mission.record("recon", "session_title_created", title=mission.title)
+        mission.record(initial_recon.name, "plan_created", plan_items_count=len(mission.plan_items))
+        mission.record(initial_recon.name, "session_title_created", title=mission.title)
         if event_callback is not None:
-            event_callback("session_title", title=mission.title, agent=recon.name)
-            event_callback("message", content=expert_section, agent=recon.name)
+            event_callback("session_title", title=mission.title, agent=initial_recon.name)
+            event_callback("message", content=expert_section, agent=initial_recon.name)
             push_plan_update(mission, event_callback)
-        # 将首次侦察报告作为第一条发现入库，供后续分析与 Orchestrator 证据
-        # 核验使用。Recon 只在开始时执行一次，之后不再冗余复派。
-        mission.add_finding("Recon", plan_text)
+        # 将首轮侦察报告作为第一条发现入库，供后续分析与 Orchestrator 证据
+        # 核验使用。文件任务的来源必须保留为 ArtifactTriage，不能误标为 Recon。
+        mission.add_finding(initial_recon.name, plan_text)
         # 侦察与计划后再启用专家名册；后续角色首次调用时加入专家团。
         expert_roster_token = bind_expert_roster()
         # 状态机：PLANNING → ANALYSIS（首次侦察已并入规划步骤，直接分析，
@@ -1575,7 +1596,7 @@ async def run_mission(
         mission.transition(Phase.ANALYSIS, "首次侦察与计划已完成")
         store.save(mission)  # 每步都持久化，保证崩溃可恢复
         _push_target_info()   # 首次推送靶机信息
-        print(f"[Recon] 作战计划\n{mission.plan}\n")
+        print(f"[{initial_recon.name}] 作战计划\n{mission.plan}\n")
 
         # ── 8. Attack 延迟创建（Recon 后可能会 reclassify）──
         # 传入当前任务携带的分类结果；若后续 Recon 触发重分类，
@@ -1610,6 +1631,7 @@ async def run_mission(
             scope_registry=scope_registry,
             max_iters=_iter_budget(target_spec.kind, "reserve", model_ver, len(mission.plan_items)),
             event_callback=event_callback,
+            rag_middleware=rag_service.middleware(),
             offloader=workspace,
             context_config=context_config,
             state=build_role_agent_state(mission_id, "reserve"),
@@ -1626,11 +1648,12 @@ async def run_mission(
             mission.record("system", "auto_approve", reason="自动化模式预批准攻击阶段")
 
         # ── 9. Orchestrator 主循环 ──
-        # 战术调度核心：持有 recon/attack/state/store 的唯一调度者，
-        # 负责推进阶段、调度侦察与攻击、处理重分类、最终调用 complete_mission 收尾。
+        # 战术调度核心：同时持有 NetworkRecon 与（文件任务的）ArtifactTriage，
+        # 根据当前证据选择后续侦察角色，并负责攻击、重分类与最终收尾。
         orchestrator = create_orchestrator_agent(
             model=main_model,
-            recon_agent=recon,
+            recon_agent=network_recon,
+            artifact_triage_agent=artifact_triage,
             attack_agent=attack,
             reserve_agent=reserve,
             mission=mission,
@@ -1649,7 +1672,7 @@ async def run_mission(
         plan_items_text = "\n".join(
             f"  {item['id']} [{item['phase']}] {item['content']}"
             for item in mission.plan_items
-        ) or "  （Recon 未登记结构化计划，可用 AddPlan 自行建立清单）"
+        ) or "  （首轮侦察未登记结构化计划，可用 AddPlan 自行建立清单）"
         orch_context = ""
         if initial_context:
             orch_context = (
@@ -1666,9 +1689,11 @@ async def run_mission(
             f"执行以下已授权任务。\n目标：{mission.target}\n目标要求：{mission.goal}\n\n"
             f"作战计划：\n{mission.plan}\n\n"
             f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
-            "初始侦察已在任务开始时执行一次，侦察报告已作为第一条安全发现入库。"
-            "请基于已有侦察证据直接开始分析研判，无需再次复派侦察；仅在确有信息缺口"
-            "时才聚焦复侦。结束时必须调用 complete_mission。"
+            f"首轮侦察由 {initial_recon.name} 执行，报告已作为第一条安全发现入库。"
+            "请基于已有证据直接开始分析研判；仅在确有信息缺口时才聚焦复侦。"
+            "文件任务中，若文件证据指向网络目标，先按授权范围处理，再由你选择调用 "
+            "dispatch_recon（网络）或 dispatch_artifact_triage（本地文件）。"
+            "结束时必须调用 complete_mission。"
             f"{orch_context}"
         )
         # P5 熔断重试预算：Orchestrator 输出残缺 <tool_call>/空回答时重新注入
@@ -1787,6 +1812,12 @@ async def run_mission(
             print(f"[系统] 任务结束: success={mission.success}, flag={mission.flag or '未发现'}")
             if mission.flag and event_callback:
                 event_callback("flag_found", flag=mission.flag)
+            # save_mission 会把脱敏的任务经验写入 .RAG/long-memory；终态前
+            # 同步派生索引，保证下一会话可立即检索，而不是等到服务重启。
+            try:
+                await rag_service.sync()
+            except Exception as exc:  # 记忆同步不可影响已固化的任务结果
+                logger.warning("任务经验同步到知识库失败: %s", exc)
         _push_target_info()
         # ── 11. Summary Agent 总结与 PDF 报告（终态固化后、返回前）──
         # 报告阶段刻意放在任务终态固化之后：总结 Agent 失败/中断不得改变

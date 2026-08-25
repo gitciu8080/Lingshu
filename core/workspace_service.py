@@ -257,7 +257,7 @@ class WorkspaceService:
                     f"基础镜像 {self.base_image!r} 已构建，且首次派生镜像"
                     "构建（网关 venv，需网络）已成功。"
                     "若构建期网络受限，可先用 "
-                    "'./scripts/build_workspace_image.sh' 预热派生镜像。"
+                    "'python scripts/build_workspace_image.py' 预热派生镜像。"
                     f"底层错误: {type(exc).__name__}: {exc}"
                 ) from exc
             self._cache[key] = _CachedWorkspace(workspace)
@@ -343,7 +343,7 @@ class WorkspaceService:
     def put_blob(self, data: bytes) -> str:
         """把字节写入内容寻址 blob store，返回 sha256。
 
-        相同内容只落盘一次；引用计数由调用方（SQLite blob 引用表）维护。
+        相同内容只落盘一次；引用计数由调用方（PostgreSQL blob 引用表）维护。
         """
         digest = _sha256_bytes(data)
         target = self.root / "blobs" / digest / "source"

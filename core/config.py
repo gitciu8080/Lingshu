@@ -7,6 +7,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,27 @@ def _load_dotenv(dotenv_path: str | Path | None = None) -> None:
             val = val.strip().strip("\"'")
             if key and key not in os.environ:
                 os.environ[key] = val
+
+
+def _normalize_embedding_base_url(value: str) -> str:
+    """补齐 Ollama OpenAI 兼容端点的 ``/v1`` 前缀。
+
+    Ollama 原生 API 使用 ``/api``，而 AgentScope 的
+    :class:`OpenAIEmbeddingModel` 使用 OpenAI ``/v1/embeddings`` 协议。模型
+    注册表中常将 Ollama 地址填为 ``http://host:11434``，此处仅对该默认端口
+    且根路径地址规范化；其它兼容网关保持原样。
+    """
+    normalized = value.strip().rstrip("/")
+    if not normalized:
+        return normalized
+    try:
+        parsed = urlsplit(normalized)
+        if parsed.port == 11434 and parsed.path in ("", "/"):
+            return f"{normalized}/v1"
+    except ValueError:
+        # URL 的可达性由嵌入客户端给出明确错误，配置加载不应因格式抢先中断。
+        pass
+    return normalized
 
 
 _HOSTNAME_RE = re.compile(
@@ -90,6 +112,9 @@ class RuntimeConfig:
     embedding_dimensions: int = 0
     embedding_pass_dimensions: bool = True
     embedding_model_settings: dict[str, object] = field(default_factory=dict)
+    # Qdrant 是 RAG 的容器化向量后端。应用运行在宿主机时使用回环地址；
+    # API 未来进入 compose 后可将其改为 http://qdrant:6333。
+    qdrant_url: str = "http://127.0.0.1:6333"
 
     command_timeout: int = 300
 
@@ -145,11 +170,14 @@ class RuntimeConfig:
                 if m.strip()
             ),
             embedding_api_key=os.getenv("LINGSHU_EMBEDDING_API_KEY", "").strip(),
-            embedding_base_url=os.getenv("LINGSHU_EMBEDDING_BASE_URL", "").strip().rstrip("/"),
+            embedding_base_url=_normalize_embedding_base_url(
+                os.getenv("LINGSHU_EMBEDDING_BASE_URL", ""),
+            ),
             embedding_model=os.getenv("LINGSHU_EMBEDDING_MODEL", "").strip(),
             embedding_dimensions=max(0, int(os.getenv("LINGSHU_EMBEDDING_DIMENSIONS", "0"))),
             embedding_pass_dimensions=os.getenv("LINGSHU_EMBEDDING_PASS_DIMENSIONS", "1").strip().lower()
             in ("1", "true", "yes", "on"),
+            qdrant_url=os.getenv("LINGSHU_QDRANT_URL", "http://127.0.0.1:6333").strip().rstrip("/"),
             # 通用
             command_timeout=max(10, min(int(os.getenv("LINGSHU_COMMAND_TIMEOUT", "300")), 600)),
             workspace_base_image=os.getenv(
@@ -174,6 +202,9 @@ class RuntimeConfig:
             values.update(load_runtime_overrides())
         except Exception as exc:  # noqa: BLE001
             logger.warning("读取模型 API 注册表失败，继续使用环境变量配置: %s", exc)
+        values["embedding_base_url"] = _normalize_embedding_base_url(
+            str(values["embedding_base_url"]),
+        )
         return cls(**values)
 
     def embedding_error(self) -> str | None:

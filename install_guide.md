@@ -66,7 +66,7 @@ gdb 或 gdb-multi-mcp**。
 
 ### 3.1 前置条件
 
-- Docker 工作区镜像已构建：`bash scripts/build_workspace_image.sh`
+- Docker 工作区镜像已构建：`python scripts/build_workspace_image.py`
 - 容器内自带 gdb 17.x（kali-full 镜像），无需额外配置
 
 ### 3.2 用法说明

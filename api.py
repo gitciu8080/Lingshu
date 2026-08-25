@@ -85,7 +85,7 @@ class SessionContext:
     stream_blocks: dict[str, str] = field(default_factory=dict)
     stream_counter: int = 0
     # 旧 WebUI 通道的未完成流快照写入节流状态。模型可能按单个字符返回，
-    # 不能让每个 delta 都重新打开 SQLite、覆盖完整正文并提交事务。
+    # 不能让每个 delta 都重新打开数据库、覆盖完整正文并提交事务。
     stream_snapshot_writes: dict[str, tuple[float, int]] = field(default_factory=dict)
     tool_buffers: dict[str, dict[str, str]] = field(default_factory=dict)
     approval_decision_submitted: bool = False
@@ -285,7 +285,7 @@ def _queue_persistence_operations(operations: list[dict]) -> bool:
 
 
 async def _persistence_worker() -> None:
-    """聚合短时间内的会话事件，以单个 SQLite 事务批量提交。"""
+    """聚合短时间内的会话事件，以单个 PostgreSQL 事务批量提交。"""
     assert _persistence_queue is not None
     queue = _persistence_queue
     while True:
@@ -865,7 +865,7 @@ async def _app_lifespan(_: FastAPI):
     _persistence_queue = asyncio.Queue(maxsize=10000)
     _persistence_task = asyncio.create_task(
         _persistence_worker(),
-        name="lingshu-sqlite-persistence",
+        name="lingshu-postgres-persistence",
     )
     antsword = get_antsword_service()
     # Docker 部署下 AntSword 已作为独立容器 MCP(127.0.0.1:30080/sse)常驻，
@@ -884,7 +884,7 @@ async def _app_lifespan(_: FastAPI):
 
         async with agentscope_lifespan():
             rag = get_rag_service(_PROJECT_ROOT)
-            # 知识库是可选子系统；嵌入端点或 Milvus Lite 不可用时不能阻塞
+            # 知识库是可选子系统；嵌入端点或 Qdrant 不可用时不能阻塞
             # FastAPI 的 startup。后台初始化完成后，/api/knowledge/status
             # 会反映 available/error，检索接口在 ready 前安全返回不可用状态。
             rag_start_task = asyncio.create_task(
@@ -1239,7 +1239,7 @@ async def login(data: UserLogin):
         user = _get_user(data.username)
         if not user or not verify_password(data.password, user["password_hash"]):
             return None
-        # 与密码校验放入同一工作线程，避免 SQLite 与 bcrypt 分别阻塞
+        # 与密码校验放入同一工作线程，避免数据库 I/O 与 bcrypt 分别阻塞
         # 主事件循环。
         from core.auth import get_db
         from datetime import datetime, timezone
@@ -1501,12 +1501,27 @@ async def knowledge_search(req: KnowledgeSearchRequest, current_user: dict = Dep
         return {"results": await rag.search(req.query, req.top_k)}
     except Exception as exc:
         # RAG 是可选子系统：检索失败不应把内部 traceback 直接抛给浏览器，
-        # 同时必须留下完整服务端日志，便于定位上游 Embedding/Milvus 问题。
+        # 同时必须留下完整服务端日志，便于定位上游 Embedding/Qdrant 问题。
         logger.exception("本地知识库检索失败")
         raise HTTPException(
             status_code=503,
-            detail=f"本地知识库检索失败，请稍后重试或同步索引：{exc}",
+            detail=f"知识库检索失败，请稍后重试或同步索引：{exc}",
         ) from exc
+
+
+class DictionarySearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=256)
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+@app.post("/api/knowledge/dictionary/search")
+async def dictionary_search(
+    req: DictionarySearchRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """在 `.RAG/13-字典库` 的 `.txt` 文件中执行逐行精确查询，不依赖向量库。"""
+    del current_user
+    return {"results": await get_rag_service(_PROJECT_ROOT).search_dictionary(req.query, req.limit)}
 
 
 @app.post("/api/knowledge/reindex")
@@ -2037,9 +2052,14 @@ async def download_session_jsonl(
     }
 
     def lines():
-        yield json.dumps(header, ensure_ascii=False) + "\n"
+        # PostgreSQL 驱动会把 TIMESTAMP 还原为 datetime；StreamingResponse
+        # 已经发送 200/下载头后若这里抛 TypeError，浏览器只能得到 0 字节
+        # 文件。统一把这类审计元数据安全转换成字符串，保证首行必定输出。
+        yield json.dumps(header, ensure_ascii=False, default=str) + "\n"
         for message in messages:
-            yield json.dumps(_jsonl_export_record(message), ensure_ascii=False) + "\n"
+            yield json.dumps(
+                _jsonl_export_record(message), ensure_ascii=False, default=str,
+            ) + "\n"
         # 未结束的流仅在任务仍运行时存在；也导出，避免导出时丢失已生成的部分内容。
         for snapshot in snapshots:
             yield json.dumps({
@@ -2050,7 +2070,7 @@ async def download_session_jsonl(
                 "stream_type": snapshot.get("stream_type", ""),
                 "block_id": snapshot.get("block_id", ""),
                 "content": snapshot.get("content", ""),
-            }, ensure_ascii=False) + "\n"
+            }, ensure_ascii=False, default=str) + "\n"
 
     safe_prefix = "".join(ch for ch in prefix.strip() if ch.isalnum() or ch in "-_")[:40]
     filename = f"{safe_prefix + '-' if safe_prefix else ''}{session_id}.jsonl"
@@ -2593,4 +2613,4 @@ def _resolve_artifact_path(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=8080, reload=False, log_level="info")
+    uvicorn.run("api:app", host="127.0.0.1", port=8280, reload=False, log_level="info")

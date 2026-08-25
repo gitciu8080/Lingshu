@@ -1,0 +1,55 @@
+services:
+  qdrant:
+    # 与 requirements.txt 中 qdrant-client==1.19.0 对齐，避免 SDK 版本兼容告警。
+    image: qdrant/qdrant:v1.19.0
+    container_name: lingshu-qdrant
+    restart: unless-stopped
+    ports:
+      # 当前 API 进程运行在宿主机，因此只绑定本机；应用容器化后可直接使用 qdrant:6333。
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - lingshu_qdrant:/qdrant/storage
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: lingshu-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lingshu
+      POSTGRES_USER: lingshu
+      POSTGRES_PASSWORD: ${LINGSHU_POSTGRES_PASSWORD:?请在 .env 中设置 LINGSHU_POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - lingshu_postgres:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lingshu -d lingshu"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  ida-mcp:
+    image: gitciu8080/lingshu-ida-mcp:latest
+    container_name: ida-mcp
+    restart: unless-stopped
+    environment:
+      PORT: "8745"
+    ports:
+      - "8745:8745"
+    volumes:
+      - ".ida_data:/analysis"
+    # 默认不传入二进制文件参数，启动后等待 POST /upload
+    # 如需启动即分析，可取消下面两行注释并替换文件名：
+    # command: ["/analysis/your-binary"]
+
+  antsword:
+    image: gitciu8080/lingshu-antsword:latest
+    container_name: antsword
+    restart: unless-stopped
+    ports:
+      - "30080:30080"
+
+volumes:
+  lingshu_postgres:
+  lingshu_qdrant:

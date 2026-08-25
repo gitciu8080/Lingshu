@@ -50,6 +50,7 @@ def create_orchestrator_agent(
     steering_state: dict[str, Any] | None = None,
     nss_context: dict[str, Any] | None = None,
     *,
+    artifact_triage_agent: Agent | None = None,
     offloader=None,
     context_config=None,
     state=None,
@@ -69,10 +70,14 @@ def create_orchestrator_agent(
             raise asyncio.CancelledError()
         return None
 
-    async def dispatch_recon(focus: str = "全面但低影响的信息收集") -> str:
-        """派遣 Recon 对本次授权目标进行信息收集。
+    async def dispatch_recon(
+        network_target: str,
+        focus: str = "全面但低影响的信息收集",
+    ) -> str:
+        """派遣 NetworkRecon 对已授权网络目标进行信息收集。
 
         Args:
+            network_target: 本轮唯一的已授权网络目标（IP、IP:端口或主机名）。
             focus: 本轮需要补齐的具体信息或扫描重点。
         """
         # 入口检查：是否有待处理的用户指令（无需等待子 Agent 取消）
@@ -81,16 +86,29 @@ def create_orchestrator_agent(
             return msg
         if mission.phase not in {Phase.RECON, Phase.ANALYSIS, Phase.EXPLOITATION}:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Recon"
+        selected_target = network_target.strip()
+        if not selected_target:
+            return "[拒绝] 调度 NetworkRecon 时必须提供单一已授权网络目标"
         if mission.phase != Phase.RECON:
             mission.transition(Phase.RECON, f"需要补充侦察: {focus}")
-        mission.record("Orchestrator", "dispatch_recon", focus=focus)
+        mission.record(
+            "Orchestrator",
+            "dispatch_recon",
+            network_target=selected_target,
+            focus=focus,
+        )
         store.checkpoint(mission, "recon_dispatch_before")
         try:
             result = await run_interruptible_agent_reply(
                 recon_agent,
                 UserMsg(
                     name="Orchestrator",
-                    content=f"授权目标：{mission.target}\n本轮重点：{focus}\n充分使用工具收集证据。当所有必要信息已获取且无更多可探索方向时，输出最终报告。",
+                    content=(
+                        f"本轮唯一授权网络目标：{selected_target}\n"
+                        f"任务原始目标：{mission.target}\n"
+                        f"本轮重点：{focus}\n"
+                        "只对上述网络目标使用工具收集证据；当所有必要信息已获取且无更多可探索方向时，输出最终报告。"
+                    ),
                 ),
                 prefix="[Recon] ",
                 on_event=event_callback,
@@ -124,6 +142,70 @@ def create_orchestrator_agent(
         mission.transition(Phase.ANALYSIS, "收到新的侦察证据")
         store.checkpoint(mission, "recon_report_received")
         return f"[Recon 侦察报告]\n{report}"
+
+    async def dispatch_artifact_triage(focus: str = "补齐本地文件的静态分析证据") -> str:
+        """派遣 ArtifactTriage 对上传文件执行只读本地静态分析。
+
+        Args:
+            focus: 本轮需要从文件中补齐的具体线索或分析重点。
+        """
+        msg = _check_steering()
+        if msg is not None:
+            return msg
+        if artifact_triage_agent is None:
+            return "[不可用] 当前任务没有上传文件，无法调度 ArtifactTriage"
+        if mission.phase not in {Phase.RECON, Phase.ANALYSIS, Phase.EXPLOITATION}:
+            return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 ArtifactTriage"
+        if mission.phase != Phase.RECON:
+            mission.transition(Phase.RECON, f"需要补充文件分析: {focus}")
+        mission.record("Orchestrator", "dispatch_artifact_triage", focus=focus)
+        store.checkpoint(mission, "artifact_triage_dispatch_before")
+        try:
+            result = await run_interruptible_agent_reply(
+                artifact_triage_agent,
+                UserMsg(
+                    name="Orchestrator",
+                    content=(
+                        f"任务原始目标：{mission.target}\n"
+                        f"本轮文件分析重点：{focus}\n"
+                        "仅在上传文件工作目录内做只读静态分析，收集证据后输出最终分析报告。"
+                    ),
+                ),
+                prefix="[ArtifactTriage] ",
+                on_event=event_callback,
+            )
+            report = result.get_text_content() or "[ArtifactTriage] 未返回文本结果"
+        except AgentMaxIterationsError as exc:
+            mission.record("Orchestrator", "artifact_triage_max_iters_exceeded", error=str(exc))
+            store.save(mission)
+            return (
+                f"[ArtifactTriage 超迭代] {exc}。"
+                "请缩小本轮 focus 范围重新调度，或改用其他路径。"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            mission.record(
+                "Orchestrator",
+                "artifact_triage_unexpected_error",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            store.save(mission)
+            if event_callback is not None:
+                event_callback(
+                    "error",
+                    message=f"ArtifactTriage 执行异常: {type(exc).__name__}: {exc}",
+                    agent="Orchestrator",
+                )
+            return (
+                f"[ArtifactTriage 异常] {type(exc).__name__}: {exc}。"
+                "请检查工具可用性后重试，或改用其他路径。"
+            )
+        mission.add_finding("ArtifactTriage", report)
+        mission.transition(Phase.ANALYSIS, "收到新的文件分析证据")
+        store.checkpoint(mission, "artifact_triage_report_received")
+        return f"[ArtifactTriage 分析报告]\n{report}"
 
     async def dispatch_attack(
         target_info: str,
@@ -671,6 +753,7 @@ def create_orchestrator_agent(
 
     tools = [
         AllowedFunctionTool(dispatch_recon, is_concurrency_safe=False),
+        AllowedFunctionTool(dispatch_artifact_triage, is_concurrency_safe=False),
         AllowedFunctionTool(dispatch_attack, is_concurrency_safe=False),
         AllowedFunctionTool(dispatch_reverse, is_concurrency_safe=False),
         AllowedFunctionTool(view_mission_state, is_read_only=True),

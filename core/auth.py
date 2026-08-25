@@ -1,7 +1,6 @@
-""" JWT + SQLite 认证模块 """
+"""JWT + PostgreSQL 认证模块。"""
 from __future__ import annotations
 
-import sqlite3
 import os
 import re
 import secrets
@@ -14,6 +13,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from core.database import get_db, integrity_errors, table_columns
 
 
 def _load_dotenv_for_auth() -> None:
@@ -36,10 +36,6 @@ _load_dotenv_for_auth()
 JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "10080"))
-
-DB_DIR = Path(__file__).resolve().parent.parent / "data"
-DB_DIR.mkdir(exist_ok=True)
-DB_PATH = DB_DIR / "users.db"
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
@@ -81,24 +77,13 @@ def validate_password_strength(password: str) -> str:
     return password
 
 
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
-    conn.row_factory = sqlite3.Row
-    # journal_mode 是数据库级设置，只在 init_db 中初始化一次。每次新建
-    # 连接重复切换 WAL 会引入额外锁竞争，实时消息高频写入时尤其明显。
-    conn.execute("PRAGMA busy_timeout=10000")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-
 def init_db():
     conn = get_db()
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("""
+        identity = "BIGSERIAL PRIMARY KEY"
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {identity},
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 email TEXT DEFAULT '',
@@ -109,17 +94,17 @@ def init_db():
         """)
         # 旧数据库的兼容迁移。auth_epoch 变更后，旧 Token 将立即失效，
         # 用于在管理员重置密码时撤销该用户现有的所有登录态。
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+        columns = table_columns(conn, "users")
         if "auth_epoch" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 0")
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS user_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {identity},
                 user_id INTEGER NOT NULL,
                 token_hash TEXT NOT NULL,
                 expires_at TIMESTAMP NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                is_valid BOOLEAN DEFAULT 1,
+                is_valid BOOLEAN DEFAULT TRUE,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
@@ -144,9 +129,9 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS session_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {identity},
                 session_id TEXT NOT NULL,
                 seq INTEGER NOT NULL,
                 role TEXT NOT NULL,
@@ -163,18 +148,15 @@ def init_db():
         conn.close()
 
 
-def _create_default_admin(conn: sqlite3.Connection):
-    try:
-        admin_hash = pwd_context.hash("admin123")
-        conn.execute(
-            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-            ("admin", admin_hash, "admin"),
-        )
-    except sqlite3.IntegrityError:
-        pass
+def _create_default_admin(conn):
+    conn.execute(
+        """INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)
+           ON CONFLICT (username) DO NOTHING""",
+        ("admin", pwd_context.hash("admin123"), "admin"),
+    )
 
 
-def _create_configured_superadmin(conn: sqlite3.Connection):
+def _create_configured_superadmin(conn):
     """首次启动时按环境变量创建独立的最高管理员账户。
 
     不提供内置密码，避免把可公开猜到的最高权限账号带到部署环境。
@@ -189,7 +171,8 @@ def _create_configured_superadmin(conn: sqlite3.Connection):
         conn.execute("UPDATE users SET role = 'superadmin' WHERE id = ?", (row["id"],))
         return
     conn.execute(
-        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'superadmin')",
+        """INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'superadmin')
+           ON CONFLICT (username) DO NOTHING""",
         (username, pwd_context.hash(password)),
     )
 
@@ -211,18 +194,19 @@ def create_user(username: str, password: str, email: str = "") -> dict:
     conn = get_db()
     try:
         cursor = conn.execute(
-            "INSERT INTO users (username, password_hash, email) VALUES (?, ?, ?)",
+            "INSERT INTO users (username, password_hash, email) VALUES (?, ?, ?) RETURNING id",
             (username, password_hash, email),
         )
+        user_id = cursor.fetchone()["id"]
         conn.commit()
         return {
-            "id": cursor.lastrowid,
+            "id": user_id,
             "username": username,
             "email": email,
             "role": "user",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-    except sqlite3.IntegrityError:
+    except integrity_errors():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="注册失败，请检查邀请码、用户名或密码",

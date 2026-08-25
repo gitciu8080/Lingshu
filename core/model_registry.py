@@ -1,7 +1,7 @@
 """由 Web 超级管理员维护的本地 JSON 模型注册表。
 
 配置原子写入 ``data/model_api_configs.json``。API Key 使用 Fernet 加密，
-列表/API 永不返回明文。首次升级时会从旧 ``users.db`` 模型表迁移一次。
+列表/API 永不返回明文。
 """
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import base64
 import json
 import os
 import re
-import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +20,6 @@ from cryptography.fernet import Fernet, InvalidToken
 
 _ROOT = Path(__file__).resolve().parent.parent  # 项目根（core/ 的上一级）
 REGISTRY_PATH = _ROOT / "data" / "model_api_configs.json"
-LEGACY_DB_PATH = _ROOT / "data" / "users.db"
 KEY_PATH = _ROOT / "data" / "model_api.key"
 _LOCK = threading.RLock()
 _PROVIDER_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
@@ -97,44 +95,9 @@ def _write_unlocked(data: dict[str, Any]) -> None:
     os.replace(temporary, REGISTRY_PATH)
 
 
-def _migrate_legacy_unlocked() -> dict[str, Any] | None:
-    """从旧 SQLite 表迁移；密文沿用相同 Fernet key，不接触外部服务。"""
-    if not LEGACY_DB_PATH.is_file():
-        return None
-    conn = sqlite3.connect(LEGACY_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_api_configs'",
-        ).fetchone()
-        if not table:
-            return None
-        rows = conn.execute("SELECT * FROM model_api_configs ORDER BY id").fetchall()
-    except sqlite3.Error:
-        return None
-    finally:
-        conn.close()
-    if not rows:
-        return None
-    data = _empty_registry()
-    for row in rows:
-        item = dict(row)
-        try:
-            item["settings"] = json.loads(item.pop("settings_json", "{}"))
-        except (TypeError, json.JSONDecodeError):
-            item["settings"] = {}
-        data["configs"].append(item)
-    data["next_id"] = max(int(item["id"]) for item in data["configs"]) + 1
-    data["audit"].append({
-        "action": "migrated_from_sqlite", "count": len(rows),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    })
-    return data
-
-
 def _read_unlocked() -> dict[str, Any]:
     if not REGISTRY_PATH.is_file():
-        data = _migrate_legacy_unlocked() or _empty_registry()
+        data = _empty_registry()
         _write_unlocked(data)
         return data
     try:

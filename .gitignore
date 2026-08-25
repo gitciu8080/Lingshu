@@ -1,4 +1,5 @@
 .env
+Docker/.env
 data/model_api.key
 data/model_api_configs.json
 .TaskMemory/
@@ -27,4 +28,3 @@ workbench_nss*
 reasonix.toml
 */__MACOSX/
 pnpm*
-.db

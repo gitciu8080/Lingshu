@@ -28,6 +28,7 @@ from agentscope.credential import DeepSeekCredential, OpenAICredential
 from pydantic import SecretStr
 
 from core.auth import get_current_user
+from core.database import agentscope_database_url
 from core.config import RuntimeConfig
 import core.session_store as session_store
 from Tools.tooling import cancel_agent_tasks
@@ -52,7 +53,7 @@ def _owner_marker(session_id: str) -> Path:
     return _ROOT / ".TaskMemory" / "sessions" / f"{session_id}.owner"
 
 storage = AsyncSQLAlchemyStorage(
-    f"sqlite+aiosqlite:///{_DATA_DIR / 'agentscope.db'}",
+    agentscope_database_url(),
 )
 message_bus = InMemoryMessageBus()
 # Agent Service 同样使用 Docker 工作区（每会话独立容器，工作目录 bind mount

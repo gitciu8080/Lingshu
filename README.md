@@ -344,7 +344,7 @@ Lingshu/
 │   ├── config.py           # 环境变量加载 · RuntimeConfig
 │   ├── TaskState.py        # MissionState · Phase 状态机 · 审计日志 · MissionStore
 │   ├── auth.py             # 注册/登录/JWT/密码重置
-│   ├── session_store.py    # 会话/消息/流式快照 SQLite
+│   ├── session_store.py    # 会话/消息/流式快照 PostgreSQL
 │   ├── model_registry.py   # Provider 注册表（加密存储、运行时覆盖）
 │   └── workspace_service.py # Workspace v2 生命周期
 │

@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "antsword": {
-      "url": "http://localhost:30080/sse"
-    }
-  }
-}

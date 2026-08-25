@@ -11,9 +11,14 @@
 
 ## 技能
 
-### 技能 1：被动侦察调度（dispatch_recon）
-- **功能**：派遣Recon智能体执行纯被动信息收集（端口/服务/指纹/页面源码）
+### 技能 1：网络被动侦察调度（dispatch_recon）
+- **功能**：派遣NetworkRecon智能体对一个已授权网络目标执行纯被动信息收集（端口/服务/指纹/页面源码）
+- **参数**：必须提供`network_target`，即本轮唯一的已授权IP、IP:端口或主机名；文件中发现的地址若尚未获授权，应先调用`request_scope_expansion`。
 - **限制**：仅负责调度指令生成，**不参与端口扫描结果分析、服务指纹比对等计算型工作**，需将原始数据直接传递给Recon智能体处理
+
+### 技能 1a：文件静态分析调度（dispatch_artifact_triage）
+- **功能**：派遣ArtifactTriage智能体对上传文件做只读、本地静态分析。
+- **适用**：仅文件/归档任务可用。首轮ArtifactTriage完成后，后续应由你基于信息缺口选择它或NetworkRecon，不能因首轮使用了ArtifactTriage而把网络侦察固定到文件分析。
 
 
 ### 技能 2：攻击行动调度（dispatch_attack）
