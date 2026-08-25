@@ -713,7 +713,8 @@ def _save_long_term_memory(session_id, target, goal, phase, success, flag, summa
 async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, goal: str,
                            model_ver: str, provider: str, callback, initial_context: str | None = None,
                            nss_context: dict | None = None, slab_context: dict | None = None, resume: bool = False,
-                           qwen_tool_call_mode: str | None = None):
+                           qwen_tool_call_mode: str | None = None,
+                           authorized_target: str | None = None):
     """运行任务并处理清理逻辑。"""
     status_val = "completed"
     phase = "completed"
@@ -735,6 +736,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             slab_context=slab_context,
             resume=resume,
             user_id=ctx.user_id,
+            authorized_target=authorized_target,
         )
         # 如果 Orchestrator 已经确定完成并取得 Flag，迟到的前端取消请求不得覆盖成功终态。
         mission_completed = bool(
@@ -1085,6 +1087,10 @@ session_store.init_sessions_db()
 # ── 请求模型 ──
 class MissionStartRequest(BaseModel):
     target: str = Field(..., description="授权目标 IP / IP:端口 / 主机名 / 文件路径")
+    attachment_target: str | None = Field(
+        default=None,
+        description="已上传附件的服务器路径；与 target 同时提供时，target 作为网络授权目标",
+    )
     goal: str = Field(default="获取 Flag", description="任务目标描述")
     provider: str = Field(default="deepseek", pattern="^[a-z][a-z0-9_-]{1,31}$", description="模型提供商标识")
     model: str = Field(default="Min", pattern="^(Low|Min|Max)$", description="思考级别: Low | Min | Max；Zhipu 未显式指定时默认 Max")
@@ -1114,6 +1120,17 @@ def _normalize_user_authorized_target(value: str) -> str:
             raise HTTPException(status_code=422, detail="网络目标缺少主机名或 IP 地址")
         return f"{spec.host}:{spec.port}" if spec.port is not None else spec.host
     return spec.original_input
+
+
+def _normalize_uploaded_target(value: str) -> str:
+    """校验前端提交的附件路径只能指向本服务的上传目录。"""
+    candidate = Path(value).expanduser().resolve()
+    upload_root = _upload_dir.resolve()
+    if candidate == upload_root or upload_root not in candidate.parents:
+        raise HTTPException(status_code=422, detail="附件路径不在受管理的上传目录内")
+    if not candidate.exists():
+        raise HTTPException(status_code=422, detail="上传附件已不存在，请重新上传")
+    return str(candidate)
 
 
 class ChatMessage(BaseModel):
@@ -1628,12 +1645,22 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
             status_code=422,
             detail=f"模型提供商未在 Web 管理中启用：{req.provider}",
         )
-    # 用户在“新建任务”中输入的 IP / 域名即为本次任务的初始授权目标。
-    # 这里不会触发 ScopeAuditor；该审核器只用于后续发现的新增内网目标。
+    # target 可以是直接输入的网络目标，也可以是上传文件返回的路径。
+    # 当 attachment_target 存在时，target 明确表示网络授权目标，附件只
+    # 作为本地分析对象传入 run_mission，二者不再互相覆盖。
+    attachment_target = _normalize_uploaded_target(req.attachment_target) if req.attachment_target else None
     authorized_target = _normalize_user_authorized_target(req.target)
+    execution_target = attachment_target or authorized_target
+    if attachment_target:
+        try:
+            target_spec = normalize_target(authorized_target)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"授权目标无效：{exc}") from exc
+        if target_spec.kind != "network":
+            raise HTTPException(status_code=422, detail="上传附件并填写授权目标时，授权目标必须是 IP、IP:端口或主机名")
     async with _session_creation_lock:
         fingerprint = (
-            current_user["id"], authorized_target, req.goal.strip(),
+            current_user["id"], authorized_target, execution_target, req.goal.strip(),
             req.provider, model_level, req.source_session_id or "",
         )
         now = time.monotonic()
@@ -1675,6 +1702,10 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
                 goal=req.goal, provider=req.provider, model=model_level,
                 title=f"[{session_id[:8]}] 安全测试任务",
             ),
+            target_info_operation(session_id, {
+                "authorized_target": authorized_target,
+                "attachment_target": attachment_target or "",
+            }),
             session_update_operation(
                 session_id, workspace_id=workspace_id, workspace_version=2,
                 resume_status="fresh", checkpoint_seq=0,
@@ -1700,14 +1731,16 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
 
     # 推送启动事件
     callback("mission_start", target=authorized_target, goal=req.goal,
+             attachment_target=attachment_target or "",
              provider=req.provider, model=model_level, qwen_tool_call_mode=req.qwen_tool_call_mode)
 
     # 创建后台任务
     task = asyncio.create_task(
-        _run_and_cleanup(session_id, ctx, authorized_target, req.goal, model_level, req.provider, callback,
+        _run_and_cleanup(session_id, ctx, execution_target, req.goal, model_level, req.provider, callback,
                          initial_context=initial_context, nss_context=req.nss_context,
                          slab_context=req.slab_context,
-                         qwen_tool_call_mode=req.qwen_tool_call_mode)
+                         qwen_tool_call_mode=req.qwen_tool_call_mode,
+                         authorized_target=(authorized_target if attachment_target else None))
     )
     ctx.task = task
 
@@ -2392,6 +2425,20 @@ async def resume_session(
     provider = session.get("provider") or "deepseek"
     model = session.get("model") or "Min"
     target = session.get("target") or ""
+    # 新建任务可能把网络授权目标与上传附件分开保存；恢复时必须重新
+    # 使用附件作为执行目标，否则只会拿 IP 去做本地附件分析。
+    target_info: dict[str, Any] = {}
+    raw_target_info = session.get("target_info")
+    if raw_target_info:
+        try:
+            parsed_target_info = json.loads(raw_target_info) if isinstance(raw_target_info, str) else raw_target_info
+            if isinstance(parsed_target_info, dict):
+                target_info = parsed_target_info
+        except (TypeError, ValueError, json.JSONDecodeError):
+            target_info = {}
+    authorized_target = str(target_info.get("authorized_target") or target or "")
+    attachment_target = str(target_info.get("attachment_target") or "").strip() or None
+    execution_target = _normalize_uploaded_target(attachment_target) if attachment_target else target
     ctx = SessionContext(
         session_id=session_id,
         user_id=current_user["id"],
@@ -2399,10 +2446,11 @@ async def resume_session(
     )
     _active_sessions[session_id] = ctx
     callback = _make_session_callback(session_id, ctx)
-    callback("mission_resume", target=target, goal=goal)
+    callback("mission_resume", target=authorized_target, goal=goal,
+             attachment_target=attachment_target or "")
     task = asyncio.create_task(
-        _run_and_cleanup(session_id, ctx, target, goal, model, provider, callback,
-                         resume=True),
+        _run_and_cleanup(session_id, ctx, execution_target, goal, model, provider, callback,
+                         resume=True, authorized_target=(authorized_target if attachment_target else None)),
     )
     ctx.task = task
     return {"session_id": session_id, "status": "resumed"}

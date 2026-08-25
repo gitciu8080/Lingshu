@@ -300,10 +300,26 @@ def list_sessions(
 
 
 def list_session_targets() -> list[str]:
-    """Return all target paths/addresses used to protect live upload staging."""
+    """Return all target paths/addresses used to protect live upload staging.
+
+    会话的展示目标可能是网络授权地址，而上传附件保存在 target_info 中；
+    两者都必须纳入清理任务的保护集合。
+    """
     conn = get_db()
     try:
-        return [str(row[0]) for row in conn.execute("SELECT target FROM sessions").fetchall()]
+        values: list[str] = []
+        for row in conn.execute("SELECT target, target_info FROM sessions").fetchall():
+            values.append(str(row[0] or ""))
+            raw_info = row[1]
+            if not raw_info:
+                continue
+            try:
+                info = json.loads(raw_info) if isinstance(raw_info, str) else raw_info
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(info, dict) and info.get("attachment_target"):
+                values.append(str(info["attachment_target"]))
+        return values
     finally:
         conn.close()
 

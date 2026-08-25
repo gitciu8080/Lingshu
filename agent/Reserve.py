@@ -117,6 +117,13 @@ def _resolve_idalib_mcp_command() -> str:
     resolved = shutil.which("idalib-mcp")
     if resolved:
         return resolved
+    # systemd 通常不会继承交互式 shell 的 PATH；兼容 uv/pip 用户级安装目录。
+    for candidate in (
+        Path.home() / ".local" / "bin" / "idalib-mcp",
+        Path.home() / ".local" / "bin" / "idalib-mcp.exe",
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
     raise RuntimeError(
         "未找到 idalib-mcp；请设置 LINGSHU_IDALIB_MCP_COMMAND 或将其加入 PATH",
     )
@@ -139,11 +146,23 @@ def _resolve_gdb_mcp_command() -> str:
     resolved = shutil.which("gdb-multi-mcp")
     if resolved:
         return resolved
+    for candidate in (
+        Path.home() / ".local" / "bin" / "gdb-multi-mcp",
+        Path.home() / ".local" / "bin" / "gdb-multi-mcp.exe",
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
 
     uvx_command = os.getenv("LINGSHU_UVX_COMMAND", "").strip()
     resolved = shutil.which(uvx_command) if uvx_command else shutil.which("uvx")
     if resolved:
         return resolved
+    for candidate in (
+        Path.home() / ".local" / "bin" / "uvx",
+        Path.home() / ".local" / "bin" / "uvx.exe",
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
     raise RuntimeError(
         "未找到 gdb-multi-mcp 或 uvx；请先安装 uv，再运行: "
         "uv tool install --from git+https://github.com/Mistyovo/gdb-multi-mcp "

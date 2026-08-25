@@ -1249,6 +1249,7 @@ async def run_mission(
     authorization_source: str = "cli",
     resume: bool = False,
     user_id: int | None = None,
+    authorized_target: str | None = None,
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
@@ -1277,6 +1278,7 @@ async def run_mission(
         agent_tasks: 当前会话活跃的 Agent reply task 注册表
         steering_state: 运行时追加指令共享状态 {"pending": str|None, "processed": bool}
         authorization_source: 审计记录中的授权入口来源（CLI 或 Agent Service）
+        authorized_target: 当本地附件与网络目标同时提交时的独立网络授权目标
 
     Returns:
         最终任务状态 MissionState（含 plan / flag / success 等）
@@ -1303,6 +1305,9 @@ async def run_mission(
     # 典型场景：上传的应急响应任务书列出 SSH 目标与端口。对纯文本附件
     # 一并检查，避免前端只上传任务书、未将其全文复制到“任务目标”时漏掉授权。
     declared_authorization_text = goal_text
+    if authorized_target:
+        # 结构化参数只参与授权范围提取，不污染用户在界面填写的任务目标正文。
+        declared_authorization_text += f"\n目标地址：{authorized_target}"
     taskbook_text = ""
     if target_spec.original_path is not None and target_spec.kind == "single_file":
         taskbook_text = _read_taskbook_text(target_spec.original_path)
@@ -1311,7 +1316,7 @@ async def run_mission(
     mission_mode = _mission_mode(target_spec, goal_text, taskbook_text)
     execution_target = (
         declared_network_targets[0]
-        if mission_mode == "hybrid_taskbook" and declared_network_targets
+        if declared_network_targets
         else target_str
     )
 
@@ -1403,6 +1408,7 @@ async def run_mission(
                 "original_input": target_spec.original_input,
                 "authorization_scope": target_spec.authorization_scope,
                 "declared_network_targets": declared_network_targets,
+                "authorized_target": authorized_target or "",
                 "mission_mode": mission_mode,
             },
             category_decision={
@@ -1418,6 +1424,7 @@ async def run_mission(
                 "scope": target_spec.authorization_scope,
                 "operator_confirmation": True,  # 操作员已确认
                 "declared_network_targets": declared_network_targets,
+                "authorized_target": authorized_target or "",
                 "declared_targets_auto_trusted": mission_mode == "ctf",
             },
             declared_scope={"targets": declared_network_targets, "source": "taskbook"},

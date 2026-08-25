@@ -1118,9 +1118,14 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
     submitLock.current = true;
     setSubmitting(true);
     try {
-      const resolvedTarget = files.length ? (await api.upload(files)).target : target.trim();
+      const uploaded = files.length ? await api.upload(files) : null;
+      const enteredTarget = target.trim();
+      // 附件与网络授权目标是两个独立概念：上传的文件作为分析对象，
+      // 输入框中的 IP/主机名作为本次网络操作的授权范围。
+      const resolvedTarget = enteredTarget || uploaded?.target || "";
       const r = await api.create({
         target: resolvedTarget,
+        ...(enteredTarget && uploaded ? { attachment_target: uploaded.target } : {}),
         goal,
         provider,
         model,
@@ -1153,15 +1158,14 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
           <form onSubmit={submit}>
             <fieldset disabled={submitting} className="submission-fields">
             <label>
-              授权目标
+              授权目标（可与附件同时填写）
               <input
                 value={target}
                 onChange={(e) => setTarget(e.target.value)}
-                placeholder="IP / 主机名 / 文件路径"
-                disabled={files.length > 0}
+                placeholder={files.length ? "IP / 主机名（附件的网络授权目标，可选）" : "IP / 主机名 / 文件路径"}
               />
             </label>
-            <div className="target-divider"><span>或</span></div>
+            <div className="target-divider"><span>或 / 并且</span></div>
             <label className={`upload-field ${files.length ? "selected" : ""}`}>
               <Upload size={18} />
               <span>
@@ -1178,7 +1182,6 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
                 onChange={(e) => {
                   const selected = Array.from(e.target.files || []);
                   setFiles(selected);
-                  if (selected.length) setTarget("");
                 }}
               />
             </label>
