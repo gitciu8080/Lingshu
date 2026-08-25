@@ -36,7 +36,7 @@ NETWORK_RECON_SYS_PROMPT = load_prompt("NETWORK_RECON")
 def create_network_recon_agent(
     model,
     target: str,
-    project_dir: str | Path,
+    workdir: str | Path,
     timeout: int,
     scope_registry: ScopeRegistry | None = None,
     max_iters: int = 20,
@@ -49,9 +49,11 @@ def create_network_recon_agent(
     vision_roots: tuple[str | Path, ...] = (),
     include_cve_search: bool = True,
 ) -> Agent:
+    # ``workdir`` 是网络 Recon 的任务命令工作目录：API 的 v2
+    # 会传入会话 WorkDir，legacy 模式传入全局 WorkDir，禁止回退到源码根目录。
     tools = [
-        create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root),
-        create_parallel_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root),
+        create_scoped_shell_tool(target, workdir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root),
+        create_parallel_scoped_shell_tool(target, workdir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root),
         *create_tool_catalog_tools("recon", categories={"recon", "web"}),
     ]
     if include_cve_search:
@@ -100,8 +102,10 @@ def create_artifact_triage_agent(
     selected = set(capability_categories or {"forensics", "reverse", "mobile", "misc"})
     catalog_categories = selected.intersection({"forensics", "reverse", "mobile"})
     tools = [
-            create_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root),
-            create_parallel_scoped_shell_tool(str(workdir), project_dir, timeout, role="recon", artifact_root=artifact_root),
+            # 分析输入仍在 workdir；Shell 的相对写入也必须落在同一任务目录，
+            # 不能因加载项目 Skills 而把项目根目录误作 cwd。
+            create_scoped_shell_tool(str(workdir), workdir, timeout, role="recon", artifact_root=artifact_root),
+            create_parallel_scoped_shell_tool(str(workdir), workdir, timeout, role="recon", artifact_root=artifact_root),
             *create_tool_catalog_tools("triage", categories=catalog_categories),
         ]
     if selected.intersection({"forensics", "misc", "osint", "ai-ml"}):

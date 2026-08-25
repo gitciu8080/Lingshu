@@ -1938,6 +1938,10 @@ async def run_mission(
             workspace = None
             ws_root = None
 
+        # 所有 Shell/MCP 的相对路径均绑定在 WorkDir：v2 为会话隔离目录，
+        # legacy 为原有任务 workdir。项目根只保留代码与只读 Skills。
+        command_workdir = ws_root if ws_root is not None else workdir
+
         def _role_context(role: str):
             return build_agent_context_config(role) if use_v2_workspace else None
 
@@ -2163,7 +2167,7 @@ async def run_mission(
         artifact_recon = None
         if target_spec.kind == "network":
             network_recon = create_network_recon_agent(
-                model, execution_target, project_dir, runtime.command_timeout,
+                model, execution_target, command_workdir, runtime.command_timeout,
                 scope_registry=scope_registry,
                 max_iters=_max_react_iters("network", "recon", complexity, thinking=model_ver),
                 offloader=workspace,
@@ -2197,7 +2201,7 @@ async def run_mission(
             recon = artifact_recon
             if declared_network_targets:
                 network_recon = create_network_recon_agent(
-                    model, execution_target, project_dir, runtime.command_timeout,
+                model, execution_target, command_workdir, runtime.command_timeout,
                     scope_registry=scope_registry,
                     max_iters=_max_react_iters("network", "recon", complexity, thinking=model_ver),
                     offloader=workspace,
@@ -2350,7 +2354,7 @@ async def run_mission(
                     store.checkpoint(mission, "dynamic_network_scope_approved")
                     execution_target = discovered_targets[0]
                     network_recon = create_network_recon_agent(
-                        model, execution_target, project_dir, runtime.command_timeout,
+                        model, execution_target, command_workdir, runtime.command_timeout,
                         scope_registry=scope_registry,
                         max_iters=_max_react_iters("network", "recon", complexity, thinking=model_ver),
                         offloader=workspace,
@@ -2574,6 +2578,7 @@ async def run_mission(
                 target_kind=target_spec.kind,
                 capability_context=capability_context,
                 enable_framework=framework_allowed,
+                command_workdir=command_workdir,
             )
 
         attack = LazyAgent(
@@ -2618,6 +2623,7 @@ async def run_mission(
                 vision_model=vision_model,
                 vision_roots=vision_roots,
                 enable_gdb=dynamic_debug_needed,
+                command_workdir=command_workdir,
             )
 
         reserve = LazyAgent(REVERSE_EXPERT, _load_reverse_agent)

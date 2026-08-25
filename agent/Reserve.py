@@ -188,6 +188,7 @@ async def create_reverse_agent(
     vision_model=None,
     vision_roots: tuple[str | Path, ...] = (),
     enable_gdb: bool = True,
+    command_workdir: str | Path | None = None,
 ) -> Agent:
     async def analysis(service_info: str) -> str:
         """委托 Analysis 专家研判真实证据。
@@ -203,6 +204,10 @@ async def create_reverse_agent(
         )
         return result.get_text_content() or "[Analysis] 未返回文本结果"
 
+    # 项目根仅用于读取 Skills 与 IDA 配置；所有 MCP/Shell 运行时文件都应
+    # 写入本任务 WorkDir，绝不能写到 Lingshu 源码根目录。
+    command_cwd = Path(command_workdir or artifact_root or project_dir).expanduser().resolve()
+    command_cwd.mkdir(parents=True, exist_ok=True)
     primary = str((category_decision or {}).get("primary") or "reverse")
     skill_list = _build_skill_list(
         category_decision,
@@ -225,7 +230,7 @@ async def create_reverse_agent(
         mcp_config=StdioMCPConfig(
             command=idalib_mcp,
             args=["--stdio"],
-            cwd=project_dir,
+            cwd=command_cwd,
             env={**os.environ, "IDADIR": str(ida_dir)},
         ),
         enable_tools=list(ida_enabled_tools),
@@ -275,7 +280,7 @@ async def create_reverse_agent(
             mcp_config=StdioMCPConfig(
                 command=gdb_mcp_command,
                 args=gdb_mcp_args,
-                cwd=project_dir,
+                cwd=command_cwd,
                 env={
                     **os.environ,
                     "FASTMCP_CHECK_FOR_UPDATES": "off",
@@ -322,7 +327,6 @@ async def create_reverse_agent(
     for tool in exposed_gdb_tools:
         tool.is_read_only = True
 
-    project_root = Path(project_dir).resolve()
     target_path = Path(target).expanduser().resolve()
     authorized_file_roots: list[Path] = []
     if target_path.exists():
@@ -403,7 +407,9 @@ async def create_reverse_agent(
             cache_key = hashlib.sha256(
                 f"{source}:{stat.st_size}:{stat.st_mtime_ns}".encode(),
             ).hexdigest()[:16]
-            cache_dir = project_root / "WorkDir" / "ida_databases"
+            # IDA 批处理生成的 i64 是任务工件，按会话归档。legacy 模式下
+            # command_cwd 已是 WorkDir，v2 模式则是会话独立 WorkDir。
+            cache_dir = command_cwd / "artifacts" / "reserve" / "ida_databases"
             cache_dir.mkdir(parents=True, exist_ok=True)
             database_path = cache_dir / f"{source.stem}-{cache_key}.i64"
             if not database_path.is_file():
@@ -446,7 +452,7 @@ async def create_reverse_agent(
     tools = [
             AllowedFunctionTool(analysis, is_read_only=True),
             create_intelpwn_tool(timeout),
-            create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="reserve", artifact_root=artifact_root),
+            create_scoped_shell_tool(target, command_cwd, timeout, registry=scope_registry, role="reserve", artifact_root=artifact_root),
             AllowedFunctionTool(ida_open_binary, is_read_only=True),
             *exposed_ida_tools,
             *exposed_gdb_tools,

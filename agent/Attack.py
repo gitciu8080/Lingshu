@@ -302,6 +302,7 @@ async def create_attack_agent(
     target_kind: str = "",
     capability_context: str = "",
     enable_framework: bool = False,
+    command_workdir: str | Path | None = None,
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -309,7 +310,8 @@ async def create_attack_agent(
         model: LLM 模型。
         analysis_agent: Analysis 子 Agent。
         target: 授权目标字符串（向后兼容）。
-        project_dir: 项目根目录。
+        project_dir: 项目根目录（仅用于加载项目 Skill）。
+        command_workdir: 本任务命令工作目录；相对脚本和产物写入这里。
         timeout: 命令超时秒数。
         category_decision: 题型分类决策（v0.2.0 新增）。为 None 时仅加载 writeup。
         max_iters: ReAct 最大推理迭代次数，由调用方按任务复杂度分配。
@@ -331,6 +333,13 @@ async def create_attack_agent(
 
 
 
+    command_cwd = Path(command_workdir or artifact_root or project_dir).expanduser().resolve()
+    command_cwd.mkdir(parents=True, exist_ok=True)
+    # 文件型任务优先以附件/解压目录作为只读分析与解码根；网络任务或缺少
+    # 附件时才使用会话 WorkDir。绝不以项目源码根作为可写工具根目录。
+    task_file_root = Path(
+        forensic_roots[0] if forensic_roots else command_cwd,
+    ).expanduser().resolve()
     primary = str((category_decision or {}).get("primary") or "unknown")
     confidence = float((category_decision or {}).get("confidence") or 0.0)
     # 首轮 Recon 已完成正式分类：高置信时只加载 primary；仅 unknown/低置信
@@ -391,8 +400,8 @@ async def create_attack_agent(
 
     tools = [
             AllowedFunctionTool(analysis, is_read_only=True),
-            create_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="attack", artifact_root=artifact_root),
-            create_parallel_scoped_shell_tool(target, project_dir, timeout, registry=scope_registry, role="attack", artifact_root=artifact_root),
+            create_scoped_shell_tool(target, command_cwd, timeout, registry=scope_registry, role="attack", artifact_root=artifact_root),
+            create_parallel_scoped_shell_tool(target, command_cwd, timeout, registry=scope_registry, role="attack", artifact_root=artifact_root),
             *antsword_tools,
             *create_tool_catalog_tools("attack", categories=catalog_categories),
         ]
@@ -401,9 +410,9 @@ async def create_attack_agent(
     if categories.intersection({"crypto", "misc"}):
         tools.append(AllowedFunctionTool(execute_sagemath, is_read_only=True))
     if categories.intersection({"forensics", "malware", "misc", "osint", "ai-ml"}):
-        tools.append(create_tesseract_ocr_tool(project_dir, timeout=min(timeout, 90)))
+        tools.append(create_tesseract_ocr_tool(task_file_root, timeout=min(timeout, 90)))
     if categories.intersection({"forensics", "malware", "misc"}):
-        tools.append(create_tonydec_tool(project_dir))
+        tools.append(create_tonydec_tool(task_file_root))
     if vision_model is not None and vision_roots and categories.intersection({
         "web", "forensics", "malware", "misc", "osint", "ai-ml",
     }):
