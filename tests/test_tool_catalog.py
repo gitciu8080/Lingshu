@@ -57,6 +57,13 @@ def _catalog() -> ToolCatalog:
                 "roles": [], "risk": "local_analysis", "approval_required": False,
                 "description": "项目资源检查", "usage_hint": "仅用于测试", "alternatives": [],
             },
+            {
+                "id": "required-command-missing", "category": "runtime",
+                "command_candidates": ["sh"],
+                "required_commands": ["lingshu-command-that-does-not-exist"],
+                "roles": [], "risk": "local_analysis", "approval_required": False,
+                "description": "组合命令检查", "usage_hint": "仅用于测试", "alternatives": [],
+            },
         ],
     }), encoding="utf-8")
     return ToolCatalog(manifest, cache_ttl=3600)
@@ -104,6 +111,11 @@ class ToolCatalogTest(unittest.IsolatedAsyncioTestCase):
         item = next(item for item in _catalog().snapshot() if item["id"] == "required-resource-missing")
         self.assertEqual(item["status"], "missing")
         self.assertIn("缺少必需资源", item["error"])
+
+    def test_required_command_is_checked(self) -> None:
+        item = next(item for item in _catalog().snapshot() if item["id"] == "required-command-missing")
+        self.assertEqual(item["status"], "missing")
+        self.assertIn("缺少必需命令", item["error"])
 
     async def test_agent_query_hides_unavailable_tools(self) -> None:
         tools = {tool.name: tool for tool in create_tool_catalog_tools("recon", _catalog())}

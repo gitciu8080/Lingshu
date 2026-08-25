@@ -261,7 +261,6 @@ sse-starlette==3.4.8
 starlette==1.4.1
 stegpy==0.2.0
 sympy==1.14.0
-ten==0.1.8
 tenacity==9.1.4
 tinycss2==1.5.1
 tinyhtml5==2.1.0

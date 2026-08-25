@@ -9,7 +9,7 @@ CHECK_ONLY=0
 usage() {
   printf '%s\n' \
     '用法: sudo ./scripts/install-security-tools.sh [--profile core|extended] [--dry-run|--check]' \
-    '  core      高频侦察、Web、取证、OCR 语言包、逆向辅助工具与 OpenJDK JDK（默认）' \
+    '  core      高频侦察、Web、取证（含 Volatility 2 Python 2）、OCR 语言包、逆向辅助工具与 OpenJDK JDK（默认）' \
     '  extended  在 core 基础上增加 Ghidra、Bettercap、Wine 等重型/特权组件' \
     '  --check   只检查包状态，不安装'
 }
@@ -32,7 +32,7 @@ esac
 
 CORE_PACKAGES=(
   subfinder feroxbuster joomscan foremost ropper apktool steghide stegseek zbar-tools
-  strace default-jdk tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-chi-tra
+  strace python2 default-jdk tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-chi-tra
 )
 EXTENDED_PACKAGES=(ghidra bettercap wine wine64 wine32)
 # 当前源可能缺失的可选工具：逐个容错安装，失败不阻断整体。
@@ -60,6 +60,14 @@ for command in java javac; do
     printf '  [缺失]   %s\n' "$command"
   fi
 done
+
+# 项目内置 Volatility 2.6 仍以 Python 2.7 运行。仅有 Python 3/Conda 环境
+# 时内存取证工具会在真实任务中失败，故在 core 安装并单独报告。
+if command -v python2 >/dev/null 2>&1; then
+  printf '  [可用]   python2（Volatility 2）\n'
+else
+  printf '  [缺失]   python2（Volatility 2 无法运行）\n'
+fi
 
 if command -v tesseract >/dev/null 2>&1; then
   printf 'Tesseract 语言包检查:\n'

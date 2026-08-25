@@ -163,6 +163,57 @@
    "alternatives": []
   },
   {
+   "id": "taskbook-pdf-ocr",
+   "category": "runtime",
+   "command_candidates": ["pdftoppm"],
+   "required_commands": ["tesseract"],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "扫描版 PDF 任务书 OCR 运行环境",
+   "usage_hint": "任务书没有文本层时，系统使用 pdftoppm 转换前 20 页，再以 Tesseract（chi_sim+eng）提取目标与授权范围。",
+   "alternatives": ["pypdf"]
+  },
+  {
+   "id": "volatility2-runtime",
+   "category": "runtime",
+   "command_candidates": ["python2", "python2.7"],
+   "required_files": ["Tools/volatility/vol.py"],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "Volatility 2 内存取证运行环境",
+   "usage_hint": "项目内置 Volatility 2.6 需要 Python 2.7；该组件由安全工具 core profile 安装。",
+   "alternatives": []
+  },
+  {
+   "id": "antsword-electron-runtime",
+   "category": "runtime",
+   "required_files": [
+    "Tools/AntSword-Loader-v4.0.3-linux-x64/AntSword",
+    "Tools/antSword-2.1.16/package-lock.json",
+    "Tools/antSword-2.1.16/node_modules/ws/package.json"
+   ],
+   "runtime_check": "antsword_electron_loader",
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "AntSword MCP 的 Electron 图形运行环境",
+   "usage_hint": "验证内置启动器和动态库；无桌面会话时 API 自动使用 xvfb-run。实际服务状态见 MCP 分类中的 AntSword MCP。",
+   "alternatives": []
+  },
+  {
+   "id": "uv-uvx-runtime",
+   "category": "runtime",
+   "runtime_check": "uv_runtime",
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "uv / uvx：GDB Multi MCP 的受控 Python 工具运行器",
+   "usage_hint": "基础环境安装器固定安装 uv/uvx；一键部署会用它安装固定提交的 gdb-multi-mcp。",
+   "alternatives": []
+  },
+  {
    "id": "nmap",
    "category": "recon",
    "command_candidates": [

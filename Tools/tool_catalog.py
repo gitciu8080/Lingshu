@@ -133,6 +133,9 @@ class ToolCapability:
     # 例如 PDF 模板字体等项目内资源。路径相对项目根目录，避免客户机绝对
     # 路径差异导致环境面板误报。
     required_files: tuple[str, ...] = ()
+    # 某项功能往往依赖多个命令（例如 PDF OCR 的 pdftoppm+tesseract）。
+    # command_candidates 表示替代项，required_commands 表示必须同时存在。
+    required_commands: tuple[str, ...] = ()
     # ``find_spec`` 只能说明文件存在，无法发现 WeasyPrint 缺少 Pango/Cairo
     # 等动态库的情况，因此支持安全的实际 import 健康检查。
     import_check_modules: tuple[str, ...] = ()
@@ -164,15 +167,17 @@ class ToolCapability:
         if bool(health_args) != bool(health_contains):
             raise ValueError(f"工具 {tool_id} 的健康检查必须同时声明参数和预期输出")
         required_files = tuple(str(item).strip() for item in data.get("required_files", []) if str(item).strip())
+        required_commands = tuple(str(item).strip() for item in data.get("required_commands", []) if str(item).strip())
         import_check_modules = tuple(
             str(item).strip() for item in data.get("import_check_modules", []) if str(item).strip()
         )
         runtime_check = str(data.get("runtime_check", "")).strip().lower()
         if runtime_check not in {
             "", "pdf_report_generation", "pdf_mermaid_rendering", "pdf_font_resources",
+            "antsword_electron_loader", "uv_runtime",
         }:
             raise ValueError(f"工具 {tool_id} 声明了未知运行时健康检查: {runtime_check}")
-        if not candidates and not modules and not required_files and not runtime_check:
+        if not candidates and not modules and not required_files and not required_commands and not runtime_check:
             raise ValueError(f"工具 {tool_id} 至少需要一种可检测的能力声明")
         return cls(
             id=tool_id,
@@ -189,6 +194,7 @@ class ToolCapability:
             health_check_args=health_args,
             health_check_contains=health_contains,
             required_files=required_files,
+            required_commands=required_commands,
             import_check_modules=import_check_modules,
             runtime_check=runtime_check,
             enabled=bool(data.get("enabled", True)),
@@ -290,6 +296,51 @@ def _check_pdf_font_resources() -> tuple[str, str, list[str]]:
         return "missing", "PDF 中文字体资源不可用", [str(exc)[:300]]
 
 
+def _check_antsword_electron_loader() -> tuple[str, str, list[str]]:
+    """Check the bundled Electron launcher without starting a GUI process."""
+    executable = _PROJECT_ROOT / "Tools" / "AntSword-Loader-v4.0.3-linux-x64" / "AntSword"
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        return "missing", "AntSword Electron 启动器不可用", [f"未找到或不可执行: {executable}"]
+    try:
+        completed = subprocess.run(
+            ["ldd", str(executable)], capture_output=True, text=True,
+            errors="replace", timeout=8, check=False,
+        )
+        missing = [line.strip() for line in (completed.stdout or "").splitlines() if "not found" in line]
+        if completed.returncode != 0:
+            return "degraded", "AntSword Electron 依赖检查失败", [(completed.stderr or "ldd 执行失败")[:300]]
+        if missing:
+            return "missing", "AntSword Electron 缺少系统动态库", missing[:8]
+        return "available", "AntSword Electron 动态库验证通过", []
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "degraded", "AntSword Electron 依赖检查失败", [str(exc)[:300]]
+
+
+def _check_uv_runtime() -> tuple[str, str, list[str]]:
+    """Resolve uv/uvx at the same per-user location used by the installer."""
+    configured_dir = os.getenv("LINGSHU_UV_BIN_DIR", "").strip()
+    bin_dir = Path(configured_dir).expanduser() if configured_dir else Path.home() / ".local" / "bin"
+    uv = bin_dir / "uv"
+    uvx = bin_dir / "uvx"
+    if not uv.is_file():
+        resolved = shutil.which("uv")
+        uv = Path(resolved) if resolved else uv
+    if not uvx.is_file():
+        resolved = shutil.which("uvx")
+        uvx = Path(resolved) if resolved else uvx
+    missing = [name for name, path in (("uv", uv), ("uvx", uvx)) if not path.is_file() or not os.access(path, os.X_OK)]
+    if missing:
+        return "missing", "uv/uvx 运行环境不可用", ["未找到: " + ", ".join(missing)]
+    try:
+        completed = subprocess.run([str(uv), "--version"], capture_output=True, text=True, errors="replace", timeout=4)
+        version = (completed.stdout or completed.stderr).strip().splitlines()[0][:160]
+        if completed.returncode != 0:
+            return "degraded", "uv/uvx 运行环境检查失败", [version or "uv --version 失败"]
+        return "available", f"{version}；uvx 已就绪", []
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "degraded", "uv/uvx 运行环境检查失败", [str(exc)[:300]]
+
+
 class ToolCatalog:
     """加载声明式目录并解析当前主机上的有效工具。"""
 
@@ -352,6 +403,14 @@ class ToolCatalog:
             if spec.enabled:
                 status = "missing"
             errors.append("缺少必需资源: " + ", ".join(missing_files))
+        missing_commands = [
+            command for command in spec.required_commands if self._resolve_candidate(command) is None
+        ]
+        if missing_commands:
+            ready = False
+            if spec.enabled:
+                status = "missing"
+            errors.append("缺少必需命令: " + ", ".join(missing_commands))
         if ready and spec.import_check_modules:
             failed_imports: list[str] = []
             for module in spec.import_check_modules:
@@ -413,6 +472,18 @@ class ToolCatalog:
                 status = runtime_status
         if ready and spec.runtime_check == "pdf_font_resources":
             runtime_status, runtime_version, runtime_errors = _check_pdf_font_resources()
+            version = runtime_version
+            errors.extend(runtime_errors)
+            if spec.enabled and runtime_status != "available":
+                status = runtime_status
+        if ready and spec.runtime_check == "antsword_electron_loader":
+            runtime_status, runtime_version, runtime_errors = _check_antsword_electron_loader()
+            version = runtime_version
+            errors.extend(runtime_errors)
+            if spec.enabled and runtime_status != "available":
+                status = runtime_status
+        if ready and spec.runtime_check == "uv_runtime":
+            runtime_status, runtime_version, runtime_errors = _check_uv_runtime()
             version = runtime_version
             errors.extend(runtime_errors)
             if spec.enabled and runtime_status != "available":
