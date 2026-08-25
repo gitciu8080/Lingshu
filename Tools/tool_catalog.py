@@ -6,6 +6,7 @@ AgentScope 会自动向模型公开已经注册的 Function/MCP 工具。本模�
 from __future__ import annotations
 
 import json
+import importlib
 import importlib.metadata
 import importlib.util
 import os
@@ -17,6 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -128,6 +130,14 @@ class ToolCapability:
     # 通过无副作用命令检查其输出中是否存在指定能力标记。
     health_check_args: tuple[str, ...] = ()
     health_check_contains: tuple[str, ...] = ()
+    # 例如 PDF 模板字体等项目内资源。路径相对项目根目录，避免客户机绝对
+    # 路径差异导致环境面板误报。
+    required_files: tuple[str, ...] = ()
+    # ``find_spec`` 只能说明文件存在，无法发现 WeasyPrint 缺少 Pango/Cairo
+    # 等动态库的情况，因此支持安全的实际 import 健康检查。
+    import_check_modules: tuple[str, ...] = ()
+    # 少数系统能力需要端到端验证；当前仅支持 PDF 报告链路，执行结果有缓存。
+    runtime_check: str = ""
     enabled: bool = True
 
     @classmethod
@@ -149,12 +159,21 @@ class ToolCapability:
             if not module or not distribution:
                 raise ValueError(f"工具 {tool_id} 的 Python 模块声明不完整")
             modules.append((module, distribution))
-        if not candidates and not modules:
-            raise ValueError(f"工具 {tool_id} 至少需要 command_candidates 或 python_modules")
         health_args = tuple(str(item).strip() for item in data.get("health_check_args", []) if str(item).strip())
         health_contains = tuple(str(item).strip() for item in data.get("health_check_contains", []) if str(item).strip())
         if bool(health_args) != bool(health_contains):
             raise ValueError(f"工具 {tool_id} 的健康检查必须同时声明参数和预期输出")
+        required_files = tuple(str(item).strip() for item in data.get("required_files", []) if str(item).strip())
+        import_check_modules = tuple(
+            str(item).strip() for item in data.get("import_check_modules", []) if str(item).strip()
+        )
+        runtime_check = str(data.get("runtime_check", "")).strip().lower()
+        if runtime_check not in {
+            "", "pdf_report_generation", "pdf_mermaid_rendering", "pdf_font_resources",
+        }:
+            raise ValueError(f"工具 {tool_id} 声明了未知运行时健康检查: {runtime_check}")
+        if not candidates and not modules and not required_files and not runtime_check:
+            raise ValueError(f"工具 {tool_id} 至少需要一种可检测的能力声明")
         return cls(
             id=tool_id,
             category=str(data.get("category", "other")).strip().lower() or "other",
@@ -169,8 +188,106 @@ class ToolCapability:
             python_modules=tuple(modules),
             health_check_args=health_args,
             health_check_contains=health_contains,
+            required_files=required_files,
+            import_check_modules=import_check_modules,
+            runtime_check=runtime_check,
             enabled=bool(data.get("enabled", True)),
         )
+
+
+def _resolve_required_file(candidate: str) -> Path:
+    """Resolve a manifest resource path without depending on process CWD."""
+    expanded = os.path.expandvars(candidate).strip()
+    path = Path(expanded).expanduser()
+    if not path.is_absolute():
+        path = _PROJECT_ROOT / path
+    return path.resolve()
+
+
+def _validate_pdf_file(path: Path) -> None:
+    """Ensure a generated report is non-empty and parseable before marking ready."""
+    if not path.is_file() or path.stat().st_size < 1024:
+        raise RuntimeError("生成文件不存在或大小异常")
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(path))
+    if not reader.pages:
+        raise RuntimeError("生成文件没有可读取页面")
+
+
+def _check_pdf_report_generation() -> tuple[str, str, list[str]]:
+    """Exercise both PDF engines in a temporary directory, never touching session data."""
+    mission = {
+        "goal": "PDF 报告运行环境健康检查",
+        "updated_at": "2026-01-01T00:00:00+08:00",
+        "success": True,
+        "target": "local-healthcheck",
+    }
+    summary = "# PDF 报告环境检查\n\n## 一、概述\n\n运行环境自检。\n\n```mermaid\nflowchart LR\nA[输入] --> B[报告]\n```"
+    errors: list[str] = []
+    primary_ok = fallback_ok = False
+    try:
+        from Tools.WeasyReport import generate_weasyprint_pdf
+        with TemporaryDirectory(prefix="lingshu-pdf-health-") as directory:
+            primary = generate_weasyprint_pdf("weasyprint-health", summary, mission, directory)
+            _validate_pdf_file(primary)
+        primary_ok = True
+    except Exception as exc:  # 调用方仅用于可观测性，不能让状态接口失败
+        errors.append(f"WeasyPrint 主引擎不可用: {str(exc)[:300]}")
+    try:
+        from Tools.Report import _generate_reportlab_pdf
+        with TemporaryDirectory(prefix="lingshu-pdf-health-") as directory:
+            fallback = _generate_reportlab_pdf("reportlab-health", summary, mission, directory)
+            _validate_pdf_file(fallback)
+        fallback_ok = True
+    except Exception as exc:  # 同上
+        errors.append(f"ReportLab 回退引擎不可用: {str(exc)[:300]}")
+
+    if primary_ok and fallback_ok:
+        return "available", "WeasyPrint 主引擎 + ReportLab 回退引擎验证通过", errors
+    if primary_ok:
+        return "degraded", "WeasyPrint 主引擎验证通过（ReportLab 回退不可用）", errors
+    if fallback_ok:
+        return "degraded", "ReportLab 回退引擎验证通过（WeasyPrint 主引擎不可用）", errors
+    return "missing", "PDF 报告双引擎均不可用", errors
+
+
+def _check_pdf_mermaid_rendering() -> tuple[str, str, list[str]]:
+    """Verify the optional Mermaid-to-SVG enhancement without session writes."""
+    renderer = _PROJECT_ROOT / "Skills" / "beautiful-mermaid" / "scripts" / "render.js"
+    if not renderer.is_file():
+        return "missing", "Mermaid 渲染器缺失", [f"未找到: {renderer}"]
+    node = shutil.which("node")
+    if not node:
+        return "missing", "Mermaid 渲染器不可用", ["未找到 node"]
+    try:
+        with TemporaryDirectory(prefix="lingshu-mermaid-health-") as directory:
+            root = Path(directory)
+            source = root / "health.mmd"
+            destination = root / "health.svg"
+            source.write_text("flowchart LR\nA[输入] --> B[报告]\n", encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(renderer), str(source), "--format", "svg", "--theme", "github-light", "--preset", "modern", "--output", str(destination)],
+                capture_output=True, text=True, errors="replace", timeout=25, check=False,
+            )
+            if completed.returncode != 0 or not destination.is_file() or destination.stat().st_size <= 100:
+                detail = (completed.stderr or completed.stdout or "未生成 SVG").strip()[:300]
+                return "missing", "Mermaid SVG 渲染不可用", [detail]
+        return "available", "Mermaid SVG 渲染验证通过", []
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "degraded", "Mermaid SVG 渲染检查失败", [str(exc)[:300]]
+
+
+def _check_pdf_font_resources() -> tuple[str, str, list[str]]:
+    """Resolve the active font configuration, including .env path overrides."""
+    try:
+        from Tools.WeasyReport import _font_path
+
+        regular = _font_path("LINGSHU_PDF_FONT_REGULAR", "MSYH.TTC")
+        bold = _font_path("LINGSHU_PDF_FONT_BOLD", "MSYHBD.TTC")
+        return "available", f"中文字体已就绪（{regular.name}、{bold.name}）", []
+    except Exception as exc:
+        return "missing", "PDF 中文字体资源不可用", [str(exc)[:300]]
 
 
 class ToolCatalog:
@@ -225,6 +342,27 @@ class ToolCatalog:
             errors.append("未找到可执行文件")
         if missing_modules:
             errors.append("缺少 Python 模块: " + ", ".join(distribution for _, distribution in missing_modules))
+        missing_files = [
+            str(resource_path)
+            for candidate in spec.required_files
+            if not (resource_path := _resolve_required_file(candidate)).is_file()
+        ]
+        if missing_files:
+            ready = False
+            if spec.enabled:
+                status = "missing"
+            errors.append("缺少必需资源: " + ", ".join(missing_files))
+        if ready and spec.import_check_modules:
+            failed_imports: list[str] = []
+            for module in spec.import_check_modules:
+                try:
+                    importlib.import_module(module)
+                except Exception as exc:  # 动态库/ABI 失败也应在面板可见
+                    failed_imports.append(f"{module} ({str(exc)[:180]})")
+            if failed_imports:
+                if spec.enabled:
+                    status = "degraded"
+                errors.append("运行时导入失败: " + ", ".join(failed_imports))
         if path and spec.health_check_args:
             try:
                 checked = subprocess.run(
@@ -261,6 +399,24 @@ class ToolCatalog:
                 # 超过探测时限。可执行文件存在仍可提供给 Agent，版本探测
                 # 失败作为诊断告警返回，不能反向污染能力缓存使工具消失。
                 errors.append(f"版本检测失败: {exc}")
+        if ready and spec.runtime_check == "pdf_report_generation":
+            runtime_status, runtime_version, runtime_errors = _check_pdf_report_generation()
+            version = runtime_version
+            errors.extend(runtime_errors)
+            if spec.enabled and runtime_status != "available":
+                status = runtime_status
+        if ready and spec.runtime_check == "pdf_mermaid_rendering":
+            runtime_status, runtime_version, runtime_errors = _check_pdf_mermaid_rendering()
+            version = runtime_version
+            errors.extend(runtime_errors)
+            if spec.enabled and runtime_status != "available":
+                status = runtime_status
+        if ready and spec.runtime_check == "pdf_font_resources":
+            runtime_status, runtime_version, runtime_errors = _check_pdf_font_resources()
+            version = runtime_version
+            errors.extend(runtime_errors)
+            if spec.enabled and runtime_status != "available":
+                status = runtime_status
         if not version and include_version and spec.python_modules and modules_ready:
             versions: list[str] = []
             for module, distribution in spec.python_modules:
@@ -272,7 +428,7 @@ class ToolCatalog:
         command = (
             Path(path).name if path
             else (f"Python · {', '.join(distribution for _, distribution in spec.python_modules)}"
-                  if spec.python_modules else spec.command_candidates[0])
+                  if spec.python_modules else ("项目资源检查" if spec.required_files else "运行时自检"))
         )
         return {
             "id": spec.id,

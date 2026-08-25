@@ -115,7 +115,7 @@ sudo ./scripts/install-security-tools.sh --profile core
 sudo ./scripts/install-security-tools.sh --check
 ```
 
-`install.sh` 会顺序调用基础环境与安全工具安装器，并统一在 Miniconda 的 `agentscope` 环境安装 `requirements.txt`；不会在系统 Python 或 `.venv` 中混装依赖。可通过 `--skip-system-environment`、`--skip-security-tools` 或 `--security-profile extended` 控制范围。
+`install.sh` 会顺序调用基础环境与安全工具安装器，并统一在 Miniconda 的 `agentscope` 环境安装 `requirements.txt`；不会在系统 Python 或 `.venv` 中混装依赖。它还会安装 PDF 报告的 WeasyPrint 图形库、中文字体后备和 Mermaid SVG 渲染依赖。可通过 `--skip-system-environment`、`--skip-security-tools` 或 `--security-profile extended` 控制范围。
 
 ## 配置 `.env`
 
@@ -225,7 +225,7 @@ SQLite 是本地文件数据库，**没有数据库服务器用户名和密码**
 4. 在“任务目标”中明确说明任务类型，例如 `CTF PWN`、`应急响应` 或 `授权渗透测试`。
 5. 在进入利用阶段时，按弹窗选择“批准”“补充侦察”或“拒绝”。
 
-顶部扳手图标打开“系统工具状态”，其中 `MCP` 分类会显示 IDA Lib、GDB Multi 和 AntSword MCP 的健康情况。缺失或降级时先处理面板中的错误，再运行依赖它的专家任务。
+顶部扳手图标打开“系统工具状态”，其中 `MCP` 分类会显示 IDA Lib、GDB Multi 和 AntSword MCP 的健康情况；系统环境还会显示 PDF 主/回退引擎、中文字体、Mermaid 图表渲染和端到端 PDF 自检。缺失或降级时先处理面板中的错误，再运行依赖它的专家任务。
 
 ### 报告与历史
 

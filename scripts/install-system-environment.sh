@@ -34,10 +34,24 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# Kali/Debian 正处于 time_t 64 位迁移期：新系统是 libglib2.0-0t64，
+# 较旧发行版仍是 libglib2.0-0。选择源中实际存在的包名，避免 apt 因旧名
+# 无 Candidate 而中断整个一键安装。
+if apt-cache show libglib2.0-0t64 >/dev/null 2>&1; then
+  GLIB_RUNTIME_PACKAGE="libglib2.0-0t64"
+else
+  GLIB_RUNTIME_PACKAGE="libglib2.0-0"
+fi
+
 SYSTEM_PACKAGES=(
   ca-certificates curl git build-essential
   python3 python3-venv python3-pip
   nodejs xvfb gdb
+  # WeasyPrint 的 Pango/Cairo 后端、字体发现与中文通用后备字体。
+  # 项目内置微软雅黑字体仍是报告默认字体；Noto CJK 用于客户机替换字体时兜底。
+  fontconfig fonts-noto-cjk
+  libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 "$GLIB_RUNTIME_PACKAGE" libffi8
+  shared-mime-info
 )
 
 as_install_user() {
@@ -73,7 +87,27 @@ else
 fi
 if [ -x "$CONDA_PREFIX/envs/$ENV_NAME/bin/python" ]; then
   printf '  [可用]   AgentScope Conda 环境\n'
-  "$CONDA_PREFIX/envs/$ENV_NAME/bin/python" --version
+  PYTHON_BIN="$CONDA_PREFIX/envs/$ENV_NAME/bin/python"
+  "$PYTHON_BIN" --version
+  printf '  [PDF]    报告运行环境检测\n'
+  (
+    cd "$PROJECT_ROOT"
+    PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" - <<'PY'
+from Tools.tool_catalog import ToolCatalog
+
+wanted = {
+    "pdf-weasyprint-runtime",
+    "pdf-reportlab-runtime",
+    "pdf-chinese-fonts",
+    "pdf-report-generation",
+    "pdf-mermaid-renderer",
+}
+for item in ToolCatalog().snapshot(include_version=True):
+    if item["id"] in wanted:
+        detail = item["version"] or item["error"] or "已就绪"
+        print(f"    [{item['status']}] {item['id']}: {detail}")
+PY
+  ) || printf '    [degraded] PDF 报告自检无法完成，请检查 Python 依赖与系统图形库。\n'
 else
   printf '  [缺失]   AgentScope Conda 环境\n'
 fi

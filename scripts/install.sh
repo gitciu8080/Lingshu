@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 灵枢一键部署编排器：基础环境 → 安全工具 → Python 依赖 → 前端 → 可选 systemd。
+# 灵枢一键部署编排器：基础环境 → 安全工具 → Python 依赖 → 报告渲染器 → 前端 → systemd。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -74,42 +74,57 @@ child_args=(--conda-prefix "$CONDA_PREFIX" --env-name "$ENV_NAME" --python-versi
 if [ "$DRY_RUN" -eq 1 ]; then child_args+=(--dry-run); fi
 
 if [ "$SKIP_SYSTEM_ENVIRONMENT" -eq 0 ]; then
-  log '== 1/5 基础系统与 AgentScope Conda 环境 =='
+  log '== 1/6 基础系统与 AgentScope Conda 环境 =='
   "${SCRIPT_DIR}/install-system-environment.sh" "${child_args[@]}"
 else
-  log '== 1/5 已跳过基础系统与 Conda 环境 =='
+  log '== 1/6 已跳过基础系统与 Conda 环境 =='
 fi
 
 if [ "$SKIP_SECURITY_TOOLS" -eq 0 ]; then
-  log '== 2/5 安全工具、OCR 语言包与 JDK =='
+  log '== 2/6 安全工具、OCR 语言包与 JDK =='
   security_args=(--profile "$SECURITY_PROFILE")
   if [ "$DRY_RUN" -eq 1 ]; then security_args+=(--dry-run); fi
   LINGSHU_PYTHON_BIN="$CONDA_PREFIX/envs/$ENV_NAME/bin/python" \
     "${SCRIPT_DIR}/install-security-tools.sh" "${security_args[@]}"
 else
-  log '== 2/5 已跳过安全工具 =='
+  log '== 2/6 已跳过安全工具 =='
 fi
 
 PYTHON_BIN="$CONDA_PREFIX/envs/$ENV_NAME/bin/python"
 if [ "$DRY_RUN" -eq 1 ]; then
-  log "== 3/5 [dry-run] ${PYTHON_BIN} -m pip install -r requirements.txt =="
+  log "== 3/6 [dry-run] ${PYTHON_BIN} -m pip install -r requirements.txt =="
 elif [ ! -x "$PYTHON_BIN" ]; then
   fail "未找到 AgentScope Python：$PYTHON_BIN；请勿在系统 Python 或其他 Conda 环境安装依赖"
 else
-  log '== 3/5 安装 AgentScope Python 依赖 =='
+  log '== 3/6 安装 AgentScope Python 依赖 =='
   as_install_user "$PYTHON_BIN" -m pip install --upgrade pip
   as_install_user "$PYTHON_BIN" -m pip install -r "$ROOT/requirements.txt"
   as_install_user "$PYTHON_BIN" -m pip check
 fi
 
-if [ "$SKIP_WEBUI" -eq 1 ]; then
-  log '== 4/5 已跳过前端构建 =='
+# Summary 的 PDF 可能包含 Mermaid 图。该能力与 React 前端无关，因此即使
+# --skip-webui 也应安装；npm ci 以 lockfile 为准，避免客户机自行解析新版依赖。
+MERMAID_DIR="$ROOT/Skills/beautiful-mermaid"
+if [ ! -f "$MERMAID_DIR/package-lock.json" ]; then
+  warn "未找到 Mermaid 渲染器 lockfile，报告中的流程图将自动降级为源码块。"
 elif [ "$DRY_RUN" -eq 1 ]; then
-  log '== 4/5 [dry-run] pnpm install && pnpm build =='
+  log '== 4/6 [dry-run] 安装 PDF Mermaid SVG 渲染依赖 =='
+  log "cd $MERMAID_DIR && npm ci --omit=dev"
+elif ! command -v npm >/dev/null 2>&1; then
+  warn '未找到 npm，报告中的流程图将自动降级为源码块。'
+else
+  log '== 4/6 安装 PDF Mermaid SVG 渲染依赖 =='
+  as_install_user bash -lc "cd '$MERMAID_DIR' && npm ci --omit=dev"
+fi
+
+if [ "$SKIP_WEBUI" -eq 1 ]; then
+  log '== 5/6 已跳过前端构建 =='
+elif [ "$DRY_RUN" -eq 1 ]; then
+  log '== 5/6 [dry-run] pnpm install && pnpm build =='
 elif ! command -v node >/dev/null 2>&1; then
   warn '未找到 node，跳过前端构建；可修复系统环境后重跑本脚本。'
 else
-  log '== 4/5 构建 React 前端 =='
+  log '== 5/6 构建 React 前端 =='
   if command -v corepack >/dev/null 2>&1; then
     as_install_user corepack enable
     as_install_user bash -lc "cd '$ROOT/webui' && corepack pnpm@10.14.0 install && corepack pnpm@10.14.0 build"
@@ -129,7 +144,7 @@ elif [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 if [ "$WITH_SYSTEMD" -eq 1 ]; then
-  log '== 5/5 安装 systemd 服务 =='
+  log '== 6/6 安装 systemd 服务 =='
   [ "$DRY_RUN" -eq 0 ] || { log '[dry-run] 将写入并启动 lingshu-agent.service'; exit 0; }
   cat > /etc/systemd/system/lingshu-agent.service <<EOF
 [Unit]
@@ -156,7 +171,7 @@ EOF
   systemctl enable --now lingshu-agent.service
   log 'systemd 服务已启动：systemctl status lingshu-agent'
 else
-  log '== 5/5 未安装 systemd 服务 =='
+  log '== 6/6 未安装 systemd 服务 =='
 fi
 
 log '部署完成。运行 API：'

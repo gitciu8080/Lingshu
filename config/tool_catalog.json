@@ -92,6 +92,77 @@
    "alternatives": ["tesseract"]
   },
   {
+   "id": "pdf-weasyprint-runtime",
+   "category": "runtime",
+   "python_modules": [
+    {"module": "weasyprint", "distribution": "weasyprint"},
+    {"module": "jinja2", "distribution": "Jinja2"},
+    {"module": "markdown_it", "distribution": "markdown-it-py"}
+   ],
+   "import_check_modules": ["weasyprint", "jinja2", "markdown_it"],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "WeasyPrint：PDF 报告主渲染引擎",
+   "usage_hint": "实际导入检查会覆盖 Pango/Cairo 等系统图形库；完整生成结果见“PDF 报告端到端自检”。",
+   "alternatives": ["pdf-reportlab-runtime"]
+  },
+  {
+   "id": "pdf-reportlab-runtime",
+   "category": "runtime",
+   "python_modules": [
+    {"module": "reportlab", "distribution": "reportlab"},
+    {"module": "pypdf", "distribution": "pypdf"},
+    {"module": "PIL", "distribution": "Pillow"}
+   ],
+   "import_check_modules": ["reportlab", "pypdf", "PIL"],
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "ReportLab：PDF 报告降级渲染与 PDF 可读性校验",
+   "usage_hint": "WeasyPrint 不可用时系统自动使用此引擎；pypdf 用于验证生成文件可读取。",
+   "alternatives": ["pdf-weasyprint-runtime"]
+  },
+  {
+   "id": "pdf-chinese-fonts",
+   "category": "runtime",
+   "runtime_check": "pdf_font_resources",
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "PDF 中文字体资源（常规与粗体）",
+   "usage_hint": "默认使用项目内置字体；也可通过 LINGSHU_PDF_FONT_REGULAR / LINGSHU_PDF_FONT_BOLD 指向客户机字体。",
+   "alternatives": []
+  },
+  {
+   "id": "pdf-report-generation",
+   "category": "runtime",
+   "runtime_check": "pdf_report_generation",
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "PDF 报告端到端生成自检",
+   "usage_hint": "在临时目录生成并读取最小 PDF；主引擎或回退引擎失效会明确显示降级原因，不访问会话数据。",
+   "alternatives": ["pdf-weasyprint-runtime", "pdf-reportlab-runtime"]
+  },
+  {
+   "id": "pdf-mermaid-renderer",
+   "category": "runtime",
+   "command_candidates": ["node"],
+   "required_files": [
+    "Skills/beautiful-mermaid/scripts/render.js",
+    "Skills/beautiful-mermaid/node_modules/beautiful-mermaid/package.json",
+    "Skills/beautiful-mermaid/node_modules/sharp/package.json"
+   ],
+   "runtime_check": "pdf_mermaid_rendering",
+   "roles": [],
+   "risk": "local_analysis",
+   "approval_required": false,
+   "description": "Mermaid：PDF 报告中的流程图 SVG 渲染器",
+   "usage_hint": "属于报告增强能力；缺失时 PDF 仍可生成，但流程图会以源码块降级显示。安装器会执行 Skills/beautiful-mermaid 的 npm ci。",
+   "alternatives": []
+  },
+  {
    "id": "nmap",
    "category": "recon",
    "command_candidates": [
