@@ -576,7 +576,11 @@ def _message_to_event(message: dict) -> dict:
             event["block_id"] = f"legacy:{event_type}:{message.get('seq', 0)}"
     elif event_type == "phase_change":
         event["phase"] = content
-    elif event_type in ("approval_required", "approval_resolved", "plan_updated", "nss_submit", "slab_submit", "expert_joined", "report_ready"):
+    elif event_type in (
+        "approval_required", "approval_resolved", "plan_updated", "nss_submit",
+        "slab_submit", "expert_joined", "report_ready", "agent_reply_started",
+        "agent_reply_finished", "agent_reply_error", "agent_reply_cancelled",
+    ):
         try:
             event.update(json.loads(content))
         except (json.JSONDecodeError, TypeError):

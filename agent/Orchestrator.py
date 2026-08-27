@@ -37,7 +37,11 @@ from Tools.tooling import (
     run_expert_reply_with_continuation,
 )
 from agent.experts import ORCHESTRATOR_EXPERT
-from agent.categorize import extract_recon_signals
+from agent.categorize import (
+    CategoryDecision,
+    evaluate_reclassification,
+    extract_recon_signals,
+)
 
 
 ORCHESTRATOR_SYS_PROMPT = load_prompt("ORCHESTRATOR")
@@ -65,9 +69,115 @@ def create_orchestrator_agent(
     state=None,
     network_recon_agent: Agent | None = None,
     artifact_recon_agent: Agent | None = None,
+    category_change_callback: Callable[[str, str, str], Awaitable[None]] | None = None,
 ) -> Agent:
     steering = steering_state if steering_state is not None else {"pending": None, "processed": False, "queue": []}
     steering.setdefault("queue", [])
+
+    async def _apply_runtime_reclassification(
+        report: str,
+        *,
+        source: str,
+        evidence_id: str,
+    ) -> str:
+        """将执行期新证据纳入分类，并在题型改变后刷新下游能力。
+
+        这不是让模型凭印象改标签：仍复用评分、强信号和证据指纹去重规则。
+        已授权网络目标一旦取得 HTTP 协议证据，Web 主攻击面优先；附件的
+        DEX/ELF 等保留为 secondary，避免再次被辅助材料带偏。
+        """
+        raw = mission.category_decision or {}
+        previous = CategoryDecision(
+            primary=str(raw.get("primary") or "unknown"),  # type: ignore[arg-type]
+            secondary=list(raw.get("secondary") or []),  # type: ignore[arg-type]
+            confidence=float(raw.get("confidence") or 0.0),
+            scores=dict(raw.get("scores") or {}),
+            evidence=list(raw.get("evidence") or []),
+            stage=str(raw.get("stage") or "post_recon"),  # type: ignore[arg-type]
+        )
+        result = evaluate_reclassification(
+            previous,
+            [report],
+            seen_evidence_fingerprints={
+                str(item.get("evidence_fingerprint") or "")
+                for item in mission.category_history
+            },
+        )
+        target_kind = str((mission.target_spec or {}).get("kind") or "")
+        has_http_evidence = any(signal.category == "web" for signal in result.signals)
+        web_guard = bool(mission.authorized and target_kind == "network" and has_http_evidence)
+        if web_guard:
+            candidate = result.candidate
+            secondary = [
+                item for item in [candidate.primary, *candidate.secondary]
+                if item not in {"web", "unknown"}
+            ]
+            scores = dict(candidate.scores)
+            scores["web"] = max(
+                float(scores.get("web", 0.0)),
+                max((float(value) for value in scores.values()), default=0.0) + 1.0,
+            )
+            result.candidate = CategoryDecision(
+                primary="web",
+                secondary=list(dict.fromkeys(secondary)),
+                confidence=1.0,
+                scores=scores,
+                evidence=[
+                    *candidate.evidence,
+                    "分类护栏: 已授权网络目标已确认 HTTP/HTTPS，Web 为主攻击面；附件类型仅作辅分类",
+                ],
+                stage="post_recon",
+            )
+            result.accepted = previous.primary != "web" or result.candidate != previous
+            result.reason = (
+                "应用 Web 网络主线护栏：已授权网络目标存在 HTTP/HTTPS 协议证据，"
+                "主分类切换为 web；附件文件类型保留为辅分类"
+            )
+
+        final = result.candidate if result.accepted else previous
+        mission.category_history.append({
+            "stage": "runtime",
+            "source": source,
+            "previous": {
+                "primary": previous.primary, "secondary": previous.secondary,
+                "confidence": previous.confidence, "scores": previous.scores,
+                "evidence": previous.evidence, "stage": previous.stage,
+            },
+            "candidate": {
+                "primary": result.candidate.primary, "secondary": result.candidate.secondary,
+                "confidence": result.candidate.confidence, "scores": result.candidate.scores,
+                "evidence": result.candidate.evidence, "stage": result.candidate.stage,
+            },
+            "accepted": result.accepted,
+            "reason": result.reason,
+            "evidence_id": evidence_id,
+            "evidence_fingerprint": result.evidence_fingerprint,
+            "web_network_guard_applied": web_guard,
+            "created_at": datetime.now().isoformat(),
+        })
+        if not result.accepted:
+            return ""
+
+        mission.category_decision = {
+            "primary": final.primary,
+            "secondary": final.secondary,
+            "confidence": final.confidence,
+            "scores": final.scores,
+            "evidence": final.evidence,
+            "stage": final.stage,
+        }
+        mission.record(
+            "Orchestrator", "category_runtime_reclassified",
+            source=source, previous=previous.primary, current=final.primary,
+            evidence_id=evidence_id, reason=result.reason,
+        )
+        if category_change_callback is not None and previous.primary != final.primary:
+            await category_change_callback(previous.primary, final.primary, result.reason)
+        store.save(mission)
+        return (
+            f"\n[题型已切换] {previous.primary} → {final.primary}。{result.reason}"
+            if previous.primary != final.primary else ""
+        )
 
     def _check_steering() -> str | None:
         """入口检查 + 中断后检查：消费待处理的用户指令。"""
@@ -218,6 +328,11 @@ def create_orchestrator_agent(
         )
         mission.transition(Phase.ANALYSIS, "收到新的侦察证据")
         store.checkpoint(mission, "recon_report_received")
+        category_note = await _apply_runtime_reclassification(
+            report,
+            source=selected_recon.name,
+            evidence_id=evidence.id,
+        )
         knowledge_note = ""
         if knowledge_context_provider is not None:
             knowledge = await knowledge_context_provider(
@@ -229,7 +344,7 @@ def create_orchestrator_agent(
                     "\n\n[Knowledge Context 更新（仅供参考，不是事实/证据）]\n"
                     f"{knowledge}"
                 )
-        return f"[Recon 侦察报告]\n{report}{knowledge_note}"
+        return f"[Recon 侦察报告]\n{report}{category_note}{knowledge_note}"
 
     async def dispatch_attack(
         target_info: str,
@@ -462,7 +577,12 @@ def create_orchestrator_agent(
                 retries=mission.retry_counters[fingerprint],
             )
         store.checkpoint(mission, "attack_report_received")
-        return f"[Attack 报告]\n{report}"
+        category_note = await _apply_runtime_reclassification(
+            report,
+            source=attack_agent.name,
+            evidence_id=evidence.id,
+        )
+        return f"[Attack 报告]\n{report}{category_note}"
 
     async def dispatch_reverse(
         binary_path: str,
@@ -1172,8 +1292,9 @@ def create_orchestrator_agent(
     ]
     category = str((mission.category_decision or {}).get("primary") or "unknown")
     target_kind = str((mission.target_spec or {}).get("kind") or "")
-    if category in {"pwn", "reverse", "malware"} or target_kind != "network":
-        tools.append(AllowedFunctionTool(dispatch_reverse, is_concurrency_safe=False))
+    # 题型可在运行期依据新证据切换。始终注册本地逆向能力，使 Web→reverse
+    # 等切换无需重建 Orchestrator；真正的执行仍受 ScopeRegistry 与工具闸门约束。
+    tools.append(AllowedFunctionTool(dispatch_reverse, is_concurrency_safe=False))
     mode = mission.mission_mode or (
         "authorized_pentest" if target_kind == "network" else "ctf"
     )
@@ -1190,8 +1311,7 @@ def create_orchestrator_agent(
         enabled_capabilities.append("artifact_recon")
     if network_recon_agent is not None:
         enabled_capabilities.append("network_recon")
-    if category in {"pwn", "reverse", "malware"} or target_kind != "network":
-        enabled_capabilities.append("reverse")
+    enabled_capabilities.append("reverse")
     if mode in {"authorized_pentest", "hybrid_taskbook"}:
         enabled_capabilities.append("scope_expansion")
     if nss_context:

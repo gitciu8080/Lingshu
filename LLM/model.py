@@ -119,6 +119,46 @@ class _SyntheticResponseEvent:
             setattr(self, key, value)
 
 
+# 许多 OpenAI Responses 兼容网关会沿用不同的 delta 事件名（例如
+# ``response.reasoning_content.delta``），而 AgentScope 2.0.6 的官方
+# OpenAIResponseModel 仅消费标准 ``reasoning_summary_text`` / ``output_text``。
+# 这里直接扩展该官方通用模型的输入流，不创建按厂商拆分的 Model 子类：只对
+# 语义等价的事件名做标准化，既不修改请求体，也不修改 formatter/工具协议。
+_OPENAI_RESPONSE_EVENT_ALIASES = {
+    "response.reasoning_text.delta": "response.reasoning_summary_text.delta",
+    "response.reasoning.delta": "response.reasoning_summary_text.delta",
+    "response.reasoning_content.delta": "response.reasoning_summary_text.delta",
+    "response.thinking.delta": "response.reasoning_summary_text.delta",
+    "response.text.delta": "response.output_text.delta",
+    "response.message.delta": "response.output_text.delta",
+    "response.content.delta": "response.output_text.delta",
+}
+
+
+def _install_openai_responses_event_compatibility() -> None:
+    """为 AgentScope 官方 ``OpenAIResponseModel`` 安装通用事件别名兼容。"""
+    if getattr(OpenAIResponseModel, "_lingshu_event_compat_installed", False):
+        return
+    original = OpenAIResponseModel._parse_stream_response
+
+    async def compatible_parse_stream_response(self, start_datetime, response):
+        async def normalized_events():
+            async for event in response:
+                alias = _OPENAI_RESPONSE_EVENT_ALIASES.get(
+                    str(getattr(event, "type", "")),
+                )
+                yield _ResponseEventAlias(event, alias) if alias else event
+
+        async for chunk in original(self, start_datetime, normalized_events()):
+            yield chunk
+
+    OpenAIResponseModel._parse_stream_response = compatible_parse_stream_response
+    OpenAIResponseModel._lingshu_event_compat_installed = True
+
+
+_install_openai_responses_event_compatibility()
+
+
 class DeepSeekResponseFormatter(OpenAIResponseFormatter):
     """Formatter that ensures ThinkingBlock carries a reasoning_item_id.
 
@@ -702,7 +742,16 @@ def OpenAICompatible(
         temperature: float | None = None,
         config: RuntimeConfig | None = None,
 ) -> Union[OpenAIResponseModel, OpenAIChatModel]:
-    """创建 Superadmin 注册的通用 OpenAI-compatible Chat Model。"""
+    """按注册接口创建 Superadmin 的通用 OpenAI 兼容模型。
+
+    ``DeepSeekResponsesModel`` 只适用于内置 ``deepseek`` Provider；它会
+    注入 DeepSeek 专有的请求字段、事件别名与格式化器。自定义 Provider
+    不能复用该层，否则会把 DeepSeek 的流式协议假设带到其他网关。
+
+    其他 Provider 严格按自身注册的 API 风格选择 AgentScope 官方通用模型：
+    ``responses`` 使用 ``OpenAIResponseModel``，其余使用
+    ``OpenAIChatModel``。
+    """
     runtime = config or RuntimeConfig.from_env()
     provider_config = runtime.custom_llm_configs.get(provider)
     if not provider_config:
@@ -726,16 +775,14 @@ def OpenAICompatible(
         "client_kwargs": {"timeout": float(settings.get("timeout_seconds", 600))},
     }
     if provider_config.get("api_style") == "responses":
-        return DeepSeekResponsesModel(
+        return OpenAIResponseModel(
             **common,
-            parameters=DeepSeekResponsesModel.Parameters(
+            parameters=OpenAIResponseModel.Parameters(
                 temperature=temperature,
                 thinking_enable=thinking_enable,
                 reasoning_effort=effort if thinking_enable else None,
                 max_tokens=max_tokens,
             ),
-            native_tools=[{"type": name} for name in (provider_config.get("native_tools") or [])],
-            gateway_mode=str(provider_config.get("gateway_mode") or "base_url"),
         )
     return OpenAIChatModel(
         **common,

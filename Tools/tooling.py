@@ -70,6 +70,19 @@ class LazyAgent:
     def get_if_loaded(self) -> Agent | None:
         return self._agent
 
+    async def reset(self, *, name: str | None = None) -> Agent | None:
+        """丢弃已缓存的 Agent，使下次 reply 按最新任务状态重建。
+
+        仅由 Orchestrator 在一次工具调用已经结束后使用，避免题型重分类后
+        继续复用旧题型的 Skill、工具目录和专家身份。
+        """
+        async with self._lock:
+            previous = self._agent
+            self._agent = None
+            if name:
+                self.name = name
+            return previous
+
     async def get(self) -> Agent:
         if self._agent is not None:
             return self._agent
@@ -552,6 +565,16 @@ async def stream_agent_reply(
     final_msg: Msg | None = None
     interrupted_reply_seen = False
     agent_name = agent.name if hasattr(agent, "name") else prefix.strip("[] ")
+    # 这是一次模型 ReAct reply 的生命周期计数，而非工具动作计数。它用于
+    # 区分「模型 API/流断开」「工具已回填但模型静默结束」和「模型超迭代」。
+    # 仅记录长度、事件数与终态枚举，绝不记录提示词、密钥或完整思考内容。
+    diagnostics = {
+        "text_chars": 0,
+        "thinking_chars": 0,
+        "tool_calls_started": 0,
+        "tool_calls_finished": 0,
+        "final_messages": 0,
+    }
 
     def _emit(event_type: str, **payload: Any) -> None:
         if on_event is not None:
@@ -567,6 +590,8 @@ async def stream_agent_reply(
             expert_name=agent_name,
             specialty=specialty if separator else agent_name,
         )
+
+    _emit("agent_reply_started", agent=agent_name)
 
     async def _consume_reply_stream() -> None:
         nonlocal final_msg, interrupted_reply_seen
@@ -597,6 +622,7 @@ async def stream_agent_reply(
                     # 后续 message 事件才能与刚完成的全文稳定去重。
                     _finish_open_blocks()
                     final_msg = evt_or_msg
+                    diagnostics["final_messages"] += 1
                     if (
                         getattr(evt_or_msg, "finished_reason", None)
                         == ReplyFinishedReason.INTERRUPTED
@@ -623,6 +649,7 @@ async def stream_agent_reply(
                         print(f"{prefix}", end="", flush=True)
                         _emit("text_start", agent=agent_name)
                     if delta:
+                        diagnostics["text_chars"] += len(delta)
                         print(delta, end="", flush=True)
                         _emit("text_delta", delta=delta, agent=agent_name)
                 elif isinstance(evt_or_msg, TextBlockEndEvent):
@@ -639,6 +666,7 @@ async def stream_agent_reply(
                     delta = _clean_thinking_delta(evt_or_msg.delta)
                     if not delta:
                         continue  # 空 <think> 标签残留/纯空白：不打印、不广播、不入库
+                    diagnostics["thinking_chars"] += len(delta)
                     if not thinking_started:
                         thinking_started = True
                         print(f"{prefix}🧠 ", end="", flush=True)
@@ -651,6 +679,7 @@ async def stream_agent_reply(
                         _emit("thinking_end", agent=agent_name)
                     thinking_started = False
                 elif isinstance(evt_or_msg, ToolCallStartEvent):
+                    diagnostics["tool_calls_started"] += 1
                     print(f"\n{prefix}🔧 [{evt_or_msg.tool_call_name}] ", end="", flush=True)
                     _emit("tool_call_start",
                           agent=agent_name,
@@ -663,6 +692,7 @@ async def stream_agent_reply(
                           tool_call_id=evt_or_msg.tool_call_id,
                           delta=evt_or_msg.delta)
                 elif isinstance(evt_or_msg, ToolCallEndEvent):
+                    diagnostics["tool_calls_finished"] += 1
                     print("", flush=True)
                     # AgentScope 版本/工具类型不同，结果字段可能叫 output/result/content；
                     # 有则一并转发给 WebUI 的工具审计面板，缺失时仍保留完整参数。
@@ -676,7 +706,17 @@ async def stream_agent_reply(
                           agent=agent_name,
                           tool_call_id=evt_or_msg.tool_call_id,
                           tool_name=getattr(evt_or_msg, "tool_call_name", ""),
-                          output=str(tool_output))
+                          output=str(tool_output),
+                          # ToolCallEnd 只有在工具结果回填至 AgentScope 流后才会
+                          # 出现；即使某些适配器不暴露 output，也要留下该事实。
+                          result_returned=True,
+                          result_chars=len(str(tool_output)),
+                          result_field=(
+                              "output" if getattr(evt_or_msg, "output", None) is not None
+                              else "result" if getattr(evt_or_msg, "result", None) is not None
+                              else "content" if getattr(evt_or_msg, "content", None) is not None
+                              else "none"
+                          ))
         finally:
             # 官方中断是 task.cancel()。无论取消落在哪个 await 点，都先把已
             # 展示的部分内容固化为 end 事件，避免 UI/DB 只剩悬挂快照。
@@ -696,7 +736,17 @@ async def stream_agent_reply(
         agent_tasks.add(reply_task)
     try:
         await reply_task
+    except Exception as exc:
+        _emit(
+            "agent_reply_error",
+            agent=agent_name,
+            error_type=type(exc).__name__,
+            message=str(exc)[:1000],
+            **diagnostics,
+        )
+        raise
     except asyncio.CancelledError:
+        _emit("agent_reply_cancelled", agent=agent_name, **diagnostics)
         reply_task.cancel()
         await asyncio.gather(reply_task, return_exceptions=True)
         raise
@@ -705,14 +755,26 @@ async def stream_agent_reply(
             agent_tasks.discard(reply_task)
 
     if final_msg is None:
+        _emit("agent_reply_error", agent=agent_name, error_type="MissingFinalMessage",
+              message="Agent reply stream ended without a final message", **diagnostics)
         raise RuntimeError("Agent did not produce a final message.")
+    final_text = final_msg.get_text_content() or ""
+    finished_reason = getattr(final_msg, "finished_reason", None)
+    _emit(
+        "agent_reply_finished",
+        agent=agent_name,
+        finished_reason=(getattr(finished_reason, "value", None) or str(finished_reason or "")),
+        final_text_chars=len(final_text),
+        final_text_empty=not bool(final_text.strip()),
+        **diagnostics,
+    )
     # AgentScope 处理中断后不会抛 CancelledError，而是以 finished_reason=
     # INTERRUPTED 的最终消息正常返回（并发工具路径会吞掉取消）。此处将其
     # 还原为 CancelledError，使中断信号沿 dispatch_* → Orchestrator 主循环
     # → run_mission 传播，触发统一的后台进程清理与 cancelled 终态收敛。
     if (
         interrupted_reply_seen
-        or getattr(final_msg, "finished_reason", None)
+        or finished_reason
         == ReplyFinishedReason.INTERRUPTED
     ):
         raise asyncio.CancelledError()
@@ -720,7 +782,7 @@ async def stream_agent_reply(
     # "The maximum reasoning-acting iterations are exceeded." 这类占位串，
     # 不应被当成有效报告。此处抛出 AgentMaxIterationsError，由 dispatch_*
     # / 主循环统一收敛（P1 熔断）。
-    if getattr(final_msg, "finished_reason", None) == ReplyFinishedReason.EXCEED_MAX_ITERS:
+    if finished_reason == ReplyFinishedReason.EXCEED_MAX_ITERS:
         raise AgentMaxIterationsError(
             f"Agent {agent_name} 达到最大推理迭代次数（max_iters），本轮未产出有效结果"
         )

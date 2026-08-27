@@ -124,8 +124,30 @@ class ModelRegistryTests(unittest.TestCase):
 
         runtime = RuntimeConfig(custom_llm_configs={"openrouter": custom})
         model = OpenAICompatible("openrouter", Ver="Min", config=runtime)
-        self.assertIsInstance(model, OpenAIResponseModel)
+        self.assertIs(type(model), OpenAIResponseModel)
         self.assertEqual(model.model, "model-min")
+
+    def test_bailian_responses_registration_uses_generic_response_compatibility(self) -> None:
+        """百炼 Responses 必须走官方通用层，不能进入 DeepSeek 专用层。"""
+        from agentscope.model import OpenAIResponseModel
+        from core.config import RuntimeConfig
+        from LLM.model import OpenAICompatible
+
+        runtime = RuntimeConfig(custom_llm_configs={
+            "bailian": {
+                "api_key": "bailian-key",
+                "base_url": "https://bailian.example/v1",
+                "api_style": "responses",
+                "model_low": "deepseek-v4-flash",
+                "model_min": "deepseek-v4-flash",
+                "model_max": "deepseek-v4-flash",
+                "settings": {"thinking_enabled": True},
+            },
+        })
+
+        model = OpenAICompatible("bailian", Ver="Max", config=runtime)
+        self.assertIs(type(model), OpenAIResponseModel)
+        self.assertEqual(model.model, "deepseek-v4-flash")
 
     def test_deepseek_full_endpoint_gateway_mode_persists_to_runtime(self) -> None:
         payload = self.llm("gateway", "gateway-key")

@@ -14,6 +14,10 @@ PERSIST_EVENT_TYPES = frozenset({
     "thinking_start", "thinking_end", "tool_call_start", "tool_call_end",
     "target_info", "flag_found", "nss_submit", "slab_submit", "report_ready",
     "user_message", "steering_received", "agent_acknowledged", "scope_updated",
+    # Agent reply 生命周期诊断：用于定位模型响应、工具回填与 ReAct 收尾之间
+    # 的断点。内容为脱敏结构化元数据，不含 prompt/思考全文。
+    "agent_reply_started", "agent_reply_finished", "agent_reply_error",
+    "agent_reply_cancelled",
 })
 
 SYSTEM_ROLE_EVENTS = frozenset({
@@ -77,8 +81,15 @@ def message_operation(
             "tool_name": payload.get("tool_name", ""),
             "full_args": payload.get("full_args", ""),
             "output": payload.get("output", ""),
+            "result_returned": payload.get("result_returned", False),
+            "result_chars": payload.get("result_chars", 0),
+            "result_field": payload.get("result_field", ""),
         }, ensure_ascii=False)
-    elif event_type in {"approval_required", "nss_submit", "slab_submit", "report_ready"}:
+    elif event_type in {
+        "approval_required", "nss_submit", "slab_submit", "report_ready",
+        "agent_reply_started", "agent_reply_finished", "agent_reply_error",
+        "agent_reply_cancelled",
+    }:
         content = json.dumps(payload, ensure_ascii=False)
     elif event_type == "approval_resolved":
         content = json.dumps({

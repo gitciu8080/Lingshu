@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agentscope.message import AssistantMsg, UserMsg
+from agentscope.model import OpenAIResponseModel
 from agentscope.event import TextBlockDeltaEvent, TextBlockStartEvent
 from agentscope.types import ReplyFinishedReason
 from agentscope.credential import OpenAICredential
@@ -92,6 +93,33 @@ class DeepSeekResponsesModelTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0].content[0].type, "thinking")
         self.assertEqual(chunks[0].content[0].thinking, "推理内容")
+
+    async def test_official_openai_response_model_normalizes_vendor_reasoning_delta(self) -> None:
+        """所有 Responses Provider 共享兼容，不需要逐厂商 Model 子类。"""
+        model = OpenAIResponseModel(
+            credential=OpenAICredential(api_key=SecretStr("test")),
+            model="compatible-reasoning-model",
+        )
+
+        for event_type in (
+            "response.reasoning_text.delta",
+            "response.reasoning_content.delta",
+            "response.thinking.delta",
+        ):
+            async def response(kind=event_type):
+                yield SimpleNamespace(type=kind, delta="兼容推理内容")
+
+            chunks = [
+                chunk
+                async for chunk in model._parse_stream_response(
+                    datetime.now(),
+                    response(),
+                )
+            ]
+
+            self.assertEqual(len(chunks), 1, event_type)
+            self.assertEqual(chunks[0].content[0].type, "thinking", event_type)
+            self.assertEqual(chunks[0].content[0].thinking, "兼容推理内容", event_type)
 
 
 class RoleHistoryRecorderTest(unittest.TestCase):
@@ -238,6 +266,33 @@ class MissionTitleTest(unittest.TestCase):
 
 
 class ExpertRosterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_reply_lifecycle_diagnostics_include_final_reason_and_counts(self) -> None:
+        async def reply_stream(**_kwargs):
+            yield AssistantMsg(
+                name="Alex - 行动指挥专家",
+                content="已完成状态检查",
+                finished_reason=ReplyFinishedReason.COMPLETED,
+            )
+
+        agent = SimpleNamespace(
+            name="Alex - 行动指挥专家",
+            reply_stream=reply_stream,
+        )
+        events: list[tuple[str, dict]] = []
+        await stream_agent_reply(
+            agent,
+            on_event=lambda event, **data: events.append((event, data)),
+        )
+
+        started = [data for event, data in events if event == "agent_reply_started"]
+        finished = [data for event, data in events if event == "agent_reply_finished"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["finished_reason"], "completed")
+        self.assertEqual(finished[0]["final_text_chars"], len("已完成状态检查"))
+        self.assertEqual(finished[0]["tool_calls_started"], 0)
+        self.assertEqual(finished[0]["tool_calls_finished"], 0)
+
     def test_reverse_expert_name(self) -> None:
         self.assertEqual(REVERSE_EXPERT, "Ryan - 逆向程序专家")
 
@@ -304,8 +359,15 @@ class ExpertRosterTest(unittest.IsolatedAsyncioTestCase):
             await task
 
         event_names = [event for event, _ in events]
-        self.assertEqual(event_names, ["text_start", "text_delta", "text_end"])
-        self.assertTrue(events[-1][1]["interrupted"])
+        self.assertEqual(
+            event_names,
+            [
+                "agent_reply_started", "text_start", "text_delta", "text_end",
+                "agent_reply_cancelled",
+            ],
+        )
+        self.assertTrue(events[3][1]["interrupted"])
+        self.assertEqual(events[-1][1]["tool_calls_finished"], 0)
 
     async def test_interrupted_msg_is_not_overwritten_by_empty_aggregate(self) -> None:
         async def reply_stream(**_kwargs):

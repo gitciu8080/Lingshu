@@ -42,6 +42,32 @@ class StructuredStateTest(unittest.TestCase):
 
 
 class ReclassificationIntegrationTest(unittest.TestCase):
+    def test_authorized_http_network_target_keeps_web_primary_with_dex_attachment_signal(self) -> None:
+        """HTTP 主攻击面不能因附件 DEX 文本信号漂移成 reverse。"""
+        mission = MissionState(
+            target="node4.example.test:27469",
+            goal="获取 Flag；本地附件包含客户端材料",
+            authorized=True,
+            target_spec={"kind": "network"},
+        )
+        previous = CategoryDecision(
+            primary="web",
+            confidence=0.7,
+            scores={"web": 3.5, "reverse": 1.0},
+            evidence=["初始 HTTP/Web 线索"],
+        )
+        final, result, _ = _commit_recon_reclassification(
+            mission,
+            previous,
+            "HTTP/1.1 200 OK\nServer: nginx\n附件分析输出: DEX",
+            "Ethan - 网络侦察专家",
+        )
+
+        self.assertEqual(final.primary, "web")
+        self.assertIn("reverse", final.secondary)
+        self.assertTrue(mission.category_history[-1]["web_network_guard_applied"])
+        self.assertIn("Web 网络主线护栏", result.reason)
+
     def test_recon_changes_final_category_and_attack_skills(self) -> None:
         mission = MissionState(target="challenge", goal="分析附件", authorized=True)
         previous = CategoryDecision(

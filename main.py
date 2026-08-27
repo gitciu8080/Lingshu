@@ -461,6 +461,48 @@ def _commit_recon_reclassification(
             for item in mission.category_history
         },
     )
+    # 已授权网络目标已被 Recon 证实为 HTTP/HTTPS 服务时，它就是当前任务的
+    # 主攻击面。附件中的 DEX/APK/ELF 等只是辅助分析材料（例如客户端、SDK、
+    # 上传源码），不得仅凭文件类型信号把 Web 主线改判为 reverse/pwn。
+    # 这条护栏只依赖协议级 Web 信号，既不把任意 TCP 服务误判成 Web，也不会
+    # 阻止后续将 reverse/pwn 作为 secondary Skill 加载。
+    target_kind = str((mission.target_spec or {}).get("kind") or "")
+    has_http_evidence = any(signal.category == "web" for signal in result.signals)
+    web_network_guard_applied = bool(
+        mission.authorized
+        and target_kind == "network"
+        and has_http_evidence
+    )
+    if web_network_guard_applied:
+        candidate = result.candidate
+        auxiliary_categories = [
+            category
+            for category in [candidate.primary, *candidate.secondary]
+            if category not in {"web", "unknown"}
+        ]
+        scores = dict(candidate.scores)
+        scores["web"] = max(
+            float(scores.get("web", 0.0)),
+            max((float(score) for score in scores.values()), default=0.0) + 1.0,
+        )
+        result.candidate = CategoryDecision(
+            primary="web",
+            secondary=list(dict.fromkeys(auxiliary_categories)),
+            confidence=1.0,
+            scores=scores,
+            evidence=[
+                *candidate.evidence,
+                "分类护栏: 已授权网络目标已确认 HTTP/HTTPS，Web 为主攻击面；附件类型仅作辅分类",
+            ],
+            stage="post_recon",
+        )
+        # 即使 previous 已是 web，也接受该决策以写入附件产生的辅分类；否则
+        # final_decision 会沿用 previous，reverse/pwn 等辅助 Skill 无法被加载。
+        result.accepted = True
+        result.reason = (
+            "应用 Web 网络主线护栏：已授权网络目标存在 HTTP/HTTPS 协议证据，"
+            "主分类固定为 web；附件文件类型保留为辅分类"
+        )
     for signal in result.signals:
         mission.add_fact(
             signal.content,
@@ -478,6 +520,7 @@ def _commit_recon_reclassification(
         "evidence_id": evidence.id,
         "evidence_fingerprint": result.evidence_fingerprint,
         "created_at": evidence.created_at,
+        "web_network_guard_applied": web_network_guard_applied,
     }
     mission.category_history.append(history_entry)
     final_decision = result.candidate if result.accepted else previous
@@ -2603,6 +2646,36 @@ async def run_mission(
             _load_attack_agent,
         )
 
+        async def _on_category_changed(
+            previous: str,
+            current: str,
+            reason: str,
+        ) -> None:
+            """题型切换后使 Attack 在下一轮加载新专家与对应技能集。"""
+            replacement_name = attack_expert_name(
+                current,
+                target_spec.kind,
+                _current_attack_capability_context(),
+            )
+            previous_agent = await attack.reset(name=replacement_name)
+            if previous_agent is not None:
+                await close_attack_agent(previous_agent)
+            mission.record(
+                "system", "attack_agent_reconfigured_for_category",
+                previous=previous, current=current, agent=replacement_name,
+                reason=reason,
+            )
+            store.save(mission)
+            if event_callback is not None:
+                event_callback(
+                    "message",
+                    agent="system",
+                    content=(
+                        f"题型已切换：{previous} → {current}；"
+                        f"后续攻击专家已切换为 {replacement_name}。"
+                    ),
+                )
+
         dynamic_debug_needed = any(term in capability_context.lower() for term in (
             "gdb", "动态调试", "动态验证", "运行时", "core dump", "核心转储",
         ))
@@ -2669,6 +2742,7 @@ async def run_mission(
             state=build_role_agent_state(mission_id, "orchestrator") if use_v2_workspace else None,
             network_recon_agent=network_recon,
             artifact_recon_agent=artifact_recon,
+            category_change_callback=_on_category_changed,
         )
         # 结构化计划清单文本（Orchestrator 需要知道条目 id 才能用 UpdatePlan 等工具维护）
         plan_items_text = "\n".join(
