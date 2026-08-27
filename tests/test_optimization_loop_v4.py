@@ -68,6 +68,33 @@ class ReclassificationIntegrationTest(unittest.TestCase):
         self.assertTrue(mission.category_history[-1]["web_network_guard_applied"])
         self.assertIn("Web 网络主线护栏", result.reason)
 
+    def test_markdown_protocol_field_is_http_evidence_for_web_guard(self) -> None:
+        """侦察报告常用表格总结协议，不能只识别原始 HTTP 状态行。"""
+        mission = MissionState(
+            target="node4.example.test:26873",
+            goal="获取 Flag；本地附件包含 DEX 客户端材料",
+            authorized=True,
+            target_spec={"kind": "network"},
+        )
+        previous = CategoryDecision(
+            primary="web", confidence=0.5,
+            scores={"web": 2.0, "reverse": 1.0},
+            evidence=["题面 Web 线索"],
+        )
+
+        final, result, _ = _commit_recon_reclassification(
+            mission,
+            previous,
+            "| **协议** | HTTP（仅 HTTP，不支持 HTTPS） |\n"
+            "| 后端 | PHP 8.1.22 |\n附件检测：DEX",
+            "Ethan - 网络侦察专家",
+        )
+
+        self.assertEqual(final.primary, "web")
+        self.assertIn("reverse", final.secondary)
+        self.assertTrue(mission.category_history[-1]["web_network_guard_applied"])
+        self.assertIn("Web 网络主线护栏", result.reason)
+
     def test_recon_changes_final_category_and_attack_skills(self) -> None:
         mission = MissionState(target="challenge", goal="分析附件", authorized=True)
         previous = CategoryDecision(

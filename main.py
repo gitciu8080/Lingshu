@@ -2660,13 +2660,24 @@ async def run_mission(
             previous_agent = await attack.reset(name=replacement_name)
             if previous_agent is not None:
                 await close_attack_agent(previous_agent)
+            mission.title = build_mission_title(
+                current,
+                target_spec.kind,
+                mission.goal,
+                "\n".join(str(item.content) for item in mission.facts[-8:]),
+            )
             mission.record(
                 "system", "attack_agent_reconfigured_for_category",
                 previous=previous, current=current, agent=replacement_name,
                 reason=reason,
             )
+            mission.record(
+                "system", "session_title_category_reclassified",
+                previous=previous, current=current, title=mission.title,
+            )
             store.save(mission)
             if event_callback is not None:
+                event_callback("session_title", title=mission.title, agent="system")
                 event_callback(
                     "message",
                     agent="system",

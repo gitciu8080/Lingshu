@@ -390,10 +390,22 @@ def extract_recon_signals(recon_evidence: list[str]) -> list[ReconSignal]:
                 )
                 break
 
-    # HTTP 状态行和响应头属于协议级证据，比题面中的普通“web/http”关键词可靠。
+    # HTTP 状态行、响应头和结构化侦察结论中的“协议: HTTP”都属于协议级
+    # 证据，比题面中的普通“web/http”关键词可靠。报告通常会把 curl 原始
+    # 响应压缩成 Markdown 表格，不能只依赖 ``HTTP/1.1 200`` 这一种写法。
     http_match = re.search(r"\bHTTP/[12](?:\.\d)?\s+\d{3}\b", text, re.IGNORECASE)
-    if http_match or re.search(r"\b(?:server|content-type):\s*[^\r\n]+", text, re.IGNORECASE):
-        value = http_match.group(0) if http_match else "HTTP 响应头"
+    header_match = re.search(r"\b(?:server|content-type):\s*[^\r\n]+", text, re.IGNORECASE)
+    protocol_field_match = re.search(
+        r"(?:^|\n)[^\n]*(?:协议|protocol)[^\n]{0,100}\bhttps?\b",
+        text,
+        re.IGNORECASE,
+    )
+    if http_match or header_match or protocol_field_match:
+        value = (
+            http_match.group(0) if http_match else
+            "HTTP 响应头" if header_match else
+            "结构化侦察结论中的 HTTP 协议"
+        )
         add("web", f"Recon 工具输出确认 Web 协议响应：{value}", 8.0, 0.9)
 
     # 密码材料和抓包/内存格式补充信号；仅匹配明确格式名，不把泛化词当事实。
