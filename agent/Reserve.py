@@ -22,7 +22,14 @@ from agentscope.tool import ToolGroup
 from agent.Attack import _build_skill_list
 from Tools.IntelPwn import create_intelpwn_tool
 from Tools.ScopeRegistry import ScopeRegistry
-from Tools.tooling import AllowedFunctionTool, StrictJSONToolkit, create_scoped_shell_tool, run_interruptible_agent_reply
+from Tools.tooling import (
+    AgentMaxIterationsError,
+    AllowedFunctionTool,
+    StrictJSONToolkit,
+    create_scoped_shell_tool,
+    run_interruptible_agent_reply,
+    run_expert_reply_with_continuation,
+)
 from Tools.tool_catalog import append_capability_summary, create_tool_catalog_tools
 from Tools.Vision import create_vision_analysis_tool
 from agent.experts import REVERSE_EXPERT
@@ -196,13 +203,20 @@ async def create_reverse_agent(
         Args:
             service_info: Recon 得到的文件信息和初步结论。
         """
-        result = await run_interruptible_agent_reply(
-            analysis_agent,
-            UserMsg(name="Reserve", content=service_info),
-            prefix="[Analysis] ",
-            on_event=event_callback,
+        try:
+            text = await run_expert_reply_with_continuation(
+                analysis_agent,
+                UserMsg(name="Reserve", content=service_info),
+                prefix="[Analysis] ",
+                on_event=event_callback,
+                label="Analysis",
+            )
+        except AgentMaxIterationsError:
+            return "[Analysis] 超迭代，本轮无研判输出；请基于现有证据自行推进。"
+        return text or (
+            "[Analysis] 未返回文本结果（含补轮）。"
+            "可再次调用本工具重试；若再次为空请基于现有证据自行研判推进。"
         )
-        return result.get_text_content() or "[Analysis] 未返回文本结果"
 
     # 项目根仅用于读取 Skills 与 IDA 配置；所有 MCP/Shell 运行时文件都应
     # 写入本任务 WorkDir，绝不能写到 Lingshu 源码根目录。

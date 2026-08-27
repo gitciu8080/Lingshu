@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import ipaddress
 import itertools
@@ -10,7 +11,7 @@ import os
 import re
 import signal
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from pathlib import Path
@@ -419,6 +420,118 @@ async def run_interruptible_agent_reply(
             agent_tasks.discard(task)
 
 
+def _extract_last_substantive_assistant_text(agent: Any) -> str:
+    """从专家上下文回溯最后一条有实质内容的 assistant 消息文本。
+
+    部分模型在长 ReAct 循环尾部输出残缺回复（最终消息为空），但截断前的
+    报告残段通常仍在上下文里。getter 异常安全：残缺消息对象不允许拖垮恢复。
+    """
+    context = getattr(getattr(agent, "state", None), "context", None) or []
+    for msg in reversed(context):
+        if str(getattr(msg, "role", "")) != "assistant":
+            continue
+        getter = getattr(msg, "get_text_content", None)
+        if not callable(getter):
+            continue
+        try:
+            text = (getter() or "").strip()
+        except Exception:  # noqa: BLE001
+            continue
+        if text:
+            return text
+    return ""
+
+
+async def run_expert_reply_with_continuation(
+    agent: Agent,
+    inputs: Msg | list[Msg] | None = None,
+    prefix: str = "",
+    on_event: Callable[..., None] | None = None,
+    label: str = "",
+) -> str:
+    """带补轮续跑的专家回复：空回复/超迭代不直接失败，先给一轮新预算。
+
+    背景（c5ca9b2b 复盘）：Reserve 两次 max_iters 空手而归、一次空回复被
+    当作伪证据。每次 ``run_interruptible_agent_reply`` 都是一次独立 reply，
+    天然获得全新迭代预算——超迭代时补发一轮"立即输出结论"指令，专家通常
+    能基于已完成的分析产出报告。
+
+    行为：
+    - AgentMaxIterationsError：补一轮（禁止再调用工具，立即输出最终中文
+      报告）；再次超迭代才向上抛出，调用方现有 except 语义保持不变；
+    - 空文本：先从 ``agent.state.context`` 兜底提取截断前的报告残段；
+      取不到再补一轮；仍为空返回空串（调用方不得把占位串当证据入库）；
+    - CancelledError/其他异常直接透传，不吞 steering 与停止请求。
+    - 补轮上限各 1 次，防止循环烧预算。
+
+    Returns:
+        专家最终文本（已 strip）。上下文兜底提取的文本以固定说明开头标注来源。
+    """
+    name = label or getattr(agent, "name", "expert")
+
+    def _msg(text: str) -> Msg:
+        return Msg(name="system", role="user", content=[{"type": "text", "text": text}])
+
+    # ── 第一轮 ──
+    try:
+        result = await run_interruptible_agent_reply(agent, inputs, prefix, on_event)
+    except AgentMaxIterationsError as exc:
+        # 补轮：新 reply = 新迭代预算，专家只需收口输出报告
+        try:
+            result = await run_interruptible_agent_reply(
+                agent,
+                _msg(
+                    f"[系统] 你已达到最大推理迭代次数（{exc}）。禁止再调用任何工具，"
+                    "立即基于已完成的工具输出和分析，输出最终中文报告正文。"
+                ),
+                prefix,
+                on_event,
+            )
+        except AgentMaxIterationsError:
+            raise exc from None
+        except asyncio.CancelledError:
+            raise
+    text = ""
+    getter = getattr(result, "get_text_content", None)
+    if callable(getter):
+        try:
+            text = (getter() or "").strip()
+        except Exception:  # noqa: BLE001
+            text = ""
+    if text:
+        return text
+
+    # ── 空回复：上下文兜底 ──
+    recovered = _extract_last_substantive_assistant_text(agent)
+    if recovered:
+        return (
+            f"[系统提示] 以下内容由恢复机制从专家上下文提取（其最终消息为空或残缺），"
+            f"内容可能不完整，如与后续证据冲突以后续证据为准：\n\n{recovered}"
+        )
+
+    # ── 空回复且无法恢复：补轮 ──
+    try:
+        result = await run_interruptible_agent_reply(
+            agent,
+            _msg(
+                f"[系统] {name} 上一轮未返回任何文本内容。禁止再调用任何工具，"
+                "立即基于已完成的分析输出最终中文报告正文；没有结论也要说明"
+                "已验证的事实和未解决的问题。"
+            ),
+            prefix,
+            on_event,
+        )
+    except AgentMaxIterationsError:
+        return ""
+    getter = getattr(result, "get_text_content", None)
+    if callable(getter):
+        try:
+            text = (getter() or "").strip()
+        except Exception:  # noqa: BLE001
+            text = ""
+    return text
+
+
 async def stream_agent_reply(
     agent: Agent,
     inputs: Msg | list[Msg] | None = None,
@@ -704,6 +817,103 @@ def _command_invokes_network_tool(command: str) -> bool:
     return False
 
 
+# 域名形态 token（用于把命令里的主机名与授权目标做近似比对）。
+# 前向断言放行紧邻 / : 等符号，覆盖裸域名与 http(s)://host 两种写法；
+# 相似度闸门（cutoff）保证文件名等噪声不会被误报。
+_HOSTNAME_TOKEN_RE = re.compile(
+    r"(?<![\w.-])((?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,})(?![\w.-])"
+)
+
+# 同一范围拒绝原因连续出现达到该次数后，报错文本追加熔断级纠正提示
+_REJECTION_BREAKER_THRESHOLD = 3
+
+
+def _authorized_target_labels(target: str, registry: "ScopeRegistry | None") -> list[str]:
+    """汇总当前所有授权目标标识（去重、保序），供拒绝信息原文回显。"""
+    labels: list[str] = []
+    target_ip, target_id = _parse_target(target)
+    for candidate in (target, target_id):
+        if candidate and candidate not in labels:
+            labels.append(candidate)
+    if registry is not None:
+        snapshot = registry.snapshot()
+        for group in ("hostnames", "ips"):
+            for value in snapshot.get(group, []):
+                if value not in labels:
+                    labels.append(value)
+    return labels
+
+
+def _find_near_miss_host(
+    command: str,
+    authorized: Iterable[str],
+    cutoff: float = 0.8,
+) -> str:
+    """找出命令中与授权主机名高度相似、疑似拼写错误的域名。
+
+    仅在网络校验即将拒绝时调用；返回空串表示没有值得指出的近似项。
+    比对前把「host:port」形式的授权目标归一化为纯主机名，避免把
+    命令里正确书写的裸主机名误判为拼写错误。
+    """
+    auth_hosts: set[str] = set()
+    for item in authorized:
+        if not item or not any(ch.isalpha() for ch in item):
+            continue
+        auth_hosts.add(item.lower().partition(":")[0])
+    if not auth_hosts:
+        return ""
+    matches: set[str] = set()
+    for token in _HOSTNAME_TOKEN_RE.findall(command):
+        lowered = token.lower()
+        if lowered in auth_hosts:
+            continue
+        close = difflib.get_close_matches(lowered, sorted(auth_hosts), n=1, cutoff=cutoff)
+        if close and close[0] != lowered:
+            matches.add(token)
+    # 多个近似项时全部列出，让模型自行对应修正
+    return "、".join(sorted(matches))
+
+
+class ScopedRejectionBreaker:
+    """跟踪同一范围拒绝原因的连续出现次数，达到阈值后在错误文本追加升级提示。
+
+    每个工具闭包实例独立持有状态：一旦有命令成功执行即重置计数。
+    错误文本直接回传给发起调用的 LLM，因此升级提示就是纠错注入通道。
+    """
+
+    def __init__(self, threshold: int | None = None) -> None:
+        self._threshold = max(2, int(threshold or _REJECTION_BREAKER_THRESHOLD))
+        self._last_reason = ""
+        self._streak = 0
+
+    def record(self, reason: str) -> str:
+        if reason == self._last_reason:
+            self._streak += 1
+        else:
+            self._last_reason = reason
+            self._streak = 1
+        if self._streak < self._threshold:
+            return ""
+        if "授权目标" in reason:
+            advice = (
+                "请停止发送仅调整参数的命令变体："
+                "把上方拒绝信息中「」内的授权目标字符串原样复制进命令，"
+                "并逐字符核对主机名拼写是否与之一致。"
+            )
+        else:
+            advice = (
+                "请停止重复同类命令：完整阅读拒绝原因并调整方向"
+                "（如需触达范围外地址，先由 Orchestrator 调用 request_scope_expansion 审批）。"
+            )
+        return (
+            f"\n[范围护栏熔断] 同一拒绝原因已连续出现 {self._streak} 次。{advice}"
+        )
+
+    def reset(self) -> None:
+        self._last_reason = ""
+        self._streak = 0
+
+
 def _validate_scoped_command(
     command: str,
     target: str,
@@ -758,7 +968,19 @@ def _validate_scoped_command(
             return
         if registry is not None and registry.is_any_target_in_command(command):
             return
-        raise PermissionError("网络命令必须显式包含本次授权目标")
+        authorized = _authorized_target_labels(target, registry)
+        message = (
+            "网络命令必须显式包含本次授权目标。"
+            f"授权目标原文：「{'」或「'.join(authorized)}」。"
+            "请原样复制该字符串，不要凭记忆重写主机名。"
+        )
+        near_miss = _find_near_miss_host(command, authorized)
+        if near_miss:
+            message += (
+                f"检测到疑似拼写错误：「{near_miss}」（与授权目标高度相似），"
+                "请逐字符修正后重试。"
+            )
+        raise PermissionError(message)
 
 
 async def _run_scoped_command(
@@ -992,6 +1214,7 @@ def create_scoped_shell_tool(
     workdir = str(Path(cwd).resolve())
     artifacts_root = Path(artifact_root).resolve() if artifact_root is not None else None
     seq_counter = itertools.count(1)
+    breaker = ScopedRejectionBreaker()
 
 
     async def scoped_shell(command: str) -> str:
@@ -1000,17 +1223,23 @@ def create_scoped_shell_tool(
         Args:
             command: 要执行的 shell 命令；所有网络命令必须显式包含授权目标。
         """
-        return await _run_scoped_command(
-            command,
-            target=target,
-            workdir=workdir,
-            timeout=timeout,
-            registry=registry,
-            role=role,
-            artifacts_root=artifacts_root,
-            return_tail=return_tail,
-            seq=next(seq_counter),
-        )
+        try:
+            result = await _run_scoped_command(
+                command,
+                target=target,
+                workdir=workdir,
+                timeout=timeout,
+                registry=registry,
+                role=role,
+                artifacts_root=artifacts_root,
+                return_tail=return_tail,
+                seq=next(seq_counter),
+            )
+        except PermissionError as exc:
+            hint = breaker.record(str(exc))
+            raise PermissionError(f"{exc}{hint}") from None
+        breaker.reset()
+        return result
 
     return AllowedFunctionTool(
         scoped_shell,
@@ -1045,6 +1274,7 @@ def create_parallel_scoped_shell_tool(
     workdir = str(Path(cwd).resolve())
     artifacts_root = Path(artifact_root).resolve() if artifact_root is not None else None
     seq_counter = itertools.count(1)
+    breaker = ScopedRejectionBreaker()
 
     async def parallel_scoped_shell(commands: list[str], per_command_timeout: int = 0) -> str:
         """并行执行多条互不依赖的受范围约束的只读命令。
@@ -1063,7 +1293,11 @@ def create_parallel_scoped_shell_tool(
             )
         # 先全量校验：任一越界整体拒绝，确保不启动任何子进程
         for index, cmd in enumerate(commands):
-            _validate_scoped_command(cmd, target, registry)
+            try:
+                _validate_scoped_command(cmd, target, registry)
+            except PermissionError as exc:
+                hint = breaker.record(str(exc))
+                raise PermissionError(f"{exc}{hint}") from None
         # 单条超时不高于工具级超时，避免一条慢命令把整体拖到工具超时
         effective_timeout = per_command_timeout if per_command_timeout > 0 else timeout
         per_timeout = min(int(effective_timeout), int(timeout))
@@ -1087,17 +1321,24 @@ def create_parallel_scoped_shell_tool(
             return_exceptions=True,
         )
         blocks: list[str] = []
+        executed_any = False
         for index, (cmd, result) in enumerate(zip(commands, results)):
             if isinstance(result, Exception):
+                hint = ""
+                if isinstance(result, PermissionError):
+                    hint = breaker.record(str(result))
                 blocks.append(
                     f"\n<cmd-{index} command={cmd[:120]!r}>\n"
-                    f"<error>{type(result).__name__}: {result}</error>\n"
+                    f"<error>{type(result).__name__}: {result}{hint}</error>\n"
                     f"</cmd-{index}>"
                 )
             else:
+                executed_any = True
                 blocks.append(
                     f"\n<cmd-{index} command={cmd[:120]!r}>\n{result}\n</cmd-{index}>"
                 )
+        if executed_any:
+            breaker.reset()
         return "<parallel>" + "".join(blocks) + "\n</parallel>"
 
     return AllowedFunctionTool(

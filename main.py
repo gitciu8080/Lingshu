@@ -102,6 +102,7 @@ from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     reset_process_tracker,
     reset_tool_json_failure_handler,
     run_interruptible_agent_reply,
+    run_expert_reply_with_continuation,
     stream_agent_reply,
 )
 from Tools.fingerprint import (
@@ -2232,7 +2233,7 @@ async def run_mission(
                     # 范围被拒绝时不启动任何网络命令；复用降级分支生成可审计报告，
                     # 让 Brain/Orchestrator 进入安全收尾路径。
                     raise AgentMaxIterationsError("任务书网络范围审批未通过")
-                bootstrap_result = await run_interruptible_agent_reply(
+                bootstrap_report = await run_expert_reply_with_continuation(
                     recon,
                     UserMsg(
                         name="Orchestrator",
@@ -2244,10 +2245,8 @@ async def run_mission(
                     ),
                     prefix="[Recon] ",
                     on_event=event_callback,
-                )
-                bootstrap_report = (
-                    bootstrap_result.get_text_content() or "[Recon] 未返回文本结果"
-                )
+                    label="Recon",
+                ) or "[Recon] 未返回文本结果"
             except AgentMaxIterationsError as exc:
                 # 降级而非中止：首轮侦察超迭代只代表本轮未产出有效报告，
                 # 记录 information_gain="none" 后继续流程，信息缺口由
@@ -2720,6 +2719,12 @@ async def run_mission(
         # P5 熔断重试预算：Orchestrator 输出残缺 <tool_call>/空回答时重新注入
         malformed_retry_budget = 2
         stalled_nudge_budget = 2
+        # P0-B 升级阶梯第二级：nudge 耗尽后的终局续跑轮（固定 1 次）。
+        # 注入结构化任务状态摘要，给 Orchestrator 一轮全新迭代预算收口；
+        # 再不收敛则由循环外的 finalize_as_failed 确定性兜底。
+        final_continuation_budget = 1
+        # Orchestrator 自身超迭代同样先补一轮（输出决策/complete_mission）再兜底
+        max_iters_continuation_budget = 1
         while True:
             try:
                 final_result = await run_interruptible_agent_reply(
@@ -2803,24 +2808,84 @@ async def run_mission(
                         "禁止再次以纯文本结束回合。"
                     )
                     continue
+                # P0-B 第二级：nudge 预算耗尽但仍有可推进工作 → 终局续跑轮。
+                # 注入结构化状态摘要（未决计划项/最近尝试/失败路径），给一轮
+                # 全新迭代预算；这是停摆与强制收敛之间最后的软性挽救。
+                if (
+                    final_continuation_budget > 0
+                    and mission.phase not in {Phase.COMPLETED, Phase.FAILED}
+                    and (
+                        mission.exploitation_approved
+                        or any(
+                            item.get("status") in {"pending", "in_progress"}
+                            for item in mission.plan_items
+                        )
+                    )
+                ):
+                    final_continuation_budget -= 1
+                    unresolved = [
+                        f"{item.get('id')}({item.get('status')}): {str(item.get('content') or '')[:80]}"
+                        for item in mission.plan_items
+                        if item.get("status") in {"pending", "in_progress"}
+                    ]
+                    recent_attempts = [
+                        f"{a.id}/{a.action_type}={a.status}/gain={getattr(a, 'information_gain', '?')}"
+                        for a in mission.attempts[-3:]
+                    ]
+                    rejected = sum(
+                        1 for fp in mission.failed_paths
+                        if getattr(fp, "failure_type", "") == "method"
+                    )
+                    mission.record(
+                        "system",
+                        "orchestrator_final_continuation",
+                        unresolved_plan_items=[u.split(":", 1)[0] for u in unresolved],
+                    )
+                    store.save(mission)
+                    orch_content = (
+                        "[系统·终局续跑] 这是你最后一批推理轮次（nudge 预算已耗尽）。"
+                        "当前任务状态摘要：\n"
+                        f"- 阶段：{mission.phase.value}\n"
+                        f"- 未决计划项：{'；'.join(unresolved) or '无'}\n"
+                        f"- 最近尝试：{'；'.join(recent_attempts) or '无'}\n"
+                        f"- 已累计失败路径：{len(mission.failed_paths)} 条（方法性失败 {rejected} 条）\n"
+                        "基于以上状态立即行动，二选一，禁止纯文本结束：\n"
+                        "1) 调用 dispatch_recon / dispatch_attack / dispatch_reverse 推进"
+                        "最优先的未决计划项（禁止重复已失败路径）；\n"
+                        "2) 任务确实无法继续时调用 complete_mission 如实收尾。\n"
+                        "本轮之后若仍未到终态，系统将强制把任务收敛为失败。"
+                    )
+                    continue
                 break
             except AgentMaxIterationsError as exc:
-                # P1：Orchestrator 自身超迭代 → 确定性收敛 FAILED，避免静默失败
+                # P0-B 阶梯：Orchestrator 自身超迭代先补一轮全新迭代预算
+                # （只要求输出决策或收尾）；再超才确定性收敛 FAILED。
+                if (
+                    max_iters_continuation_budget > 0
+                    and mission.phase not in {Phase.COMPLETED, Phase.FAILED}
+                ):
+                    max_iters_continuation_budget -= 1
+                    mission.record(
+                        "system",
+                        "orchestrator_max_iters_continuation",
+                        error=str(exc),
+                    )
+                    store.save(mission)
+                    orch_content = (
+                        f"[系统] 你已达到最大推理迭代次数（{exc}），本轮补发最后一批"
+                        "推理轮次。禁止重复调用工具循环；立即基于已有证据二选一：\n"
+                        "1) 调用 complete_mission 如实收尾（成功/失败与总结）；\n"
+                        "2) 仅当存在明确的单一关键动作时调用一次 dispatch_*，"
+                        "随后必须调用 complete_mission。\n"
+                        "本轮之后若仍未到终态，系统将强制把任务收敛为失败。"
+                    )
+                    continue
                 mission.record("system", "orchestrator_max_iters_exceeded", error=str(exc))
                 if mission.phase not in {Phase.COMPLETED, Phase.FAILED}:
-                    mission.success = False
-                    mission.summary = (
+                    mission.finalize_as_failed(
                         f"Orchestrator 在 {mission.phase.value} 阶段达到最大迭代次数，"
                         f"未能完成任务。原因：{exc}"
                     )
-                    mission.transition(
-                        Phase.FAILED, "Orchestrator 达到最大迭代次数，任务未完成",
-                    )
-                    for item in mission.plan_items:
-                        if item.get("status") == "in_progress":
-                            item["status"] = "failed"
-                        elif item.get("status") == "pending":
-                            item["status"] = "skipped"
                     store.save(mission)
                     push_plan_update(mission, event_callback)
                 print(f"[系统] Orchestrator 超迭代，任务已收敛为失败：{exc}")
@@ -2857,12 +2922,37 @@ async def run_mission(
 
         # ── 10. 结果收尾 ──
         # 检查任务是否到达终态（COMPLETED / FAILED）：
-        # 若 Orchestrator 中途停止（超时/异常/未调用 complete_mission），
-        # 记录事件以便审计，并提示人工介入。
+        # 升级阶梯（nudge ×2 → 终局续跑 ×1）全部耗尽后仍未收敛时，
+        # 确定性兜底收敛为 FAILED——未竟计划项置终态、生成最终标题，
+        # 杜绝 c5ca9b2b 式的"悬空 analysis 阶段 + success=None"无声搁浅。
         if mission.phase not in {Phase.COMPLETED, Phase.FAILED}:
-            mission.record("system", "orchestrator_stopped_without_terminal_state")
+            pending_items = [
+                item.get("id")
+                for item in mission.plan_items
+                if item.get("status") in {"in_progress", "pending"}
+            ]
+            mission.record(
+                "system",
+                "orchestrator_stopped_without_terminal_state",
+                unresolved_plan_items=pending_items,
+            )
             store.save(mission)
-            print(f"[系统] 本轮在 {mission.phase.value} 阶段停止，任务尚未被标记完成。")
+            mission.finalize_as_failed(
+                f"Orchestrator 在 {mission.phase.value} 阶段停止且未调用 "
+                "complete_mission（含终局续跑轮），系统已强制收敛为失败；"
+                "可结合审计链与工具产物恢复现场。"
+            )
+            store.save(mission)
+            push_plan_update(mission, event_callback)
+            mission.title = build_final_mission_title(mission)
+            mission.record("system", "session_title_finalized", title=mission.title)
+            store.save(mission)
+            if event_callback is not None:
+                event_callback("session_title", title=mission.title, agent="system")
+            print(
+                f"[系统] 本轮在 {mission.phase.value} 阶段停止且无显式收尾，"
+                "任务已强制收敛为失败（审计事件 mission_force_failed）。"
+            )
         else:
             mission.title = build_final_mission_title(mission)
             mission.record("system", "session_title_finalized", title=mission.title)

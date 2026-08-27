@@ -27,11 +27,13 @@ from Tools.TonyDec import create_tonydec_tool
 from Tools.Vision import create_vision_analysis_tool
 from Tools.Volatility import create_volatility_tools
 from Tools.tooling import (
+    AgentMaxIterationsError,
     AllowedFunctionTool,
     StrictJSONToolkit,
     create_parallel_scoped_shell_tool,
     create_scoped_shell_tool,
     run_interruptible_agent_reply,
+    run_expert_reply_with_continuation,
 )
 from Tools.tool_catalog import append_capability_summary, create_tool_catalog_tools
 from agent.experts import attack_expert_name
@@ -301,13 +303,20 @@ async def create_attack_agent(
         Args:
             service_info: Recon 得到的服务、版本和响应证据。
         """
-        result = await run_interruptible_agent_reply(
-            analysis_agent,
-            UserMsg(name="Attack", content=service_info),
-            prefix="[Analysis] ",
-            on_event=event_callback,
+        try:
+            text = await run_expert_reply_with_continuation(
+                analysis_agent,
+                UserMsg(name="Attack", content=service_info),
+                prefix="[Analysis] ",
+                on_event=event_callback,
+                label="Analysis",
+            )
+        except AgentMaxIterationsError:
+            return "[Analysis] 超迭代，本轮无研判输出；请基于现有证据自行推进。"
+        return text or (
+            "[Analysis] 未返回文本结果（含补轮）。"
+            "可再次调用本工具重试；若再次为空请基于现有证据自行研判推进。"
         )
-        return result.get_text_content() or "[Analysis] 未返回文本结果"
 
 
 

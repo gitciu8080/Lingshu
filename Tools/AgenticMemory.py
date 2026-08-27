@@ -250,7 +250,15 @@ def query_experience(service=None, limit=5):
     data = _load()
 
     if service:
-        techniques = data["techniques"].get(service, [])
+        # 大小写不敏感的包含匹配：查询词与 techniques 键任一方包含另一方即命中。
+        # 精确匹配是包含匹配的特例，原有行为不变；新增能力是让
+        # QueryMemory("UPX") 命中键 "UPX 加壳/脱壳" 这类带修饰词的经验条目。
+        lowered = service.lower()
+        techniques = []
+        for key, entries in data["techniques"].items():
+            key_l = str(key).lower()
+            if key_l == lowered or lowered in key_l or key_l in lowered:
+                techniques.extend(entries)
         related_missions = []
         for m in data["missions"]:
             plan_str = str(m.get("plan", ""))

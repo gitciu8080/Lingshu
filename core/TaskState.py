@@ -393,6 +393,37 @@ class MissionState:
         """Bind a runtime-only callback invoked after every legal transition."""
         self._phase_callback = callback
 
+    def finalize_as_failed(self, reason: str) -> None:
+        """确定性失败收敛：未竟计划项置终态、任务标记失败并迁移到 FAILED。
+
+        供 Orchestrator 超迭代与"无终态停摆"两条路径共用的最终兜底，保证
+        任何异常退出都会留下可审计的确定终态，而不是悬空的 analysis/recon
+        阶段（c5ca9b2b 复盘）。假设记录保持原状（其状态语义属于专家判断），
+        未决数量写入审计事件。
+        """
+        for item in self.plan_items:
+            status = item.get("status")
+            if status == "in_progress":
+                item["status"] = "failed"
+            elif status == "pending":
+                item["status"] = "skipped"
+        self.success = False
+        if not self.summary:
+            self.summary = reason
+        unresolved_hypotheses = sum(
+            1
+            for h in self.hypotheses
+            if getattr(h, "status", "") not in {"rejected", "confirmed"}
+        )
+        self.record(
+            "system",
+            "mission_force_failed",
+            reason=reason,
+            unresolved_hypotheses=unresolved_hypotheses,
+        )
+        if self.phase not in {Phase.FAILED, Phase.COMPLETED}:
+            self.transition(Phase.FAILED, reason)
+
     def add_finding(self, source: str, report: str) -> None:
         self.findings.append({"timestamp": _now(), "source": source, "report": report})
         self.record("Orchestrator", "finding_added", source=source)

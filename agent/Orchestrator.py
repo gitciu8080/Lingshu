@@ -34,6 +34,7 @@ from Tools.tooling import (
     StrictJSONToolkit,
     AllowedFunctionTool,
     run_interruptible_agent_reply,
+    run_expert_reply_with_continuation,
 )
 from agent.experts import ORCHESTRATOR_EXPERT
 from agent.categorize import extract_recon_signals
@@ -143,7 +144,7 @@ def create_orchestrator_agent(
         mission.record("Orchestrator", "dispatch_recon", focus=focus, route=route, selected_agent=selected_recon.name)
         store.checkpoint(mission, "recon_dispatch_before")
         try:
-            result = await run_interruptible_agent_reply(
+            report = await run_expert_reply_with_continuation(
                 selected_recon,
                 UserMsg(
                     name="Orchestrator",
@@ -154,8 +155,8 @@ def create_orchestrator_agent(
                 ),
                 prefix="[Recon] ",
                 on_event=event_callback,
+                label="Recon",
             )
-            report = result.get_text_content() or "[Recon] 未返回文本结果"
         except AgentMaxIterationsError as exc:
             mission.finish_attempt(attempt, "failure", str(exc), information_gain="none")
             mission.record("Orchestrator", "recon_max_iters_exceeded", error=str(exc))
@@ -172,6 +173,22 @@ def create_orchestrator_agent(
             )
             store.checkpoint(mission, "recon_interrupted")
             raise
+        if not report:
+            # 补轮与上下文恢复仍为空：不登记伪证据、不推进阶段，
+            # 收敛本轮 attempt 并把重试决策交还主循环。
+            mission.finish_attempt(
+                attempt,
+                "failure",
+                "Recon 未返回文本结果（补轮与恢复机制均无可用输出）",
+                information_gain="none",
+            )
+            mission.record("Orchestrator", "recon_no_text_result")
+            store.save(mission)
+            return (
+                "[Recon 空结果] 专家本轮未返回任何文本（含补轮）。"
+                "本轮未登记证据，已完成的工具产物全部保留；"
+                "请直接重新调度一次并收窄 focus，或改用其他路径推进。"
+            )
         before_evidence = len(mission.evidence_records)
         evidence = mission.add_evidence(
             selected_recon.name,
@@ -347,7 +364,7 @@ def create_orchestrator_agent(
             if attack_knowledge else ""
         )
         try:
-            result = await run_interruptible_agent_reply(
+            report = await run_expert_reply_with_continuation(
                 attack_agent,
                 UserMsg(
                     name="Orchestrator",
@@ -360,8 +377,8 @@ def create_orchestrator_agent(
                 ),
                 prefix="[Attack] ",
                 on_event=event_callback,
+                label="Attack",
             )
-            report = result.get_text_content() or "[Attack] 未返回文本结果"
             if report.strip().strip("\"'") == "task_overview":
                 mission.finish_attempt(attempt, "failure", "Attack 响应缺少结构化 task_overview")
                 mission.record("Orchestrator", "attack_protocol_error", missing_field="task_overview")
@@ -388,6 +405,21 @@ def create_orchestrator_agent(
             )
             store.checkpoint(mission, "attack_interrupted")
             raise
+        if not report:
+            # 补轮与上下文恢复仍为空：不登记伪证据、不产生攻击步骤。
+            mission.finish_attempt(
+                attempt,
+                "failure",
+                "Attack 未返回文本结果（补轮与恢复机制均无可用输出）",
+                information_gain="none",
+            )
+            mission.record("Orchestrator", "attack_no_text_result")
+            store.save(mission)
+            return (
+                "[Attack 空结果] 专家本轮未返回任何文本（含补轮）。"
+                "本轮未登记证据；请直接重新调度一次并强调最终消息必须输出"
+                "完整中文报告，或基于已有证据改用其他路径。"
+            )
         before_evidence = len(mission.evidence_records)
         evidence = mission.add_evidence(
             attack_agent.name,
@@ -463,7 +495,7 @@ def create_orchestrator_agent(
         mission.record("Orchestrator", "dispatch_reverse", binary_path=binary_path, objective=objective)
         store.save(mission)
         try:
-            result = await run_interruptible_agent_reply(
+            report = await run_expert_reply_with_continuation(
                 reserve_agent,
                 UserMsg(
                     name="Orchestrator",
@@ -479,8 +511,8 @@ def create_orchestrator_agent(
                 ),
                 prefix="[Reserve] ",
                 on_event=event_callback,
+                label="Reserve",
             )
-            report = result.get_text_content() or "[Reserve] 未返回文本结果"
         except AgentMaxIterationsError as exc:
             mission.finish_attempt(attempt, "failure", str(exc), information_gain="none")
             mission.record("Orchestrator", "reverse_max_iters_exceeded", error=str(exc))
@@ -495,6 +527,23 @@ def create_orchestrator_agent(
             )
             store.checkpoint(mission, "reverse_interrupted")
             raise
+        if not report:
+            # c5ca9b2b 复盘："[Reserve] 未返回文本结果" 曾作为伪证据入库并
+            # 消耗一轮 attempt；现在转为失败收敛 + 明确续推指引。
+            mission.finish_attempt(
+                attempt,
+                "failure",
+                "Reserve 未返回文本结果（补轮与恢复机制均无可用输出）",
+                information_gain="none",
+            )
+            mission.record("Orchestrator", "reverse_no_text_result")
+            store.save(mission)
+            return (
+                "[Reserve 空结果] 专家本轮未返回任何文本（含补轮）。"
+                "本轮未登记证据，已打开的 IDA/GDB 会话与工具产物全部保留；"
+                "请直接重新调度一次并收窄 objective（可提示专家从既有会话继续），"
+                "若连续两轮均为空结果，视为该能力暂时不可用，改用其他路径推进。"
+            )
         before_evidence = len(mission.evidence_records)
         evidence = mission.add_evidence(
             reserve_agent.name,
