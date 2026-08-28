@@ -2896,3 +2896,4 @@ async def react_spa(frontend_path: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("api:app", host="0.0.0.0", port=8080, reload=False, log_level="info")
+    print('[INFO] 灵枢·利刃 已启动')
