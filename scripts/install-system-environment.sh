@@ -97,11 +97,17 @@ package_state() {
 printf '灵枢系统环境：用户=%s，Conda=%s，环境=%s（Python %s）\n' \
   "$INSTALL_USER" "$CONDA_PREFIX" "$ENV_NAME" "$PYTHON_VERSION"
 for package in "${SYSTEM_PACKAGES[@]}"; do package_state "$package"; done
-for command in node npm uv uvx pdftoppm; do
-  if command -v "$command" >/dev/null 2>&1; then
-    printf '  [可用]   %s (%s)\n' "$command" "$(command -v "$command")"
+for tool_name in node npm uv uvx pdftoppm; do
+  tool_path="$(command -v "$tool_name" 2>/dev/null || true)"
+  # uv/uvx 默认安装在服务用户的 ~/.local/bin；sudo 启动安装器时该目录
+  # 通常不在 root 的 PATH 中，不能据此误报工具缺失。
+  if [ -z "$tool_path" ] && [ -x "$UV_BIN_DIR/$tool_name" ]; then
+    tool_path="$UV_BIN_DIR/$tool_name"
+  fi
+  if [ -n "$tool_path" ]; then
+    printf '  [可用]   %s (%s)\n' "$tool_name" "$tool_path"
   else
-    printf '  [缺失]   %s\n' "$command"
+    printf '  [缺失]   %s\n' "$tool_name"
   fi
 done
 if [ -x "$CONDA_PREFIX/bin/conda" ]; then

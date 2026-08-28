@@ -121,14 +121,24 @@ else
 fi
 
 # AntSword 使用随项目交付的已编译 Loader，不在部署时安装或更新其 Node
-# 依赖，避免改写客户已验证的运行环境。归档传输可能丢失可执行位，部署时
-# 统一恢复 Loader 的执行权限。PDF Mermaid 渲染器仍需安装其自身的 Node
-# 依赖，且不属于 React 前端，因此即使 --skip-webui 也必须处理。
+# 依赖，避免改写客户已验证的运行环境。归档传输可能丢失可执行位；同时
+# Loader 首次启动会从 resources/.antSword.json 读取 AntSword 工作目录，
+# 因此部署时统一恢复权限并写入当前项目的绝对路径。
 ANTSWORD_EXECUTABLE="$ROOT/Tools/AntSword-Loader-v4.0.3-linux-x64/AntSword"
-if [ -f "$ANTSWORD_EXECUTABLE" ]; then
-  chmod +x "$ANTSWORD_EXECUTABLE"
-else
+ANTSWORD_WORKDIR="$ROOT/Tools/antSword-2.1.16"
+ANTSWORD_LOADER_CONFIG="$ROOT/Tools/AntSword-Loader-v4.0.3-linux-x64/resources/.antSword.json"
+if [ ! -f "$ANTSWORD_EXECUTABLE" ]; then
   warn "未找到 AntSword Loader：$ANTSWORD_EXECUTABLE"
+elif [ ! -d "$ANTSWORD_WORKDIR" ]; then
+  warn "未找到 AntSword 工作目录：$ANTSWORD_WORKDIR"
+elif [ "$DRY_RUN" -eq 1 ]; then
+  log "[dry-run] chmod +x $ANTSWORD_EXECUTABLE"
+  log "[dry-run] 写入 AntSword Loader 工作目录：$ANTSWORD_WORKDIR"
+else
+  chmod +x "$ANTSWORD_EXECUTABLE"
+  # Linux 路径不含反斜杠；ROOT 为部署脚本解析出的绝对路径，写入 Loader
+  # 的 JSON 配置后，首次交互启动也能直接加载项目内的 AntSword 2.1.16。
+  printf '{"workdir":"%s"}\n' "$ANTSWORD_WORKDIR" > "$ANTSWORD_LOADER_CONFIG"
 fi
 
 MERMAID_DIR="$ROOT/Skills/beautiful-mermaid"
