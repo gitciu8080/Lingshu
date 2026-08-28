@@ -176,6 +176,24 @@ if [ ! -x "$CONDA_PREFIX/bin/conda" ]; then
 fi
 
 CONDA_BIN="$CONDA_PREFIX/bin/conda"
+
+# Anaconda 新版渠道在首次使用前要求每个实际运行用户确认 ToS。部署脚本
+# 后续通过 as_install_user 创建环境，因此也必须以同一用户写入确认状态；
+# 否则会在 `conda create` 阶段以 CondaToSNonInteractiveError 中断。旧版
+# Conda 未提供 `tos` 子命令时保持兼容并跳过。
+accept_conda_tos() {
+  if ! as_install_user "$CONDA_BIN" tos --help >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '接受 Anaconda 默认渠道 ToS（用户=%s）\n' "$INSTALL_USER"
+  as_install_user "$CONDA_BIN" tos accept --override-channels \
+    --channel https://repo.anaconda.com/pkgs/main
+  as_install_user "$CONDA_BIN" tos accept --override-channels \
+    --channel https://repo.anaconda.com/pkgs/r
+}
+
+accept_conda_tos
+
 if [ ! -x "$CONDA_PREFIX/envs/$ENV_NAME/bin/python" ]; then
   as_install_user "$CONDA_BIN" create --yes --name "$ENV_NAME" "python=$PYTHON_VERSION"
 fi
