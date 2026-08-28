@@ -11,7 +11,7 @@ CONDA_PREFIX="${LINGSHU_CONDA_PREFIX:-$INSTALL_HOME/miniconda3}"
 ENV_NAME="${LINGSHU_CONDA_ENV:-agentscope}"
 PYTHON_VERSION="${LINGSHU_CONDA_PYTHON_VERSION:-3.14}"
 UV_BIN_DIR="${LINGSHU_UV_BIN_DIR:-$INSTALL_HOME/.local/bin}"
-GDB_MCP_SOURCE="git+https://github.com/Mistyovo/gdb-multi-mcp@6e8048b8e933bbbae79b6da16fe69249f56fe30d"
+GDB_MCP_SOURCE="git+https://gh-proxy.org/https://github.com/Mistyovo/gdb-multi-mcp@6e8048b8e933bbbae79b6da16fe69249f56fe30d"
 SECURITY_PROFILE="core"
 SKIP_WEBUI=0
 SKIP_SYSTEM_ENVIRONMENT=0
@@ -99,8 +99,8 @@ elif [ ! -x "$PYTHON_BIN" ]; then
   fail "未找到 AgentScope Python：$PYTHON_BIN；请勿在系统 Python 或其他 Conda 环境安装依赖"
 else
   log '== 3/7 安装 AgentScope Python 依赖 =='
-  as_install_user "$PYTHON_BIN" -m pip install --upgrade pip
-  as_install_user "$PYTHON_BIN" -m pip install -r "$ROOT/requirements.txt"
+  as_install_user "$PYTHON_BIN" -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+  as_install_user "$PYTHON_BIN" -m pip install -r "$ROOT/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
   as_install_user "$PYTHON_BIN" -m pip check
 fi
 
