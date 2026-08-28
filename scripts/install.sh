@@ -12,11 +12,14 @@ ENV_NAME="${LINGSHU_CONDA_ENV:-agentscope}"
 PYTHON_VERSION="${LINGSHU_CONDA_PYTHON_VERSION:-3.14}"
 UV_BIN_DIR="${LINGSHU_UV_BIN_DIR:-$INSTALL_HOME/.local/bin}"
 GDB_MCP_SOURCE="git+https://gh-proxy.org/https://github.com/Mistyovo/gdb-multi-mcp@6e8048b8e933bbbae79b6da16fe69249f56fe30d"
+SAGE_ENV_NAME="sage"
+SAGE_PYTHON_VERSION="3.11.15"
 SECURITY_PROFILE="core"
 SKIP_WEBUI=0
 SKIP_SYSTEM_ENVIRONMENT=0
 SKIP_SECURITY_TOOLS=0
 WITH_SYSTEMD=0
+INSTALL_SAGE=0
 DRY_RUN=0
 
 log() { printf '\033[1;36m[灵枢部署]\033[0m %s\n' "$*"; }
@@ -31,6 +34,7 @@ usage() {
     '  --skip-system-environment  跳过基础系统/Miniconda/Conda 环境安装' \
     '  --skip-security-tools      跳过安全工具、OCR 语言包和 JDK 安装' \
     '  --security-profile core|extended  安全工具配置（默认 core）' \
+    '  --install-sage          创建 SageMath Conda 环境（sage，Python 3.11.15）' \
     '  --skip-webui               跳过 React 前端构建' \
     '  --with-systemd             安装并启动 lingshu-agent.service' \
     '  --conda-prefix PATH        Miniconda 根目录（默认当前部署用户的 ~/miniconda3）' \
@@ -45,6 +49,7 @@ while [ $# -gt 0 ]; do
     --skip-system-environment) SKIP_SYSTEM_ENVIRONMENT=1 ;;
     --skip-security-tools) SKIP_SECURITY_TOOLS=1 ;;
     --security-profile) SECURITY_PROFILE="${2:?--security-profile 需要 core 或 extended}"; shift ;;
+    --install-sage) INSTALL_SAGE=1 ;;
     --skip-webui) SKIP_WEBUI=1 ;;
     --with-systemd) WITH_SYSTEMD=1 ;;
     --conda-prefix) CONDA_PREFIX="${2:?--conda-prefix 需要路径}"; shift ;;
@@ -80,6 +85,28 @@ if [ "$SKIP_SYSTEM_ENVIRONMENT" -eq 0 ]; then
   "${SCRIPT_DIR}/install-system-environment.sh" "${child_args[@]}"
 else
   log '== 1/7 已跳过基础系统、Conda 与 uv/uvx =='
+fi
+
+# SageMath 是面向密码学/数论任务的重型可选环境。开发机使用的创建规格为
+# `conda create -n sage python=3.11 sage -y`；这里固定到实际解析出的
+# Python 3.11.15，并显式使用 conda-forge，避免依赖客户机的 channel 配置。
+if [ "$INSTALL_SAGE" -eq 1 ]; then
+  CONDA_BIN="$CONDA_PREFIX/bin/conda"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "== 可选 SageMath [dry-run] 创建环境 ${SAGE_ENV_NAME}（Python ${SAGE_PYTHON_VERSION}）=="
+    log "$CONDA_BIN create --yes --name $SAGE_ENV_NAME --override-channels -c conda-forge python=$SAGE_PYTHON_VERSION sage"
+  elif [ ! -x "$CONDA_BIN" ]; then
+    fail "未找到 Conda：$CONDA_BIN；请先完成基础系统环境安装"
+  elif [ ! -x "$CONDA_PREFIX/envs/$SAGE_ENV_NAME/bin/sage" ]; then
+    log "== 可选 SageMath 创建环境 ${SAGE_ENV_NAME}（Python ${SAGE_PYTHON_VERSION}）=="
+    as_install_user "$CONDA_BIN" create --yes --name "$SAGE_ENV_NAME" \
+      --override-channels -c conda-forge "python=$SAGE_PYTHON_VERSION" sage
+  else
+    log "== 可选 SageMath 复用已有环境 ${SAGE_ENV_NAME} =="
+  fi
+  if [ "$DRY_RUN" -eq 0 ]; then
+    as_install_user "$CONDA_BIN" run --no-capture-output -n "$SAGE_ENV_NAME" sage --version
+  fi
 fi
 
 if [ "$SKIP_SECURITY_TOOLS" -eq 0 ]; then
