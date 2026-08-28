@@ -28,6 +28,7 @@ TargetKind = Literal["network", "archive", "single_file", "directory"]
 # ---------------------------------------------------------------------------
 
 _ARCHIVE_SUFFIXES = (
+    ".7z",
     ".zip",
     ".tar.gz",
     ".tgz",
@@ -41,6 +42,11 @@ _ARCHIVE_SUFFIXES = (
 
 def _is_archive(path: Path) -> bool:
     """判断 path 是否为支持的归档文件，不依赖 Path.suffix。"""
+    try:
+        if path.read_bytes()[:6] == b"7z\xbc\xaf'\x1c":
+            return True
+    except OSError:
+        return False
     name = path.name.lower()
     if any(name.endswith(s) for s in _ARCHIVE_SUFFIXES):
         return True

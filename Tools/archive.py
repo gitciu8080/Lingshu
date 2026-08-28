@@ -6,8 +6,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import stat
 import struct
+import subprocess
 import tarfile
+import tempfile
+import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +61,10 @@ class UnsupportedMemberError(SafeExtractError):
     """不支持的归档成员（符号链接/设备文件等）。"""
 
 
+class EncryptedArchiveError(SafeExtractError):
+    """归档需要密码；调用方可保留原文件继续做口令分析。"""
+
+
 # ---------------------------------------------------------------------------
 # 解压清单
 # ---------------------------------------------------------------------------
@@ -68,6 +77,8 @@ class ExtractionManifest:
     file_count: int
     total_bytes: int
     files: list[dict] = field(default_factory=list)
+    encrypted: bool = False
+    warning: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -81,11 +92,18 @@ def _safe_path(workdir: Path, member_name: str) -> Path:
     Raises:
         PathTraversalError: 路径穿越或绝对路径。
     """
-    # 拒绝绝对路径和 null 字节
-    if os.path.isabs(member_name) or "\x00" in member_name:
+    portable_name = member_name.replace("\\", "/")
+    if not portable_name or portable_name == ".":
+        raise PathTraversalError(f"危险路径: {member_name!r}")
+    # 按跨平台语义拒绝绝对路径、盘符、控制字符和 null 字节。
+    if (
+        portable_name.startswith(("/", "//"))
+        or (len(portable_name) >= 2 and portable_name[1] == ":")
+        or any(ord(char) < 32 for char in portable_name)
+    ):
         raise PathTraversalError(f"危险路径: {member_name!r}")
     # 规范化并检查深度
-    parts = Path(member_name).parts
+    parts = tuple(part for part in portable_name.split("/") if part not in ("", "."))
     if len(parts) > MAX_PATH_DEPTH:
         raise PathTraversalError(f"路径层级过深: {len(parts)} > {MAX_PATH_DEPTH}")
     if len(member_name) > MAX_NAME_LEN:
@@ -94,12 +112,27 @@ def _safe_path(workdir: Path, member_name: str) -> Path:
     if ".." in parts:
         raise PathTraversalError(f"包含路径穿越组件: {member_name!r}")
     # 解析后必须位于 workdir 下
-    destination = (workdir / member_name).resolve()
+    destination = workdir.joinpath(*parts).resolve()
     if not str(destination).startswith(str(workdir.resolve()) + os.sep) and destination != workdir.resolve():
         raise PathTraversalError(
             f"路径逃逸: {member_name!r} → {destination}（不在 {workdir} 内）"
         )
     return destination
+
+
+def _validate_destination(names: list[str], workdir: Path) -> None:
+    """预检重复路径及文件/目录前缀冲突，避免覆盖和顺序依赖。"""
+    seen: set[str] = set()
+    for name in names:
+        relative = _safe_path(workdir, name).relative_to(workdir.resolve()).as_posix()
+        folded = relative.casefold()
+        if folded in seen:
+            raise UnsupportedMemberError(f"归档包含重复路径: {name}")
+        parts = relative.split("/")
+        for index in range(1, len(parts)):
+            if "/".join(parts[:index]).casefold() in seen:
+                raise UnsupportedMemberError(f"归档包含文件/目录路径冲突: {name}")
+        seen.add(folded)
 
 
 # ---------------------------------------------------------------------------
@@ -128,10 +161,16 @@ def _extract_zip(archive_path: Path, workdir: Path) -> ExtractionManifest:
                 f"文件数过多: {len(infolist)} > {MAX_FILE_COUNT}"
             )
 
-        for info in infolist:
+        file_infos = [info for info in infolist if not info.is_dir()]
+        _validate_destination([info.filename for info in file_infos], workdir)
+        for info in file_infos:
             # 跳过目录标记
-            if info.is_dir():
-                continue
+            mode = info.external_attr >> 16
+            file_type = stat.S_IFMT(mode)
+            if info.create_system == 3 and file_type and file_type != stat.S_IFREG:
+                raise UnsupportedMemberError(f"不支持的 ZIP 成员类型: {info.filename}")
+            if info.flag_bits & 0x1:
+                raise EncryptedArchiveError("ZIP 归档需要密码")
 
             # 检查单个文件压缩比
             if info.compress_size > 0 and info.file_size > 0:
@@ -158,6 +197,10 @@ def _extract_zip(archive_path: Path, workdir: Path) -> ExtractionManifest:
                         if not chunk:
                             break
                         copied += len(chunk)
+                        if copied > MAX_SINGLE_FILE:
+                            raise CompressionBombError(
+                                f"单文件实际大小超限: {info.filename} ({copied} > {MAX_SINGLE_FILE})"
+                            )
                         manifest.total_bytes += len(chunk)
                         if manifest.total_bytes > MAX_TOTAL_EXTRACTED:
                             raise CompressionBombError(
@@ -171,7 +214,7 @@ def _extract_zip(archive_path: Path, workdir: Path) -> ExtractionManifest:
             manifest.file_count += 1
             manifest.files.append({
                 "name": info.filename,
-                "size": info.file_size,
+                "size": copied,
                 "compressed_size": info.compress_size,
                 "path": str(dest),
             })
@@ -206,9 +249,10 @@ def _extract_tar(archive_path: Path, workdir: Path) -> ExtractionManifest:
                 f"文件数过多: {len(members)} > {MAX_FILE_COUNT}"
             )
 
+        _validate_destination([member.name for member in members if member.isfile()], workdir)
         for member in members:
-            # 拒绝危险类型
-            if member.type in _DENIED_TAR_TYPES:
+            # 对不可信归档采用类型白名单。
+            if not (member.isfile() or member.isdir()):
                 raise UnsupportedMemberError(
                     f"不支持的成员类型: {member.name} (type={member.type!r})"
                 )
@@ -235,6 +279,10 @@ def _extract_tar(archive_path: Path, workdir: Path) -> ExtractionManifest:
                         if not chunk:
                             break
                         copied += len(chunk)
+                        if copied > MAX_SINGLE_FILE:
+                            raise CompressionBombError(
+                                f"单文件实际大小超限: {member.name} ({copied} > {MAX_SINGLE_FILE})"
+                            )
                         manifest.total_bytes += len(chunk)
                         if manifest.total_bytes > MAX_TOTAL_EXTRACTED:
                             raise CompressionBombError(
@@ -248,9 +296,131 @@ def _extract_tar(archive_path: Path, workdir: Path) -> ExtractionManifest:
             manifest.file_count += 1
             manifest.files.append({
                 "name": member.name,
-                "size": member.size,
+                "size": copied,
                 "path": str(dest),
             })
+
+    return manifest
+
+
+def _extract_7z(archive_path: Path, workdir: Path) -> ExtractionManifest:
+    """用 7z CLI 安全解压 7z，提取前后均校验成员与容量限制。"""
+    executable = shutil.which("7z")
+    if executable is None:
+        raise SafeExtractError("缺少 7z 命令，无法解压 .7z 归档")
+
+    try:
+        listing = subprocess.run(
+            [executable, "l", "-slt", "--", str(archive_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SafeExtractError(f"7z 归档列表读取失败: {exc}") from exc
+
+    entries: list[tuple[str, int]] = []
+    encrypted = False
+    record: dict[str, str] = {}
+    for line in listing.stdout.splitlines() + [""]:
+        if not line.strip():
+            name = record.get("Path")
+            if name and "Size" in record and record.get("Folder") != "+":
+                try:
+                    size = int(record["Size"])
+                except ValueError as exc:
+                    raise SafeExtractError(f"7z 成员大小无效: {name}") from exc
+                _safe_path(workdir, name)
+                entries.append((name, size))
+                encrypted = encrypted or record.get("Encrypted") == "+"
+            record = {}
+            continue
+        key, separator, value = line.partition(" = ")
+        if separator:
+            record[key] = value
+
+    if len(entries) > MAX_FILE_COUNT:
+        raise CompressionBombError(f"文件数过多: {len(entries)} > {MAX_FILE_COUNT}")
+    total_declared = 0
+    for name, size in entries:
+        if size > MAX_SINGLE_FILE:
+            raise CompressionBombError(f"单文件过大: {name} ({size} > {MAX_SINGLE_FILE})")
+        total_declared += size
+        if total_declared > MAX_TOTAL_EXTRACTED:
+            raise CompressionBombError(
+                f"解压总量超限: {total_declared} > {MAX_TOTAL_EXTRACTED}"
+            )
+    _validate_destination([name for name, _ in entries], workdir)
+    if encrypted:
+        raise EncryptedArchiveError("7z 归档需要密码")
+
+    manifest = ExtractionManifest(str(archive_path), "", 0, 0)
+    with tempfile.TemporaryDirectory(prefix=".lingshu-7z-", dir=workdir.parent) as temp_dir:
+        temp_path = Path(temp_dir)
+        try:
+            process = subprocess.Popen(
+                [executable, "x", "-y", f"-o{temp_path}", "--", str(archive_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + 300
+            while process.poll() is None:
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    process.communicate()
+                    raise SafeExtractError("7z 解压超时")
+                count = 0
+                actual_total = 0
+                for candidate in temp_path.rglob("*"):
+                    if candidate.is_symlink():
+                        process.kill()
+                        process.communicate()
+                        raise UnsupportedMemberError(
+                            f"不支持的 7z 符号链接: {candidate.relative_to(temp_path)}"
+                        )
+                    if candidate.is_file():
+                        count += 1
+                        actual_total += candidate.stat().st_size
+                if count > MAX_FILE_COUNT or actual_total > MAX_TOTAL_EXTRACTED:
+                    process.kill()
+                    process.communicate()
+                    raise CompressionBombError("7z 解压过程超过文件数或总大小限制")
+                time.sleep(0.05)
+            stdout, stderr = process.communicate()
+            if process.returncode:
+                raise subprocess.CalledProcessError(
+                    process.returncode, process.args, output=stdout, stderr=stderr,
+                )
+        except subprocess.CalledProcessError as exc:
+            output = f"{exc.stdout or ''}\n{exc.stderr or ''}".lower()
+            if "wrong password" in output or "encrypted" in output or "password" in output:
+                raise EncryptedArchiveError("7z 归档需要密码") from exc
+            raise SafeExtractError(f"7z 解压失败: {exc.stderr or exc}") from exc
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise SafeExtractError(f"7z 解压失败: {exc}") from exc
+
+        for source in temp_path.rglob("*"):
+            if source.is_symlink() or not (source.is_file() or source.is_dir()):
+                raise UnsupportedMemberError(f"不支持的 7z 成员类型: {source.relative_to(temp_path)}")
+            if not source.is_file():
+                continue
+            name = source.relative_to(temp_path).as_posix()
+            size = source.stat().st_size
+            if size > MAX_SINGLE_FILE:
+                raise CompressionBombError(f"单文件过大: {name} ({size} > {MAX_SINGLE_FILE})")
+            manifest.total_bytes += size
+            if manifest.total_bytes > MAX_TOTAL_EXTRACTED:
+                raise CompressionBombError(
+                    f"解压总量超限: {manifest.total_bytes} > {MAX_TOTAL_EXTRACTED}"
+                )
+            destination = _safe_path(workdir, name)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            os.chmod(destination, 0o644)
+            manifest.file_count += 1
+            manifest.files.append({"name": name, "size": size, "path": str(destination)})
 
     return manifest
 
@@ -288,8 +458,6 @@ def safe_extract(
     if not archive_path.is_file():
         raise FileNotFoundError(f"归档文件不存在: {archive_path}")
 
-    workdir.mkdir(parents=True, exist_ok=True)
-
     # 检查归档文件大小
     archive_size = archive_path.stat().st_size
     if archive_size > MAX_ARCHIVE_SIZE:
@@ -297,14 +465,40 @@ def safe_extract(
             f"归档文件过大: {archive_size} > {MAX_ARCHIVE_SIZE}"
         )
 
-    # 分发到对应解压函数
-    name = archive_path.name.lower()
-    if name.endswith(".zip") or zipfile.is_zipfile(archive_path):
-        manifest = _extract_zip(archive_path, workdir)
-    elif any(name.endswith(s) for s in (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")) or tarfile.is_tarfile(archive_path):
-        manifest = _extract_tar(archive_path, workdir)
+    header = archive_path.read_bytes()[:8]
+    if header.startswith(b"7z\xbc\xaf'\x1c"):
+        extractor = _extract_7z
+    elif zipfile.is_zipfile(archive_path):
+        extractor = _extract_zip
+    elif tarfile.is_tarfile(archive_path):
+        extractor = _extract_tar
     else:
-        raise SafeExtractError(f"不支持的归档格式: {archive_path.name}")
+        raise SafeExtractError(f"归档损坏或格式不受支持: {archive_path.name}")
+
+    workdir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{workdir.name}-", dir=workdir.parent))
+    try:
+        manifest = extractor(archive_path, staging)
+        if workdir.exists():
+            shutil.rmtree(workdir)
+        os.replace(staging, workdir)
+        for item in manifest.files:
+            item["path"] = str(workdir / item["name"])
+    except EncryptedArchiveError as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        return ExtractionManifest(
+            archive_path=str(archive_path),
+            archive_sha256=archive_sha256,
+            file_count=0,
+            total_bytes=0,
+            encrypted=True,
+            warning=str(exc),
+        )
+    except (SafeExtractError, OSError, zipfile.BadZipFile, tarfile.TarError) as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        if isinstance(exc, SafeExtractError):
+            raise
+        raise SafeExtractError(f"归档解压失败: {exc}") from exc
 
     manifest.archive_sha256 = archive_sha256
     return manifest

@@ -1099,7 +1099,12 @@ def _prepare_workspace(target_spec: TargetSpec) -> tuple[str, Path, dict | None]
                 "file_count": manifest.file_count,
                 "total_bytes": manifest.total_bytes,
                 "files": manifest.files,
+                "encrypted": manifest.encrypted,
+                "warning": manifest.warning,
             }
+            if manifest.encrypted:
+                print(f"[系统] 加密归档未自动解压: {manifest.warning}；保留原文件继续分析口令")
+                return str(target_spec.original_path), target_spec.original_path.parent, manifest_dict
             print(
                 f"[系统] 解压完成: {manifest.file_count} 个文件, "
                 f"{manifest.total_bytes:,} 字节"

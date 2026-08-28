@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import shutil
 import sys
 import subprocess
 import time
@@ -721,8 +722,8 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                            qwen_tool_call_mode: str | None = None,
                            authorized_target: str | None = None):
     """运行任务并处理清理逻辑。"""
-    status_val = "completed"
-    phase = "completed"
+    status_val = "failed"
+    phase = "initializing"
     summary = ""
     flag = None
     success = None
@@ -1145,7 +1146,6 @@ _AUTH_SKIP_PATHS = (
     "/assets",
     "/logo2.png",
     "/logored.png",
-    "/uploads",
     "/docs",
     "/openapi.json",
     "/redoc",
@@ -1210,8 +1210,36 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class UploadBodyLimitMiddleware(BaseHTTPMiddleware):
+    """在 multipart 解析前按 Content-Length 拒绝明显超限的上传。"""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path.rstrip("/") == "/api/mission/upload":
+            max_total = max(
+                1,
+                int(os.getenv("LINGSHU_UPLOAD_MAX_BATCH_BYTES", str(300 * 1024 * 1024))),
+            )
+            content_length = request.headers.get("content-length")
+            if content_length:
+                try:
+                    too_large = int(content_length) > max_total + 2 * 1024 * 1024
+                except ValueError:
+                    return Response(
+                        status_code=400,
+                        content=json.dumps({"detail": "Content-Length 无效"}),
+                        media_type="application/json",
+                    )
+                if too_large:
+                    return Response(
+                        status_code=413,
+                        content=json.dumps({"detail": "上传请求体超过配置上限"}),
+                        media_type="application/json",
+                    )
+        return await call_next(request)
+
+
 app.add_middleware(JWTAuthMiddleware)
-app.mount("/uploads", StaticFiles(directory=str(_upload_dir)), name="uploads")
+app.add_middleware(UploadBodyLimitMiddleware)
 app.include_router(agentscope_control_router)
 app.mount("/agentscope", agentscope_app)
 
@@ -2740,11 +2768,11 @@ async def mission_history(limit: int = 20, current_user: dict = Depends(get_curr
 
 @app.post("/api/mission/upload")
 async def upload_target(
+    request: Request,
     files: list[UploadFile] = File(...),
     current_user: dict = Depends(get_current_user),
 ):
     """批量上传目标文件；多文件返回独立批次目录作为任务目标。"""
-    del current_user
     max_file_size = max(
         1, int(os.getenv("LINGSHU_UPLOAD_MAX_FILE_BYTES", str(100 * 1024 * 1024))),
     )
@@ -2752,6 +2780,15 @@ async def upload_target(
         max_file_size,
         int(os.getenv("LINGSHU_UPLOAD_MAX_BATCH_BYTES", str(300 * 1024 * 1024))),
     )
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            # 允许有界 multipart 元数据开销，但在表单解析前由中间件/代理
+            # 配置同一上限可获得完整的早期拒绝能力。
+            if int(content_length) > max_total_size + 2 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="上传请求体超过配置上限")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Content-Length 无效") from exc
     if not files:
         raise HTTPException(status_code=400, detail="至少选择一个文件")
     if len(files) > 20:
@@ -2762,21 +2799,32 @@ async def upload_target(
         await asyncio.to_thread(workspace.ensure_capacity)
     except WorkspaceCapacityError as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
-    batch_dir = _upload_dir / uuid.uuid4().hex[:16]
-    batch_dir.mkdir(parents=True, exist_ok=False)
+    user_dir = _upload_dir / str(current_user["id"])
+    user_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    batch_id = uuid.uuid4().hex
+    staging_dir = user_dir / f".{batch_id}.uploading"
+    batch_dir = user_dir / batch_id
+    staging_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
     uploaded: list[dict[str, Any]] = []
     total_size = 0
     try:
         for index, upload in enumerate(files, 1):
-            safe_name = Path(upload.filename or f"upload-{index}").name
+            raw_name = (upload.filename or f"upload-{index}").replace("\\", "/")
+            safe_name = Path(raw_name).name.strip()
+            safe_name = "".join(
+                char for char in safe_name
+                if ord(char) >= 32 and char not in {'\u202a', '\u202b', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069'}
+            )
+            encoded = safe_name.encode("utf-8")[:180]
+            safe_name = encoded.decode("utf-8", errors="ignore").rstrip(" .")
             if safe_name in {"", ".", ".."}:
                 safe_name = f"upload-{index}"
-            destination = batch_dir / safe_name
-            if destination.exists():
-                destination = batch_dir / f"{index}_{safe_name}"
+            stored_name = f"{index:02d}-{uuid.uuid4().hex[:8]}-{safe_name}"
+            destination = staging_dir / stored_name
+            part_path = staging_dir / f".{stored_name}.part"
             file_size = 0
             reserved_bytes = 0
-            with destination.open("xb") as handle:
+            with part_path.open("xb") as handle:
                 while chunk := await upload.read(1024 * 1024):
                     file_size += len(chunk)
                     total_size += len(chunk)
@@ -2798,12 +2846,16 @@ async def upload_target(
                         reserved_bytes += reserve
                     await asyncio.to_thread(handle.write, chunk)
                     reserved_bytes -= len(chunk)
-            uploaded.append({"filename": safe_name, "path": str(destination), "size": file_size})
-    except Exception:
-        for child in batch_dir.iterdir():
-            if child.is_file():
-                child.unlink()
-        batch_dir.rmdir()
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(part_path, destination)
+            uploaded.append({"filename": safe_name, "stored_name": stored_name, "size": file_size})
+        os.replace(staging_dir, batch_dir)
+        for item in uploaded:
+            item["path"] = str(batch_dir / item["stored_name"])
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        shutil.rmtree(batch_dir, ignore_errors=True)
         raise
     finally:
         for upload in files:
