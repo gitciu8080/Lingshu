@@ -100,7 +100,7 @@ elif [ ! -x "$PYTHON_BIN" ]; then
 else
   log '== 3/7 安装 AgentScope Python 依赖 =='
   as_install_user "$PYTHON_BIN" -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
-  as_install_user "$PYTHON_BIN" -m pip install -r "$ROOT/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
+  as_install_user "$PYTHON_BIN" -m pip install -r "$ROOT/requirements.txt" -i https://pypi.tuna.tsinghua.edu.cn/simple
   as_install_user "$PYTHON_BIN" -m pip check
 fi
 
