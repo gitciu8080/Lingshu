@@ -12,7 +12,10 @@ FastAPI + SSE）创建会话并消费事件流，从而在前端控制台实时�
   4. 订阅 /api/session/{id}/stream 的 SSE，实时打印阶段/Agent/工具事件；
      收到 approval_required 时自动向 /api/session/{id}/message 发送"批准"
   5. 等 mission_end 后从会话详情取 flag，严格校验格式后提交到 NSSCTF；
-     按 --retries 配置完成分析并复核平台状态后，才允许放弃
+     会话超时/断流未到终态时立即 cancel 后台会话（防止越时后 Orchestrator
+     迟到自动提交错误候选、以及遗留僵尸会话）；只有任务终态确认过的
+     flag 才由工作台提交；按 --retries 配置完成分析并复核平台状态后，
+     才允许放弃
 
 依赖 Web 后端已启动：
     python api.py          # 默认 0.0.0.0:8080
@@ -21,9 +24,8 @@ FastAPI + SSE）创建会话并消费事件流，从而在前端控制台实时�
     python workbench_nss.py
     python workbench_nss.py --rounds 3
     python workbench_nss.py --loop --api-url http://localhost:8080
-    # 默认使用 Web 管理中启用的 zhipu / GLM，推理强度 Max
-    python workbench_nss.py --provider zhipu
-    # 仍可显式覆盖 Provider 和推理强度
+    # 默认使用 DeepSeek（推理强度 Min），可显式覆盖
+    python workbench_nss.py --provider zhipu   # 切换 zhipu/GLM（默认 Max）
     python workbench_nss.py --provider deepseek --model Min
 """
 from __future__ import annotations
@@ -43,9 +45,9 @@ import httpx
 NSS_API_BASE = "https://www.nssctf.cn/api"
 
 # 默认 Agent Token：优先读环境变量 NSSCTF_AGENT_TOKEN，否则使用此默认值
-# DEFAULT_TOKEN = "nss_agent_tGo34OLhnTcIkScqkF7-JimArC0nhqjGe1Ql1Zd3hYQ"
-
-DEFAULT_TOKEN = "nss_agent_3n-RbnCNc8r8JgFONn4-1OcCntgoDHXoiV1syInHRR4"
+#DEFAULT_TOKEN = "nss_agent_tGo34OLhnTcIkScqkF7-JimArC0nhqjGe1Ql1Zd3hYQ"
+DEFAULT_TOKEN = "nss_agent_DDgiJq810KDAhFx_TanoQcpZH_M9lqHThk_9OHiqsUg"
+#DEFAULT_TOKEN = "nss_agent_3n-RbnCNc8r8JgFONn4-1OcCntgoDHXoiV1syInHRR4"
 
 
 # ── 灵枢 Web 后端 ──
@@ -53,10 +55,10 @@ DEFAULT_API_URL = os.environ.get("LINGSHU_API_URL", "http://localhost:8080")
 # 默认 Web 登录账号（auth.py 中创建的用户）
 DEFAULT_USERNAME = os.environ.get("LINGSHU_USER", "admin")
 DEFAULT_PASSWORD = os.environ.get("LINGSHU_PASS", "gdcp@2026")
-# NSS Workbench 默认使用 GLM。可由 CLI 或环境变量覆盖；未显式指定
-# --model 时，zhipu 使用 Max，其它 Provider 使用 Min。
+# NSS Workbench 默认使用 DeepSeek。可由 CLI 或环境变量覆盖；未显式指定
+# --model 时，zhipu 使用 Max，其它 Provider（含 deepseek）使用 Min。
 DEFAULT_PROVIDER = (
-    os.environ.get("NSS_LLM_PROVIDER", "zhipu").strip().lower() or "zhipu"
+    os.environ.get("NSS_LLM_PROVIDER", "deepseek").strip().lower() or "deepseek"
 )
 DEFAULT_MODEL = os.environ.get("NSS_MODEL_LEVEL", "").strip()
 
@@ -308,6 +310,23 @@ async def _send_message(api_url: str, token: str, session_id: str, content: str)
         return resp.json()
 
 
+async def _cancel_session(api_url: str, token: str, session_id: str) -> dict:
+    """取消仍在后台运行的 Web 会话并等待清理完成。
+
+    会话已达终态时接口幂等返回原状态（status=completed/failed/...）；
+    404 表示会话不存在或已彻底结束。两者都不视为错误。
+    """
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        resp = await client.post(
+            f"{api_url}/api/session/{session_id}/cancel", headers=headers,
+        )
+    if resp.status_code == 404:
+        return {"status": "gone", "message": "会话不存在或已结束"}
+    resp.raise_for_status()
+    return resp.json()
+
+
 async def _get_session_detail(api_url: str, token: str, session_id: str) -> dict:
     """获取会话详情（含 flag / phase / target_info）。"""
     headers = {"Authorization": f"Bearer {token}"}
@@ -413,9 +432,14 @@ async def _solve_attempt(
     completed_sessions = 0
     rejected_flags: set[str] = set()
     transient_failures = 0
+    # 上一轮是否因观察超时而终止（题目 TTL 基本耗尽，重跑无意义）
+    observation_timed_out = False
     print(f"[workbench] 本题按配置最多分析 {max_attempts} 轮")
 
     for run_idx in range(max_attempts):
+        if observation_timed_out:
+            print("[workbench] 上一轮观察已超时（题目剩余时间基本耗尽），不再重跑")
+            break
         print(f"\n[workbench] 解题第 {run_idx + 1} 轮...")
         # 创建 Web 会话（携带 nss_context，使 Orchestrator 可在线提交 Flag）
         try:
@@ -441,6 +465,10 @@ async def _solve_attempt(
         mission_phase = "unknown"
         ended = False
         approved = False
+        # flag 是否经任务终态确认（flag_found 事件 / 在线提交）；
+        # target_info 中途出现的候选不算，超时场景不得据此自动提交
+        flag_confirmed = False
+        stream_started = asyncio.get_event_loop().time()
         try:
             async for etype, event in _stream_events(api_url, web_token, session_id, timeout):
                 agent = event.get("agent", "")
@@ -491,6 +519,7 @@ async def _solve_attempt(
                           f"flag={event.get('flag') or '未发现'}")
                 elif etype == "flag_found":
                     mission_flag = event.get("flag") or event.get("content")
+                    flag_confirmed = True
                     print(f"[Web:{session_id}] 🏁 发现 Flag: {mission_flag}")
                 elif etype == "nss_submit":
                     sub_ok = event.get("correct")
@@ -499,6 +528,7 @@ async def _solve_attempt(
                           f"剩余错误次数={event.get('remaining_wrong_attempts')}")
                     if sub_ok:
                         mission_flag = event.get("flag") or mission_flag
+                        flag_confirmed = True
                 elif etype == "message":
                     if event.get("content"):
                         print(f"[{agent}] {event['content']}")
@@ -535,10 +565,39 @@ async def _solve_attempt(
             mission_phase = detail.get("phase") or "unknown"
 
         terminal_phases = {"COMPLETED", "FAILED", "CANCELLED", "completed", "failed", "cancelled"}
-        # SSE 偶尔会在 mission_end 前断开，但 nss_submit/flag_found 已足以证明
-        # 本轮确实完成了解题与候选产出，不能因此把题目永久保留为 active。
-        has_analysis_evidence = bool(nss_submit) or bool(mission_flag)
-        if ended or mission_phase in terminal_phases or has_analysis_evidence:
+        reached_terminal = ended or mission_phase in terminal_phases
+        # 观察窗口是否耗尽（区别于 SSE 提前断流：断流后会话仍在正常推进）
+        observation_timed_out = (
+            asyncio.get_event_loop().time() - stream_started >= timeout - 5
+        )
+
+        # 会话未到终态（观察超时/断流）→ 立即取消后台会话：
+        # 1) 仍在运行的 Orchestrator 可能越时后迟到调用 submit_nss_flag，
+        #    自动提交未验证候选消耗错误次数；
+        # 2) 不取消会遗留僵尸会话——工作台拿了新题后旧会话仍在消耗资源。
+        if not reached_terminal:
+            print(f"[workbench] 会话未到终态（{'观察超时' if observation_timed_out else 'SSE 断流'}），取消后台会话...")
+            try:
+                cancel_result = await _cancel_session(api_url, web_token, session_id)
+                status = cancel_result.get("status", "?")
+                print(f"[Web:{session_id}] ⛔ 会话取消结果: {status}")
+                if status == "cancelled":
+                    mission_phase = "cancelled"
+            except Exception as exc:
+                print(f"[workbench] 取消会话失败（可能刚好自行结束）: {exc}")
+
+        # 提交门槛：flag 必须经任务终态确认（completed 阶段 / flag_found /
+        # Orchestrator 在线提交），否则只当中途候选，绝不自动提交。
+        flag_confirmed = (
+            flag_confirmed
+            or mission_phase in {"COMPLETED", "completed"}
+            or bool(nss_submit)
+        )
+
+        # 有效分析判定：真实终态、全程观察到超时（TTL 耗尽）、或有在线提交/
+        # 已确认 flag 证据（SSE 断流但任务实际完成）。被我们主动取消且
+        # 未超时的会话不算——题目还有时间，应重试而非放弃。
+        if reached_terminal or observation_timed_out or nss_submit or (flag_confirmed and mission_flag):
             completed_sessions += 1
         else:
             transient_failures += 1
@@ -560,6 +619,21 @@ async def _solve_attempt(
                 f"{base_goal}\n\n"
                 f"【第 {run_idx + 1} 轮反馈】上轮候选『{preview}』不符合平台格式，未提交。"
                 "必须继续求解，并且最终只给出严格的 NSSCTF{...}。"
+            )
+            continue
+
+        if flag and not flag_confirmed:
+            # 超时/取消场景下的中途候选：未经验证，不自动提交。
+            # 把候选喂回下一轮，让专家优先验证它而不是从头再来。
+            print(
+                f"[workbench] ⏸ 候选『{flag}』未经任务终态确认"
+                f"（{'观察超时' if observation_timed_out else '会话被取消/断流'}），不自动提交"
+            )
+            goal = (
+                f"{base_goal}\n\n"
+                f"【第 {run_idx + 1} 轮反馈】上轮会话未到终态即被取消，"
+                f"存在未验证候选『{flag}』。请优先快速验证该候选：验证通过立即提交，"
+                "不通过则换思路重新分析，禁止直接原样提交未验证候选。"
             )
             continue
 
@@ -737,7 +811,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider", "-p", default=DEFAULT_PROVIDER,
         help=(
-            "模型提供商（默认 zhipu；支持 deepseek、qwen 及 Web 管理中"
+            "模型提供商（默认 deepseek；支持 zhipu、qwen 及 Web 管理中"
             "启用的自定义 Provider，也可用 NSS_LLM_PROVIDER 设置）"
         ),
     )
