@@ -66,7 +66,7 @@ CUPS_RUNTIME_PACKAGE="$(pick_apt_package libcups2t64 libcups2)"
 SYSTEM_PACKAGES=(
   ca-certificates curl git build-essential
   python3 python3-venv python3-pip
-  nodejs xvfb gdb poppler-utils
+  nodejs npm xvfb gdb poppler-utils
   # WeasyPrint 的 Pango/Cairo 后端、字体发现与中文通用后备字体。
   # 项目内置微软雅黑字体仍是报告默认字体；Noto CJK 用于客户机替换字体时兜底。
   fontconfig fonts-noto-cjk

@@ -149,7 +149,9 @@ elif ! command -v node >/dev/null 2>&1; then
 else
   log '== 6/7 构建 React 前端 =='
   if command -v corepack >/dev/null 2>&1; then
-    as_install_user corepack enable
+    # Debian/Kali 的 corepack enable 会尝试向 /usr/bin 写 pnpm/yarn
+    # 软链接；以服务用户运行必然 EACCES。直接经 corepack 执行固定
+    # pnpm 版本即可，无需修改系统目录。
     as_install_user bash -lc "cd '$ROOT/webui' && corepack pnpm@10.14.0 install && corepack pnpm@10.14.0 build"
   elif command -v pnpm >/dev/null 2>&1; then
     as_install_user bash -lc "cd '$ROOT/webui' && pnpm install && pnpm build"
