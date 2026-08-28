@@ -120,23 +120,19 @@ else
   as_install_user "$UV_BIN" tool install --reinstall --from "$GDB_MCP_SOURCE" gdb-multi-mcp
 fi
 
-# AntSword 与 Summary 的 PDF Mermaid 图都依赖项目内 Node 包；它们均不属于
-# React 前端，因此即使 --skip-webui 也必须安装。两个目录均以 lockfile 为准。
-ANTSWORD_DIR="$ROOT/Tools/antSword-2.1.16"
+# AntSword 使用随项目交付的已编译 Loader，不在部署时安装或更新其 Node
+# 依赖，避免改写客户已验证的运行环境。PDF Mermaid 渲染器仍需安装其自身的
+# Node 依赖，且不属于 React 前端，因此即使 --skip-webui 也必须处理。
 MERMAID_DIR="$ROOT/Skills/beautiful-mermaid"
-if [ ! -f "$ANTSWORD_DIR/package-lock.json" ]; then
-  warn "未找到 AntSword lockfile，AntSword MCP 依赖无法自动安装。"
-elif [ ! -f "$MERMAID_DIR/package-lock.json" ]; then
+if [ ! -f "$MERMAID_DIR/package-lock.json" ]; then
   warn "未找到 Mermaid 渲染器 lockfile，报告中的流程图将自动降级为源码块。"
 elif [ "$DRY_RUN" -eq 1 ]; then
-  log '== 5/7 [dry-run] 安装 AntSword MCP 与 PDF Mermaid Node 依赖 =='
-  log "cd $ANTSWORD_DIR && npm ci --omit=dev"
+  log '== 5/7 [dry-run] 安装 PDF Mermaid Node 依赖（跳过 AntSword npm）=='
   log "cd $MERMAID_DIR && npm ci --omit=dev"
 elif ! command -v npm >/dev/null 2>&1; then
-  warn '未找到 npm，AntSword MCP 与报告中的流程图无法完成 Node 依赖安装。'
+  warn '未找到 npm，跳过 PDF Mermaid 渲染器 Node 依赖；报告中的流程图将降级为源码块。'
 else
-  log '== 5/7 安装 AntSword MCP 与 PDF Mermaid Node 依赖 =='
-  as_install_user bash -lc "cd '$ANTSWORD_DIR' && npm ci --omit=dev"
+  log '== 5/7 安装 PDF Mermaid Node 依赖（跳过 AntSword npm）=='
   as_install_user bash -lc "cd '$MERMAID_DIR' && npm ci --omit=dev"
 fi
 
