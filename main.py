@@ -1281,6 +1281,31 @@ def _mission_mode(target_spec: TargetSpec, goal: str, taskbook_text: str = "") -
     return "ctf" if target_spec.kind != "network" else "authorized_pentest"
 
 
+def _split_authorization_sources(
+    declared_network_targets: list[str],
+    authorized_target: str | None,
+) -> tuple[str, list[str]]:
+    """按授权来源分级声明目标（5e19dc2a 复盘）。
+
+    用户在界面"网络授权目标"输入框显式填写的地址 = 直接授权输入，
+    与纯网络任务的 target_spec.host 同级信任：启动即注册进 ScopeRegistry，
+    不弹范围审批。只有任务书/描述文本里提取到、且用户没有亲手填过的
+    目标才需要独立审批。
+
+    Returns:
+        (user_authorized_host, taskbook_pending_targets)：
+        前者为用户输入目标的主机部分（无输入为空串）；后者为仍需审批的目标。
+    """
+    user_authorized_host = ""
+    if authorized_target:
+        user_authorized_host = normalize_target(authorized_target).host or ""
+    pending = [
+        item for item in declared_network_targets
+        if normalize_target(item).host != user_authorized_host
+    ]
+    return user_authorized_host, pending
+
+
 async def run_mission(
     target: str,
     goal: str,
@@ -1362,6 +1387,13 @@ async def run_mission(
         taskbook_text = _read_taskbook_text(target_spec.original_path)
         declared_authorization_text += "\n" + taskbook_text
     declared_network_targets = _extract_declared_network_targets(declared_authorization_text)
+    # ── 授权来源分级（5e19dc2a 复盘）──
+    # 用户在界面"网络授权目标"显式输入的地址 = 直接授权输入，与纯网络任务的
+    # target_spec.host 同级信任：启动即注册进 ScopeRegistry，不弹范围审批。
+    # 只有任务书/描述文本里提取到、且用户没有亲手填过的目标才需要独立审批。
+    user_authorized_host, taskbook_pending_targets = _split_authorization_sources(
+        declared_network_targets, authorized_target,
+    )
     mission_mode = _mission_mode(target_spec, goal_text, taskbook_text)
     execution_target = (
         declared_network_targets[0]
@@ -1477,7 +1509,13 @@ async def run_mission(
                 "declared_targets_auto_trusted": mission_mode == "ctf",
             },
             declared_scope={"targets": declared_network_targets, "source": "taskbook"},
-            scope_approval_status=("not_required" if mission_mode in {"ctf", "incident_response"} else "pending" if declared_network_targets else "not_required"),
+            # 仅"任务书文本声明且用户未显式输入"的目标才需要独立范围审批；
+            # 用户亲手填写的授权目标视为直接授权输入，不弹审批（5e19dc2a 复盘）。
+            scope_approval_status=(
+                "not_required"
+                if mission_mode in {"ctf", "incident_response"}
+                else "pending" if taskbook_pending_targets else "not_required"
+            ),
         )
         # 记录任务创建事件并立即持久化（防止后续异常丢失状态）
         mission.record(
@@ -1529,6 +1567,11 @@ async def run_mission(
     # 原始 target_spec.host 是本次任务的既有授权输入，不属于范围扩展。
     if target_spec.host:
         scope_registry.add_base_target(target_spec.host)
+    # 用户在界面"网络授权目标"显式输入的地址 = 直接授权输入（与
+    # target_spec.host 同级信任）：无论新建还是恢复都直接注册，不属于
+    # 范围审批对象（5e19dc2a 复盘）。
+    if user_authorized_host:
+        scope_registry.add_base_target(user_authorized_host)
     # CTF 的题目固定目标始终属于初始范围；授权渗透/混合任务书目标
     # 只有 scope_approval_status=approved 时才可注册。
     effective_mode = mission.mission_mode or mission_mode
@@ -1561,17 +1604,64 @@ async def run_mission(
     # ── 人工审批协调器（首次进入攻击阶段前的人工闸门） ──
     approval_broker = _ApprovalBroker(event_callback, input_queue)
 
-    # 任务书声明的网络目标必须在首轮网络 Recon 前经过独立范围审批。
-    # CTF/应急响应模式不进入此分支。
+    # 任务书声明的网络目标采用惰性范围审批（5e19dc2a 复盘）：启动不再阻塞
+    # 等待人工决议，本地附件分析/Brain 规划先行；首次需要网络侦察/攻击时由
+    # Orchestrator 经 ensure_scope_approved 发起审批。用户显式输入的目标已
+    # 预授权，不进入审批。pending 随任务持久化，恢复后同样生效。
     scope_denied = False
     if (
         not resume
         and mission_mode in {"authorized_pentest", "hybrid_taskbook"}
-        and declared_network_targets
+        and taskbook_pending_targets
     ):
-        mission.scope_approval_status = "pending"
-        mission.scope_approval_requested_at = datetime.now().astimezone().isoformat()
+        mission.record(
+            "system",
+            "scope_approval_deferred",
+            targets=list(taskbook_pending_targets),
+            note="启动不阻塞；首次网络动作前经 ensure_scope_approved 惰性审批",
+        )
         store.save(mission)
+
+    async def ensure_scope_approved() -> bool:
+        """惰性范围审批：首次真正需要访问未预授权的声明目标时才请求人工审批。
+
+        幂等语义（可被 dispatch_recon / dispatch_attack 反复调用）：
+        - 所有声明目标均已进入授权范围（用户显式输入 / CTF 固定目标 /
+          此前已批准 / 动态扩容）→ 直接放行，并把残留的 pending 收敛为
+          approved 落库（兼容修复 5e19dc2a 等存量悬空会话）；
+        - 存在未授权声明目标且状态 pending → 弹出审批（API 走 SSE、CLI 走
+          终端），按人工决议登记范围并持久化；
+        - denied → 拒绝。
+        """
+        targets = sorted({
+            *(str(item) for item in (mission.declared_scope or {}).get("targets") or []),
+            *declared_network_targets,
+        })
+        unauthorized = [
+            item for item in targets
+            if not scope_registry.is_target_allowed(item)
+        ]
+        if not unauthorized:
+            if mission.scope_approval_status == "pending":
+                mission.scope_approval_status = "approved"
+                if not mission.scope_approval_decision:
+                    mission.scope_approval_decision = "声明目标均已预授权"
+                mission.scope_approval_resolved_at = datetime.now().astimezone().isoformat()
+                store.save(mission)
+                if event_callback is not None:
+                    event_callback(
+                        "approval_resolved",
+                        approved=True,
+                        decision=mission.scope_approval_decision,
+                        approval_type="scope",
+                        agent="system",
+                    )
+            return mission.scope_approval_status != "denied"
+        if mission.scope_approval_status == "denied":
+            return False
+        if not mission.scope_approval_requested_at:
+            mission.scope_approval_requested_at = datetime.now().astimezone().isoformat()
+            store.save(mission)
         scope_result = await approval_broker.request(
             "任务书声明了网络执行目标，需要确认本轮允许访问的范围。",
             {
@@ -1579,28 +1669,28 @@ async def run_mission(
                 "target": mission.target,
                 "goal": mission.goal,
                 "scope_request": {
-                    "targets": declared_network_targets,
+                    "targets": unauthorized,
                     "source": "taskbook",
                     "actions": ["recon", "service_enum"],
                 },
             },
         )
-        if bool(scope_result.get("approved")):
-            for declared_target in declared_network_targets:
+        approved = bool(scope_result.get("approved"))
+        mission.scope_approval_status = "approved" if approved else "denied"
+        mission.scope_approval_decision = str(
+            scope_result.get("decision") or ("批准" if approved else "拒绝")
+        )
+        mission.scope_approval_resolved_at = datetime.now().astimezone().isoformat()
+        if approved:
+            for declared_target in unauthorized:
                 declared_spec = normalize_target(declared_target)
                 if declared_spec.host:
                     scope_registry.add_base_target(declared_spec.host)
             mission.authorized_scope = scope_registry.snapshot()
-            mission.scope_approval_status = "approved"
-            mission.scope_approval_decision = str(scope_result.get("decision") or "批准")
-            mission.scope_approval_resolved_at = datetime.now().astimezone().isoformat()
             store.checkpoint(mission, "scope_approval_approved")
         else:
-            scope_denied = True
-            mission.scope_approval_status = "denied"
-            mission.scope_approval_decision = str(scope_result.get("decision") or "拒绝")
-            mission.scope_approval_resolved_at = datetime.now().astimezone().isoformat()
             store.save(mission)
+        return approved
 
     # ── P0：Brain 前能力预检 ──
     capability_preflight = _capability_preflight(
@@ -2752,6 +2842,7 @@ async def run_mission(
             nss_context=nss_context,
             slab_context=slab_context,
             knowledge_context_provider=_ensure_knowledge_context,
+            ensure_scope_approved=ensure_scope_approved,
             max_iters=20 if complexity == "simple" else 30,
             offloader=workspace,
             context_config=_role_context("orchestrator"),

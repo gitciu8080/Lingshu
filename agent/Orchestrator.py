@@ -64,6 +64,7 @@ def create_orchestrator_agent(
     max_iters: int = 30,
     *,
     knowledge_context_provider: Callable[[str, str], Awaitable[str]] | None = None,
+    ensure_scope_approved: Callable[[], Awaitable[bool]] | None = None,
     offloader=None,
     context_config=None,
     state=None,
@@ -241,6 +242,22 @@ def create_orchestrator_agent(
             or any(token in focus.lower() for token in ("网络", "端口", "服务", "http", "dns", "ip"))
         ):
             selected_recon = network_recon_agent
+        # 惰性范围审批（5e19dc2a 复盘）：任务启动不再被范围审批阻塞，本地
+        # 附件分析先行；首次真正需要网络侦察时才请求人工审批任务书声明的
+        # 未预授权目标。批准后授权范围已登记，本轮正常继续；用户显式输入
+        # 的目标已在注册表中，此闸门对其直接放行。
+        if (
+            selected_recon is network_recon_agent
+            and mission.scope_approval_status == "pending"
+            and ensure_scope_approved is not None
+        ):
+            if not await ensure_scope_approved():
+                mission.record(
+                    "Orchestrator", "capability_blocked",
+                    reason="scope_denied", action="dispatch_recon",
+                )
+                store.save(mission)
+                return "[阻塞] 网络范围审批未通过，已停止 Recon；请继续本地分析或安全收尾。"
         attempt = mission.begin_attempt(
             "recon",
             selected_recon.name,
@@ -374,11 +391,22 @@ def create_orchestrator_agent(
         )
         if mode in {"authorized_pentest", "hybrid_taskbook"}:
             declared = list((mission.declared_scope or {}).get("targets") or [])
-            if declared and not any(
-                scope_registry and scope_registry.is_ip_allowed(str(normalized).split(":", 1)[0])
+            scope_missing = bool(declared) and not any(
+                scope_registry and scope_registry.is_target_allowed(str(normalized))
                 for normalized in declared
+            )
+            # 惰性范围审批：目标未入授权范围且状态仍 pending 时，先发起人工
+            # 审批而不是直接阻塞；批准后目标入范围，本轮 Attack 正常继续。
+            if (
+                scope_missing
+                and mission.scope_approval_status == "pending"
+                and ensure_scope_approved is not None
+                and await ensure_scope_approved()
             ):
-                mission.scope_approval_status = "pending"
+                scope_missing = False
+            if scope_missing:
+                if mission.scope_approval_status not in {"denied", "unavailable"}:
+                    mission.scope_approval_status = "pending"
                 mission.record("Orchestrator", "capability_blocked", reason="scope_missing", targets=declared)
                 store.save(mission)
                 return "[阻塞] 当前任务的网络目标尚未进入有效授权范围，请先完成范围审批。"

@@ -75,6 +75,23 @@ class ScopeRegistry:
     def is_hostname_allowed(self, hostname: str) -> bool:
         return hostname in self._hostnames
 
+    def is_target_allowed(self, target: str) -> bool:
+        """判定目标字符串（IP/域名，可带端口/协议前缀）是否已进入授权范围。
+
+        统一入口：自动剥离 ``scheme://``、路径与端口后取主机部分，
+        依次做 IP 白名单与主机名匹配。供惰性范围审批与 dispatch_attack
+        的 scope 检查共用，避免各调用点重复实现剥离逻辑。
+        """
+        host = str(target or "").strip()
+        if not host:
+            return False
+        if "://" in host:
+            host = host.split("://", 1)[1]
+        host = host.split("/", 1)[0].rsplit("@", 1)[-1].split(":", 1)[0].strip()
+        if not host:
+            return False
+        return self.is_ip_allowed(host) or self.is_hostname_allowed(host)
+
     def is_any_target_in_command(self, command: str) -> bool:
         """检查命令中是否包含了任一已授权的 IP、网段内 IP 或主机名。"""
         import re
