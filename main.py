@@ -1306,6 +1306,29 @@ def _split_authorization_sources(
     return user_authorized_host, pending
 
 
+# 会话型工具的名称特征：这些工具改变/反映 MCP 服务端的会话状态。
+# 动作去重缓存对它们回放旧结果会导致"陈旧 session_id + Session not found"
+# 死循环（e8d94cdd / 9a045e1f 复盘：上一轮 idb_close 正常关闭会话后，下一轮
+# ida_open_binary 被缓存拦截返回已销毁的 session_id），必须始终真实执行。
+_SESSION_LIFECYCLE_TOOL_TOKENS = (
+    "open_binary", "idb_open", "idb_close", "idb_list", "server_health",
+    "create_session", "close_session", "list_sessions", "load_core",
+)
+
+
+def _is_session_lifecycle_tool(tool_name: str) -> bool:
+    """判断工具是否为 MCP 会话生命周期/状态工具（豁免动作去重回放）。
+
+    覆盖 Reserve 的本地包装 ida_open_binary 与 IDA/GDB MCP 的会话管理工具
+    （mcp__IDA_Tool__* / mcp__GDB_Tool__*）。IDA 只读分析工具
+    （decompile/survey_binary/get_bytes 等）不在此列，继续享受去重。
+    """
+    lowered = str(tool_name or "").lower()
+    if lowered == "ida_open_binary":
+        return True
+    return any(token in lowered for token in _SESSION_LIFECYCLE_TOOL_TOKENS)
+
+
 async def run_mission(
     target: str,
     goal: str,
@@ -1886,8 +1909,13 @@ async def run_mission(
                             "禁止继续执行关联动作。请切换到其他有效 Hypothesis。"
                         ),
                     }
+                # 会话型工具（IDA/GDB 打开/关闭/健康检查等）不回放缓存结果：
+                # 上一次"成功"里的 session_id 可能已被关闭，回放会让 Agent
+                # 拿着死会话陷入 Session not found 死循环。仍然记录动作与
+                # 失败路径，只是每次都真实执行。
                 if previous is not None and previous.status in {"success", "cached"} \
-                        and previous.result_valid:
+                        and previous.result_valid \
+                        and not _is_session_lifecycle_tool(tool_name):
                     cached = mission.begin_action(
                         signature, tool_name, fields["target"], parameters,
                         context=fields["context"], endpoint=fields["endpoint"],

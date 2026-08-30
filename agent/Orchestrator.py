@@ -654,6 +654,9 @@ def create_orchestrator_agent(
                         "先调用 ida_open_binary 打开文件并保存 database 会话 ID，"
                         "禁止手动启动 idat 或直接调用 idb_open；需要动态验证时使用 "
                         "gdb_create_session，结束后关闭 GDB 会话。\n"
+                        "若 MCP 工具报 Session not found，说明上一会话已关闭，"
+                        "直接重新调用 ida_open_binary 即可获取新会话继续分析，"
+                        "不要反复用旧会话 ID 重试。\n"
                         "分析完成后立即输出最终报告，禁止继续调用工具。"
                     ),
                 ),
