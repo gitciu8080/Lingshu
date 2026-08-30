@@ -1329,6 +1329,27 @@ def _is_session_lifecycle_tool(tool_name: str) -> bool:
     return any(token in lowered for token in _SESSION_LIFECYCLE_TOOL_TOKENS)
 
 
+def _steering_interrupt_kind(steering_state: dict[str, Any] | None) -> str:
+    """对 CancelledError 来源做无副作用分类（不消费 steering 队列）。
+
+    - "stop"：cancel 端点设置的真停止（cancel_requested=True）；
+    - "intel"：send_message 路径写入的操作员新情报（queue 非空，或 pending
+      存在且尚未消费）；send_message 只写 queue/pending/processed 三个字段，
+      从不写 cancel_requested，因此可可靠区分；
+    - "unknown"：其余来源（进程关闭等），调用方按真停止处理向上传播。
+    """
+    if not isinstance(steering_state, dict):
+        return "unknown"
+    if steering_state.get("cancel_requested"):
+        return "stop"
+    if steering_state.get("queue"):
+        return "intel"
+    pending = steering_state.get("pending")
+    if pending and not steering_state.get("processed"):
+        return "intel"
+    return "unknown"
+
+
 async def run_mission(
     target: str,
     goal: str,
@@ -2442,7 +2463,43 @@ async def run_mission(
                     "首轮 Recon 被用户指令或停止请求中断",
                 )
                 store.checkpoint(mission, "bootstrap_recon_interrupted")
-                raise
+                # cf6adcd1 复盘：操作员情报在 bootstrap 阶段到达时，此前无条件
+                # re-raise 会把任务整单取消——主循环尚未启动、无人消费该中断，
+                # api 层一律记"任务已被用户取消"。对齐 Brain 规划段的三态处理：
+                # 真停止/未知来源才向上传播；有新情报则降级继续——情报登记为
+                # fact 供 Brain 规划使用，steering 队列保留给 Orchestrator
+                # 首次调度时的 _check_steering 快速路径注入。
+                if _steering_interrupt_kind(steering) != "intel":
+                    raise
+                new_intel = str(
+                    (steering.get("queue") or [None])[0]
+                    or steering.get("pending")
+                    or ""
+                )
+                mission.add_fact(
+                    f"操作员补充情报：{new_intel}", "operator", [], confidence=0.9,
+                )
+                bootstrap_report = (
+                    "[Recon] 首轮侦察被操作员新情报中断。\n"
+                    "本轮已完成的工具产物与证据保留；操作员情报已登记为任务事实，"
+                    "行动指挥将在后续调度中直接使用。"
+                )
+                mission.record("system", "bootstrap_recon_steering_degraded")
+                store.save(mission)
+                if event_callback is not None:
+                    event_callback(
+                        "message",
+                        content=(
+                            "已接收操作员新情报，首轮侦察已中断；情报已登记，"
+                            "行动指挥将在后续调度中使用。"
+                        ),
+                        agent="system",
+                        event_type="agent_acknowledged",
+                    )
+                print(
+                    "[系统] 首轮 Recon 被操作员新情报中断，已降级继续"
+                    f"（情报已登记，交行动指挥使用）：{new_intel[:80]}"
+                )
             else:
                 category_decision, reclassification, evidence = _commit_recon_reclassification(
                     mission,
