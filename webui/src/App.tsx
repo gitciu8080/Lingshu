@@ -38,7 +38,8 @@ import {
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { accountStream, api, auth, Event, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, PythonEnvironmentStatus, Session, stream, SystemUser, ToolStatus } from "./api";
+import { accountStream, api, auth, Event, ManagedProvider, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, ProviderCatalogEntry, PythonEnvironmentStatus, Session, stream, SystemUser, ToolStatus } from "./api";
+import { ProviderWizardDialog } from "./ProviderWizard";
 import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
 
@@ -1096,15 +1097,23 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
     [submitting, setSubmitting] = useState(false),
     [goal, setGoal] = useState("获取 Flag / 执行任务书内容 / 测试目标"),
     [provider, setProvider] = useState(""),
-    [model, setModel] = useState("Min"),
+    [model, setModel] = useState(""),
+    [intensity, setIntensity] = useState("medium"),
     [qwenToolMode, setQwenToolMode] = useState("simple");
+  const selectedProvider = providers.find((item) => item.id === provider);
   const submitLock = useRef(false);
   useEffect(() => {
-    if (providers.length && !providers.some((item) => item.id === provider)) {
-      const defaultProvider = providers[0].id;
-      setProvider(defaultProvider);
-      setModel(defaultProvider === "zhipu" ? "Max" : "Min");
+    if (!providers.length) return;
+    const current = providers.find((item) => item.id === provider);
+    if (!current) {
+      setProvider(providers[0].id);
+      setModel(providers[0].models?.[0] || "");
+      return;
     }
+    const models = current.models || [];
+    // 模型状态与下拉显示保持一致：未手动选择时跟随该供应商的默认（首个）模型，
+    // 避免视觉上已显示模型而实际提交了空值（会话头部会退回"默认模型"）。
+    setModel((prev) => (prev && models.includes(prev) ? prev : models[0] || ""));
   }, [providers, provider]);
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -1131,7 +1140,9 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
         goal,
         provider,
         model,
-        ...(provider === "qwen" ? { qwen_tool_call_mode: qwenToolMode } : {}),
+        thinking_intensity: intensity,
+        ...(provider === "qwen" || provider.startsWith("qwen::")
+          ? { qwen_tool_call_mode: qwenToolMode } : {}),
       });
       setOpen(false);
       setFiles([]);
@@ -1197,32 +1208,38 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
                 placeholder="描述授权测试目标；可拖动右下角调整文本框高度"
               />
             </label>
+            <label>
+              模型提供商
+              <select
+                value={provider}
+                onChange={(e) => { setProvider(e.target.value); setModel(""); }}
+                disabled={!providers.length}
+              >
+                {!providers.length && <option value="">未配置可用模型</option>}
+                {providers.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.id}</option>)}
+              </select>
+              {!providers.length && <small>请先前往 /superadmin 启用一个大模型 API</small>}
+            </label>
             <div className="select-row">
               <label>
-                模型提供商
-                <select
-                  value={provider}
-                  onChange={(e) => { const next = e.target.value; setProvider(next); setModel(next === "zhipu" ? "Max" : "Min"); }}
-                  disabled={!providers.length}
-                >
-                  {!providers.length && <option value="">未配置可用模型</option>}
-                  {providers.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.id}</option>)}
+                思考强度
+                <select value={intensity} onChange={(e) => setIntensity(e.target.value)}>
+                  <option value="off">关闭</option>
+                  <option value="low">低</option>
+                  <option value="medium">中（默认）</option>
+                  <option value="high">高</option>
                 </select>
-                {!providers.length && <small>请先前往 /superadmin 启用一个大模型 API</small>}
               </label>
               <label>
-                思考级别
-                <select
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                >
-                  {["Low", "Min", "Max"].map((x) => (
-                    <option key={x}>{x}</option>
-                  ))}
+                模型
+                <select value={model} onChange={(e) => setModel(e.target.value)}>
+                  {(selectedProvider?.models?.length
+                    ? selectedProvider.models.map((name) => <option key={name} value={name}>{name}{selectedProvider.models_detail?.find((m) => m.name === name)?.vision ? " · 多模态" : ""}</option>)
+                    : <option value="">默认模型</option>)}
                 </select>
               </label>
             </div>
-            {provider === "qwen" && <label>
+            {(provider === "qwen" || provider.startsWith("qwen::")) && <label>
               工具调用难度
               <select value={qwenToolMode} onChange={(e) => setQwenToolMode(e.target.value)}>
                 <option value="simple">简单（兼容 AgentWorld）</option>
@@ -1259,10 +1276,12 @@ function RerunMission({
   const [target, setTarget] = useState(""),
     [goal, setGoal] = useState("获取 Flag / 执行任务书内容 / 测试目标"),
     [provider, setProvider] = useState("deepseek"),
-    [model, setModel] = useState("Min"),
+    [model, setModel] = useState(""),
+    [intensity, setIntensity] = useState("medium"),
     [qwenToolMode, setQwenToolMode] = useState("simple"),
     [withContext, setWithContext] = useState(true),
     [submitting, setSubmitting] = useState(false);
+  const selectedProvider = providers.find((item) => item.id === provider);
   const submitLock = useRef(false);
 
   useEffect(() => {
@@ -1270,16 +1289,23 @@ function RerunMission({
     setTarget(String(source.target || ""));
     setGoal(String(source.goal || "获取 Flag / 执行任务书内容 / 测试目标 / 执行任务书内容 / 测试目标"));
     setProvider(String(source.provider || "deepseek"));
-    setModel(String(source.model || "Min"));
+    setModel(String(source.model || ""));
     setWithContext(true);
   }, [open, source]);
 
   useEffect(() => {
-    if (open && providers.length && !providers.some((item) => item.id === provider)) {
+    if (!open || !providers.length) return;
+    const current = providers.find((item) => item.id === provider);
+    if (!current) {
       const defaultProvider = providers[0].id;
       setProvider(defaultProvider);
-      setModel(defaultProvider === "zhipu" ? "Max" : "Min");
+      setModel(providers[0].models?.[0] || "");
+      return;
     }
+    const models = current.models || [];
+    // 与 NewMission 相同的同步语义：旧会话携带的历史值（如 Max/Min 或空）
+    // 不在当前供应商模型列表中时，回落到该供应商的默认模型。
+    setModel((prev) => (prev && models.includes(prev) ? prev : models[0] || ""));
   }, [open, providers, provider]);
 
   if (!source) return null;
@@ -1317,7 +1343,9 @@ function RerunMission({
         goal: goal.trim() || "获取 Flag / 执行任务书内容 / 测试目标 / 执行任务书内容 / 测试目标",
         provider,
         model,
-        ...(provider === "qwen" ? { qwen_tool_call_mode: qwenToolMode } : {}),
+        thinking_intensity: intensity,
+        ...(provider === "qwen" || provider.startsWith("qwen::")
+          ? { qwen_tool_call_mode: qwenToolMode } : {}),
         ...(withContext ? { source_session_id: source.id } : {}),
       });
       onOpenChange(false);
@@ -1374,32 +1402,38 @@ function RerunMission({
                 onChange={(event) => setGoal(event.target.value)}
               />
             </label>
+            <label>
+              模型提供商
+              <select
+                value={provider}
+                onChange={(event) => { setProvider(event.target.value); setModel(""); }}
+                disabled={!providers.length}
+              >
+                {!providers.length && <option value="">未配置可用模型</option>}
+                {providers.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.id}</option>)}
+              </select>
+              {!providers.length && <small>请先前往 /superadmin 启用一个大模型 API</small>}
+            </label>
             <div className="select-row">
               <label>
-                模型提供商
-                <select
-                  value={provider}
-                  onChange={(event) => { const next = event.target.value; setProvider(next); setModel(next === "zhipu" ? "Max" : "Min"); }}
-                  disabled={!providers.length}
-                >
-                  {!providers.length && <option value="">未配置可用模型</option>}
-                  {providers.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.id}</option>)}
+                思考强度
+                <select value={intensity} onChange={(event) => setIntensity(event.target.value)}>
+                  <option value="off">关闭</option>
+                  <option value="low">低</option>
+                  <option value="medium">中（默认）</option>
+                  <option value="high">高</option>
                 </select>
-                {!providers.length && <small>请先前往 /superadmin 启用一个大模型 API</small>}
               </label>
               <label>
-                思考级别
-                <select
-                  value={model}
-                  onChange={(event) => setModel(event.target.value)}
-                >
-                  {["Low", "Min", "Max"].map((value) => (
-                    <option key={value}>{value}</option>
-                  ))}
+                模型
+                <select value={model} onChange={(event) => setModel(event.target.value)}>
+                  {(selectedProvider?.models?.length
+                    ? selectedProvider.models.map((name) => <option key={name} value={name}>{name}</option>)
+                    : <option value="">默认模型</option>)}
                 </select>
               </label>
             </div>
-            {provider === "qwen" && <label>
+            {(provider === "qwen" || provider.startsWith("qwen::")) && <label>
               工具调用难度
               <select value={qwenToolMode} onChange={(event) => setQwenToolMode(event.target.value)}>
                 <option value="simple">简单（兼容 AgentWorld）</option>
@@ -2133,8 +2167,9 @@ type ModelDraft = ModelApiConfigInput & { clear_api_key?: boolean };
 function blankModelDraft(category: "llm" | "embedding"): ModelDraft {
   return category === "llm" ? {
     name: "", category, provider: "deepseek", api_style: "responses", base_url: "https://api.deepseek.com", gateway_mode: "base_url", native_tools: [],
-    api_key: "", model_low: "deepseek-v4-flash", model_min: "deepseek-v4-flash", model_max: "deepseek-v4-pro",
-    model_name: "", dimensions: 0, pass_dimensions: true, enabled: true,
+    api_key: "", model_low: "", model_min: "", model_max: "",
+    model_name: "deepseek-v4-flash", vision_model: "deepseek-v4-flash-vision-exp",
+    dimensions: 0, pass_dimensions: true, enabled: true,
     settings: { temperature: 0.7, top_p: 0.95, max_tokens: 0, max_retries: 3, context_size: 200000, timeout_seconds: 600, thinking_enabled: true },
   } : {
     name: "", category, provider: "openai-compatible", api_style: "embeddings", base_url: "",
@@ -2152,7 +2187,7 @@ function modelDraftFromConfig(item: ModelApiConfig): ModelDraft {
     gateway_mode: item.gateway_mode || "base_url",
     native_tools: item.native_tools || [],
     model_low: item.model_low, model_min: item.model_min, model_max: item.model_max,
-    model_name: item.model_name, dimensions: item.dimensions,
+    model_name: item.model_name, vision_model: item.vision_model || "", dimensions: item.dimensions,
     pass_dimensions: item.pass_dimensions, enabled: item.enabled,
     settings: { ...blankModelDraft(item.category).settings, ...(item.settings || {}) },
   };
@@ -2176,8 +2211,8 @@ function ModelConfigDialog({ editing, category, onClose, onSaved }: {
     finally { setSaving(false); }
   };
   const embedding = category === "embedding";
-  const modelClass = embedding ? "OpenAIEmbeddingModel" : draft.provider === "qwen" ? "QwenChatModel · OpenAIChatModel" : draft.provider === "zhipu" ? (draft.api_style === "responses" ? "ZhipuResponsesModel · OpenAIResponseModel" : "ZhipuChatModel · OpenAIChatModel") : draft.provider === "deepseek" ? (draft.api_style === "responses" ? "DeepSeekResponsesModel · OpenAIResponseModel" : "DeepSeekChatModel") : draft.api_style === "responses" ? "OpenAIResponseModel" : "OpenAIChatModel";
-  const credentialClass = !embedding && draft.provider === "deepseek" && draft.api_style === "chat_completions" ? "DeepSeekCredential" : "OpenAICredential";
+  const modelClass = embedding ? "OpenAIEmbeddingModel" : draft.api_style === "responses" ? "ResponsesModel · 网关端点/原生工具" : "ChatModel · 网关端点/原生工具";
+  const credentialClass = "OpenAICredential";
   return <Dialog.Root open onOpenChange={(open) => !open && onClose()}><Dialog.Portal><Dialog.Overlay className="overlay model-config-overlay" />
     <Dialog.Content className="modal model-config-modal"><Dialog.Title>{editing ? "修改" : "添加"}{embedding ? "嵌入模型" : "大模型"} API</Dialog.Title>
       <Dialog.Description>遵循 AgentScope Chat Model / Embedding Model 构造标准；密钥加密保存，编辑时留空不会替换。 <a href="https://docs.agentscope.io/versions/2.0.7dev/en/building-blocks/model/llm" target="_blank" rel="noreferrer">查看官方参数说明 ↗</a></Dialog.Description>
@@ -2188,14 +2223,15 @@ function ModelConfigDialog({ editing, category, onClose, onSaved }: {
           <label>API 协议<small>内置 Zhipu 固定使用 Responses；其它自定义 Provider 可自由选择</small><select value={draft.api_style} onChange={(e) => { const api_style = e.target.value as ModelDraft["api_style"]; setDraft((old) => ({ ...old, api_style, settings: { ...old.settings, context_size: api_style === "responses" ? 200000 : 65536 } })); }} disabled={embedding || draft.provider === "qwen" || draft.provider === "zhipu"}>{embedding ? <option value="embeddings">Embeddings API</option> : draft.provider === "qwen" ? <option value="chat_completions">Chat Completions</option> : draft.provider === "zhipu" ? <option value="responses">Responses API</option> : <><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option></>}</select></label>
         </fieldset>
         <fieldset className="model-form-section"><legend><i>02</i> Credential</legend><label>Base URL<small>复制平台生成的完整网关 URL；不要手动追加 /v1、/responses 或 /chat/completions</small><input value={draft.base_url} onChange={(e) => change("base_url", e.target.value)} placeholder="https://example.com/llm-gateway/proxy/e/…" required /></label>
-          {!embedding && draft.api_style === "responses" && <label>网关端点模式<small>完整代理 URL 会原样转发；仅平台把资源端点注册为网关时选择完整端点</small><select value={draft.gateway_mode} onChange={(e) => change("gateway_mode", e.target.value)}><option value="base_url">标准 Base URL（请求 API 资源路径）</option><option value="full_endpoint">完整资源端点网关（请求网关根路径）</option></select></label>}
+          {!embedding && <label>网关端点模式<small>完整代理 URL 会原样转发；仅平台把资源端点注册为网关时选择完整端点</small><select value={draft.gateway_mode} onChange={(e) => change("gateway_mode", e.target.value)}><option value="base_url">标准 Base URL（请求 API 资源路径）</option><option value="full_endpoint">完整资源端点网关（请求网关根路径）</option></select></label>}
           {!embedding && <label className="inline-toggle"><input type="checkbox" checked={draft.native_tools.includes("web_search")} onChange={(e) => change("native_tools", e.target.checked ? ["web_search"] : [])} /><span><b>启用模型原生联网搜索</b><small>智谱使用 web_search 工具；Responses 兼容端点使用 provider 原生工具格式</small></span></label>}
-          <label>API Key<small>{editing?.has_api_key ? `当前 ${editing.api_key_masked}；留空则保持不变` : "将使用 Fernet 加密后保存"}</small><input type="password" value={draft.api_key || ""} onChange={(e) => change("api_key", e.target.value)} placeholder={editing?.has_api_key ? "留空保持现有密钥" : "sk-…"} autoComplete="new-password" disabled={!!draft.clear_api_key} /></label>
+          {editing?.api_key_status === "invalid" && <p className="field-help key-invalid-hint">⚠ 该配置的加密密钥已丢失或被轮换，运行时已被停用。请重新填写下方 API Key 并保存即可修复。</p>}
+          <label>API Key<small>{editing?.has_api_key ? `当前 ${editing.api_key_masked}；留空则保持不变` : "将使用 Fernet 加密后保存"}</small><input type="password" value={draft.api_key || ""} onChange={(e) => change("api_key", e.target.value)} placeholder={editing?.has_api_key ? "留空保持现有密钥" : "sk-…"} autoComplete="new-password" disabled={!!draft.clear_api_key} required={editing?.api_key_status === "invalid"} /></label>
           {editing?.has_api_key && <label className="inline-danger"><input type="checkbox" checked={!!draft.clear_api_key} onChange={(e) => change("clear_api_key", e.target.checked)} /> 删除已保存 API Key</label>}
         </fieldset>
-        <fieldset className="model-form-section"><legend><i>03</i> Model</legend>{!embedding ? <><p className="field-help">灵枢按任务强度映射模型；Qwen 单模型端点仍会以 Min 名称作为服务端模型标识。</p><div className="model-form-grid three"><label>Low / 快速<input value={draft.model_low} onChange={(e) => change("model_low", e.target.value)} required /></label><label>Min / 平衡<input value={draft.model_min} onChange={(e) => change("model_min", e.target.value)} required /></label><label>Max / 深度<input value={draft.model_max} onChange={(e) => change("model_max", e.target.value)} required /></label></div></>
-          : <div className="model-form-grid"><label>Embedding 模型<input value={draft.model_name} onChange={(e) => change("model_name", e.target.value)} required /></label><label>输出向量维度<small>必须与模型真实输出一致</small><input type="number" min={1} max={65536} value={draft.dimensions} onChange={(e) => change("dimensions", Number(e.target.value))} required /></label></div>}</fieldset>
-        <fieldset className="model-form-section"><legend><i>04</i> Parameters</legend>{!embedding && <><div className="model-form-grid three"><label>Temperature<small>0 稳定 · 2 发散</small><input type="number" min={0} max={2} step={0.05} value={draft.settings.temperature} onChange={(e) => changeSetting("temperature", Number(e.target.value))} /></label><label>Top P<small>核采样范围</small><input type="number" min={0.01} max={1} step={0.01} value={draft.settings.top_p} onChange={(e) => changeSetting("top_p", Number(e.target.value))} /></label><label>Max Tokens<small>0 使用服务端默认值</small><input type="number" min={0} max={1048576} value={draft.settings.max_tokens} onChange={(e) => changeSetting("max_tokens", Number(e.target.value))} /></label></div><label className="inline-toggle"><input type="checkbox" checked={draft.settings.thinking_enabled} onChange={(e) => changeSetting("thinking_enabled", e.target.checked)} /><span><b>启用推理能力</b><small>Low 始终关闭；Min/Max 纯文本开启；带 tools 的调用强制关闭</small></span></label></>}
+        <fieldset className="model-form-section"><legend><i>03</i> Model</legend>{!embedding ? <><p className="field-help">指定该提供商的默认模型名；前端创建任务时可从中选择具体模型并单独指定思考强度（off/low/medium/high）。Qwen 单模型端点以 model_name 作为服务端模型标识。</p><div className="model-form-grid"><label>模型名称<input list={`model-presets-${category}`} value={draft.model_name} onChange={(e) => change("model_name", e.target.value)} required /></label></div><div className="model-form-grid three"><label>备用模型 1<small>前端可选</small><input value={draft.model_min} onChange={(e) => change("model_min", e.target.value)} placeholder="可选" /></label><label>备用模型 2<small>前端可选</small><input value={draft.model_max} onChange={(e) => change("model_max", e.target.value)} placeholder="可选" /></label><label>视觉模型<small>允许图片输入时回退</small><input value={draft.vision_model || ""} onChange={(e) => change("vision_model", e.target.value)} placeholder="可选" /></label></div></>
+          : <div className="model-form-grid"><label>Embedding 模型<small>知识库检索实际调用的模型名</small><input value={draft.model_name} onChange={(e) => change("model_name", e.target.value)} required /></label><label>输出向量维度<small>必须与模型真实输出一致</small><input type="number" min={1} max={65536} value={draft.dimensions} onChange={(e) => change("dimensions", Number(e.target.value))} required /></label></div>}</fieldset>
+        <fieldset className="model-form-section"><legend><i>04</i> Parameters</legend>{!embedding && <><div className="model-form-grid three"><label>Temperature<small>0 稳定 · 2 发散</small><input type="number" min={0} max={2} step={0.05} value={draft.settings.temperature} onChange={(e) => changeSetting("temperature", Number(e.target.value))} /></label><label>Top P<small>核采样范围</small><input type="number" min={0.01} max={1} step={0.01} value={draft.settings.top_p} onChange={(e) => changeSetting("top_p", Number(e.target.value))} /></label><label>Max Tokens<small>0 使用服务端默认值</small><input type="number" min={0} max={1048576} value={draft.settings.max_tokens} onChange={(e) => changeSetting("max_tokens", Number(e.target.value))} /></label></div><label className="inline-toggle"><input type="checkbox" checked={draft.settings.thinking_enabled} onChange={(e) => changeSetting("thinking_enabled", e.target.checked)} /><span><b>启用推理能力</b><small>off 关闭推理；文本模式开启；带 tools 的调用强制关闭</small></span></label></>}
           <details className="model-advanced"><summary>高级运行参数</summary><div className="model-form-grid three"><label>Max Retries<input type="number" min={0} max={10} value={draft.settings.max_retries} onChange={(e) => changeSetting("max_retries", Number(e.target.value))} /></label><label>Context Size<input type="number" min={1024} max={10485760} value={draft.settings.context_size} onChange={(e) => changeSetting("context_size", Number(e.target.value))} /></label><label>Timeout / 秒<input type="number" min={1} max={3600} value={draft.settings.timeout_seconds} onChange={(e) => changeSetting("timeout_seconds", Number(e.target.value))} disabled={embedding} /></label></div></details>
         </fieldset>
         <section className="model-policy"><b>灵枢运行策略</b><span>Streaming {embedding ? "—" : "ON"}</span><span>TOOLS STATE-GUARDED</span><span>Formatter PROVIDER DEFAULT</span><small>为保证实时消息、状态机顺序和 DeepSeek reasoning_item_id 一致性，这些参数由系统锁定。</small></section>
@@ -2207,34 +2243,62 @@ function ModelConfigDialog({ editing, category, onClose, onSaved }: {
 
 function SuperAdminPage() {
   const [ready, setReady] = useState(!!auth.get()), [tab, setTab] = useState<SuperAdminTab>("users"),
-    [users, setUsers] = useState<SystemUser[]>([]), [configs, setConfigs] = useState<ModelApiConfig[]>([]),
+    [users, setUsers] = useState<SystemUser[]>([]),
+    [providers, setProviders] = useState<ManagedProvider[]>([]),
+    [catalog, setCatalog] = useState<ProviderCatalogEntry[]>([]),
+    [configs, setConfigs] = useState<ModelApiConfig[]>([]),
     [loading, setLoading] = useState(false), [target, setTarget] = useState<SystemUser | null>(null),
-    [editor, setEditor] = useState<{ category: "llm" | "embedding"; config: ModelApiConfig | null } | null>(null),
+    [editor, setEditor] = useState<
+      | { kind: "provider"; provider: ManagedProvider | null }
+      | { kind: "embedding"; config: ModelApiConfig | null }
+      | null
+    >(null),
     [newPassword, setNewPassword] = useState(""), [search, setSearch] = useState("");
   const loadData = async () => {
     setLoading(true);
-    try { const [userData, modelData] = await Promise.all([api.superadminUsers(), api.modelConfigs()]); setUsers(userData.users || []); setConfigs(modelData.configs || []); }
-    catch (error) { auth.clear(); setReady(false); toast.error(String(error)); }
+    try {
+      const [userData, llmData, embData] = await Promise.all([
+        api.superadminUsers(), api.llmProviders(), api.modelConfigs("embedding"),
+      ]);
+      setUsers(userData.users || []);
+      setProviders(llmData.providers || []);
+      setConfigs(embData.configs || []);
+      if (!catalog.length) {
+        void api.providerCatalog().then((data) => setCatalog(data.providers || [])).catch(() => setCatalog([]));
+      }
+    } catch (error) { auth.clear(); setReady(false); toast.error(String(error)); }
     finally { setLoading(false); }
   };
   useEffect(() => { if (!ready) return; void api.me().then((me) => { if (me.role !== "superadmin") throw new Error("需要超级管理员权限"); }).then(loadData).catch((error) => { auth.clear(); setReady(false); toast.error(String(error)); }); }, [ready]);
   const resetPassword = async (event: FormEvent) => { event.preventDefault(); if (!target) return; try { await api.resetUserPassword(target.id, newPassword); toast.success(`已重置 ${target.username} 的密码，并使其旧登录失效`); setTarget(null); setNewPassword(""); void loadData(); } catch (error) { toast.error(String(error)); } };
   const removeUser = async (user: SystemUser) => { if (!window.confirm(`确定删除用户“${user.username}”？该操作不可恢复。`)) return; try { await api.deleteUser(user.id); toast.success("用户已删除"); void loadData(); } catch (error) { toast.error(String(error)); } };
+  const removeProvider = async (provider: ManagedProvider) => {
+    if (!window.confirm(`确定删除供应商配置“${provider.name}”？其 ${provider.models.length} 个模型与加密密钥都会一并删除。`)) return;
+    try { await api.deleteLLMProvider(provider.id); toast.success("供应商配置已删除"); void loadData(); }
+    catch (error) { toast.error(String(error)); }
+  };
   const removeConfig = async (config: ModelApiConfig) => { if (!window.confirm(`确定删除模型配置“${config.name}”？其加密密钥也会一并删除。`)) return; try { await api.deleteModelConfig(config.id); toast.success("模型 API 配置已删除"); void loadData(); } catch (error) { toast.error(String(error)); } };
   const filteredUsers = users.filter((user) => `${user.id} ${user.username} ${user.email || ""} ${user.role}`.toLowerCase().includes(search.toLowerCase()));
-  const category = tab === "embedding" ? "embedding" : "llm", visibleConfigs = configs.filter((item) => item.category === category && `${item.name} ${item.provider} ${item.base_url}`.toLowerCase().includes(search.toLowerCase()));
+  const visibleProviders = providers.filter((item) => `${item.name} ${item.provider} ${item.base_url} ${item.models.map((m) => m.name).join(" ")}`.toLowerCase().includes(search.toLowerCase()));
+  const visibleEmbeddings = configs.filter((item) => `${item.name} ${item.provider} ${item.base_url}`.toLowerCase().includes(search.toLowerCase()));
   if (!ready) return <><LiquidGlassLayer /><SuperAdminLogin onReady={() => setReady(true)} /></>;
-  const titles = tab === "users" ? ["系统用户管理", "USER ACCESS CONTROL / 账户、密码与访问权限"] : tab === "llm" ? ["大模型 API 管理", "LLM ENDPOINT REGISTRY / 模型、协议、地址与密钥"] : ["嵌入模型 API 管理", "EMBEDDING REGISTRY / 向量模型与知识库连接"];
+  const titles = tab === "users" ? ["系统用户管理", "USER ACCESS CONTROL / 账户、密码与访问权限"] : tab === "llm" ? ["大模型供应商管理", "LLM PROVIDER REGISTRY / 供应商、模型列表、超参数与内置工具"] : ["嵌入模型 API 管理", "EMBEDDING REGISTRY / 向量模型与知识库连接"];
   return <main className="superadmin-page"><LiquidGlassLayer />
     <aside className="superadmin-sidebar"><div className="superadmin-logo"><span>LS</span><b>LINGSHU<br /><small>CONTROL</small></b></div><p>ADMIN PANEL</p><button className={tab === "users" ? "active" : ""} onClick={() => { setTab("users"); setSearch(""); }}><Database size={17} /><span>用户数据库</span></button><button className={tab === "llm" ? "active" : ""} onClick={() => { setTab("llm"); setSearch(""); }}><BrainCircuit size={17} /><span>大模型 API</span></button><button className={tab === "embedding" ? "active" : ""} onClick={() => { setTab("embedding"); setSearch(""); }}><Network size={17} /><span>嵌入模型 API</span></button><button onClick={() => void loadData()}><RotateCcw size={17} /><span>{loading ? "同步中" : "同步数据"}</span></button><div className="superadmin-sidebar-bottom"><button onClick={() => { auth.clear(); setReady(false); }}><LogOut size={17} /><span>安全退出</span></button></div></aside>
     <section className="superadmin-content"><header className="superadmin-header"><div><p className="kicker">LINGSHU · RESTRICTED AREA</p><h1>{titles[0]}</h1><small>{titles[1]}</small></div><span className="superadmin-live"><i /> SYSTEM ONLINE</span></header>
       {tab === "users" ? <><section className="superadmin-stats"><article><span>USERS_TOTAL</span><b>{users.length}</b><i /></article><article><span>SUPERADMIN</span><b>{users.filter((user) => user.role === "superadmin").length}</b><i /></article><article><span>LOGGED_IN</span><b>{users.filter((user) => user.last_login).length}</b><i /></article><article className="danger"><span>FILTERED_VIEW</span><b>{filteredUsers.length}</b><i /></article></section>
         <section className="superadmin-database"><header><div><h2>USER_DATABASE</h2><em>共 {users.length} 条账户记录</em></div><div className="superadmin-toolbar"><label><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索 UID / 用户名 / 邮箱…" /></label><button type="button" className="quiet-button" onClick={() => void loadData()} disabled={loading}>{loading ? "刷新中…" : "刷新"}</button></div></header><div className="superadmin-table-wrap"><table className="superadmin-table"><thead><tr><th>UID</th><th>用户 / USER</th><th>联系方式</th><th>角色权限</th><th>创建时间</th><th>最近登录</th><th>操作</th></tr></thead><tbody>{filteredUsers.map((user) => <tr key={user.id}><td><code>#{user.id}</code></td><td><div className="superadmin-user"><span>{user.username.slice(0, 1).toUpperCase()}</span><div><b>{user.username}</b><small>{user.role === "superadmin" ? "ROOT ACCESS" : "STANDARD ACCOUNT"}</small></div></div></td><td>{user.email || "--"}</td><td><span className={`role-badge ${user.role}`}>{user.role}</span></td><td>{user.created_at || "--"}</td><td><span className={user.last_login ? "login-state online" : "login-state"}><i />{user.last_login || "从未登录"}</span></td><td className="user-actions"><button type="button" className="quiet-button" onClick={() => { setTarget(user); setNewPassword(""); }}>重置密码</button>{user.role !== "superadmin" && <button type="button" className="danger-button compact" onClick={() => void removeUser(user)}><Trash2 size={13} /> 删除</button>}</td></tr>)}</tbody></table>{!loading && !filteredUsers.length && <p className="empty-note">未找到匹配的用户记录</p>}</div><footer><span>DATABASE STATUS: {loading ? "SYNCING" : "READY"}</span><span>DISPLAYING {filteredUsers.length} / {users.length}</span></footer></section></>
-        : <><section className="superadmin-stats"><article><span>{category.toUpperCase()}_TOTAL</span><b>{configs.filter((item) => item.category === category).length}</b><i /></article><article><span>ENABLED</span><b>{configs.filter((item) => item.category === category && item.enabled).length}</b><i /></article><article><span>WITH_API_KEY</span><b>{configs.filter((item) => item.category === category && item.has_api_key).length}</b><i /></article><article className="danger"><span>PROVIDERS</span><b>{new Set(configs.filter((item) => item.category === category).map((item) => item.provider)).size}</b><i /></article></section>
-          <section className="superadmin-database"><header><div><h2>{category === "llm" ? "LLM_ENDPOINTS" : "EMBEDDING_ENDPOINTS"}</h2><em>启用项优先覆盖服务器 .env</em></div><div className="superadmin-toolbar"><label><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索名称 / 类型 / 地址…" /></label><button className="danger-button compact add-model" onClick={() => setEditor({ category, config: null })}><Plus size={14} /> 添加配置</button></div></header><div className="superadmin-table-wrap"><table className="superadmin-table model-config-table"><thead><tr><th>状态</th><th>配置 / PROVIDER</th><th>API 地址</th><th>模型</th><th>API Key</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{visibleConfigs.map((item) => <tr key={item.id}><td><span className={item.enabled ? "endpoint-state enabled" : "endpoint-state"}><i />{item.enabled ? "启用" : "停用"}</span></td><td><div className="superadmin-user"><span>{item.category === "llm" ? "AI" : "E"}</span><div><b>{item.name}</b><small>{item.provider} · {item.api_style}</small></div></div></td><td><code className="endpoint-url">{item.base_url}</code></td><td>{item.category === "llm" ? <small className="model-stack">LOW {item.model_low}<br />MIN {item.model_min}<br />MAX {item.model_max}</small> : <small className="model-stack">{item.model_name}<br />DIM {item.dimensions}</small>}</td><td><code>{item.api_key_masked}</code></td><td>{item.updated_at || "--"}</td><td className="user-actions"><button className="quiet-button" onClick={() => setEditor({ category: item.category, config: item })}>修改</button><button className="danger-button compact" onClick={() => void removeConfig(item)}><Trash2 size={13} /> 删除</button></td></tr>)}</tbody></table>{!loading && !visibleConfigs.length && <p className="empty-note">尚无模型 API 配置，请点击“添加配置”</p>}</div><footer><span>SECRETS: ENCRYPTED AT REST</span><span>DISPLAYING {visibleConfigs.length}</span></footer></section></>}
+        : tab === "llm" ? <>
+          <section className="superadmin-stats"><article><span>PROVIDERS</span><b>{providers.length}</b><i /></article><article><span>ENABLED</span><b>{providers.filter((item) => item.enabled).length}</b><i /></article><article><span>MODELS</span><b>{providers.reduce((sum, item) => sum + item.models.length, 0)}</b><i /></article><article className="danger"><span>WITH_TOOLS</span><b>{providers.filter((item) => item.enabled_tools.length).length}</b><i /></article></section>
+          <section className="superadmin-database"><header><div><h2>LLM_PROVIDERS</h2><em>供应商 → 凭据 → 模型列表（每模型超参数）→ 内置工具</em></div><div className="superadmin-toolbar"><label><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索名称 / 供应商 / 模型…" /></label><button className="danger-button compact add-model" onClick={() => setEditor({ kind: "provider", provider: null })}><Plus size={14} /> 添加供应商</button></div></header><div className="superadmin-table-wrap"><table className="superadmin-table model-config-table"><thead><tr><th>状态</th><th>配置 / PROVIDER</th><th>API 地址</th><th>模型</th><th>原生工具</th><th>API Key</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{visibleProviders.map((item) => <tr key={item.id}><td><span className={item.enabled ? "endpoint-state enabled" : "endpoint-state"}><i />{item.enabled ? "启用" : "停用"}</span></td><td><div className="superadmin-user"><span>AI</span><div><b>{item.name}</b><small>{item.provider} · {item.api_style}</small></div></div></td><td><code className="endpoint-url">{item.base_url}</code></td><td><div className="model-chips">{item.models.map((m) => <span key={m.name} className={`model-chip ${m.enabled ? "" : "off"}`} title={m.enabled ? "" : "已停用"}>{m.name}{m.vision ? " · 多模态" : ""}</span>)}</div></td><td><small className="tool-stack">{item.enabled_tools.length ? item.enabled_tools.join("、") : "—"}</small></td><td>{item.api_key_status === "invalid" ? <code className="key-invalid" title="加密密钥已丢失或轮换，请修改该配置并重新填写 API Key">密钥失效</code> : <code>{item.api_key_masked}</code>}</td><td>{item.updated_at || "--"}</td><td className="user-actions"><button className="quiet-button" onClick={() => setEditor({ kind: "provider", provider: item })}>修改</button><button className="danger-button compact" onClick={() => void removeProvider(item)}><Trash2 size={13} /> 删除</button></td></tr>)}</tbody></table>{!loading && !visibleProviders.length && <p className="empty-note">尚无供应商配置，请点击“添加供应商”</p>}</div><footer><span>SECRETS: ENCRYPTED AT REST</span><span>DISPLAYING {visibleProviders.length} / {providers.length}</span></footer></section>
+        </>
+        : <><section className="superadmin-stats"><article><span>EMBEDDING_TOTAL</span><b>{configs.length}</b><i /></article><article><span>ENABLED</span><b>{configs.filter((item) => item.enabled).length}</b><i /></article><article><span>WITH_API_KEY</span><b>{configs.filter((item) => item.has_api_key).length}</b><i /></article><article className="danger"><span>PROVIDERS</span><b>{new Set(configs.map((item) => item.provider)).size}</b><i /></article></section>
+          <section className="superadmin-database"><header><div><h2>EMBEDDING_ENDPOINTS</h2><em>知识库向量模型；未配置时回退服务器 .env</em></div><div className="superadmin-toolbar"><label><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索名称 / 类型 / 地址…" /></label><button className="danger-button compact add-model" onClick={() => setEditor({ kind: "embedding", config: null })}><Plus size={14} /> 添加配置</button></div></header><div className="superadmin-table-wrap"><table className="superadmin-table model-config-table"><thead><tr><th>状态</th><th>配置 / PROVIDER</th><th>API 地址</th><th>模型</th><th>API Key</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{visibleEmbeddings.map((item) => <tr key={item.id}><td><span className={item.enabled ? "endpoint-state enabled" : "endpoint-state"}><i />{item.enabled ? "启用" : "停用"}</span></td><td><div className="superadmin-user"><span>E</span><div><b>{item.name}</b><small>{item.provider} · {item.api_style}</small></div></div></td><td><code className="endpoint-url">{item.base_url}</code></td><td><small className="model-stack">{item.model_name}<br />DIM {item.dimensions}</small></td><td>{item.api_key_status === "invalid" ? <code className="key-invalid" title="加密密钥已丢失或轮换，请修改该配置并重新填写 API Key">密钥失效</code> : <code>{item.api_key_masked}</code>}</td><td>{item.updated_at || "--"}</td><td className="user-actions"><button className="quiet-button" onClick={() => setEditor({ kind: "embedding", config: item })}>修改</button><button className="danger-button compact" onClick={() => void removeConfig(item)}><Trash2 size={13} /> 删除</button></td></tr>)}</tbody></table>{!loading && !visibleEmbeddings.length && <p className="empty-note">尚无嵌入模型配置，请点击“添加配置”</p>}</div><footer><span>SECRETS: ENCRYPTED AT REST</span><span>DISPLAYING {visibleEmbeddings.length} / {configs.length}</span></footer></section></>
+      }
     </section>
     <Dialog.Root open={!!target} onOpenChange={(open) => !open && setTarget(null)}><Dialog.Portal><Dialog.Overlay className="overlay superadmin-reset-overlay" /><Dialog.Content className="modal superadmin-reset-modal"><Dialog.Title>重置用户密码</Dialog.Title><Dialog.Description>将立即使该用户当前所有登录状态失效。</Dialog.Description><form onSubmit={resetPassword}><label>用户<input value={target?.username || ""} disabled /></label><label>新密码（至少 8 位）<input value={newPassword} type="password" minLength={8} onChange={(e) => setNewPassword(e.target.value)} required autoFocus /></label><div className="modal-actions"><button type="button" className="quiet-button" onClick={() => setTarget(null)}>取消</button><button type="submit" className="danger-button">确认重置</button></div></form></Dialog.Content></Dialog.Portal></Dialog.Root>
-    {editor && <ModelConfigDialog editing={editor.config} category={editor.category} onClose={() => setEditor(null)} onSaved={() => void loadData()} />}
+    {editor?.kind === "provider" && <ProviderWizardDialog editing={editor.provider} catalog={catalog} onClose={() => setEditor(null)} onSaved={() => void loadData()} />}
+    {editor?.kind === "embedding" && <ModelConfigDialog editing={editor.config} category="embedding" onClose={() => setEditor(null)} onSaved={() => void loadData()} />}
   </main>;
 }
 
@@ -2352,16 +2416,18 @@ function ConsoleApp() {
   );
   const fullTarget = String(detail.target || current?.target || "--");
   const fullGoal = String(detail.goal || current?.goal || "--");
-  const modelLevel = String(
-    detail.model_level || detail.model || current?.model_level || current?.model || "Min",
+  const modelName = String(
+    detail.model_name || detail.model || current?.model_name || current?.model || "",
+  ) || "默认模型";
+  const intensityRaw = String(
+    detail.thinking_intensity || current?.thinking_intensity || "medium",
   );
-  const modelName = String(detail.model_name || current?.model_name || "--");
-  const modelDisplay =
-    modelName && modelName !== "--" && modelName !== modelLevel
-      ? `${modelLevel} · ${modelName}`
-      : modelName === "--"
-        ? modelLevel
-        : modelName;
+  const intensityLabel = {
+    off: "无思考", low: "低思考强度", medium: "中等思考强度", high: "高思考强度",
+  }[intensityRaw] || intensityRaw;
+  const modelDisplay = modelName === "默认模型"
+    ? "默认模型"
+    : `${modelName} · ${intensityLabel}`;
   const isLive = current?.is_live === true;
   activeSessionRef.current = active;
   sessionsRef.current = sessions;
@@ -3161,7 +3227,7 @@ function ConsoleApp() {
             </div>
             <div>
               <span>模型</span>
-              <b title={`${modelLevel} · ${modelName}`}>{modelDisplay}</b>
+              <b title={`思考强度: ${intensityLabel}`}>{modelDisplay}</b>
             </div>
           </section>
           <section

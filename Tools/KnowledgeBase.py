@@ -158,10 +158,49 @@ class RAGService:
             from agentscope.rag import KnowledgeBase, MilvusLiteStore
             from pydantic import SecretStr
 
+            class _FullEndpointEmbeddingsClient:
+                """把 ``embeddings.create`` 重定向到网关根路径的客户端代理。
+
+                注册地址本身已是完整的 ``/embeddings`` 资源端点（如聚合网关
+                直接暴露该资源），标准 SDK 拼接会形成重复路径，因此改用根
+                路径 POST，请求体保持 OpenAI embeddings 原生格式。
+                """
+
+                def __init__(self, inner) -> None:
+                    self._inner = inner
+                    self.embeddings = self
+
+                async def create(self, **api_kwargs):
+                    from openai.types.embedding import CreateEmbeddingResponse
+
+                    return await self._inner.post(
+                        "/",
+                        cast_to=CreateEmbeddingResponse,
+                        body=api_kwargs,
+                        stream=False,
+                    )
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self._inner, name)
+
+            class FullEndpointEmbeddingModel(OpenAIEmbeddingModel):
+                """full_endpoint 网关模式的嵌入模型。"""
+
+                def __init__(self, *args: Any, **kwargs: Any) -> None:
+                    super().__init__(*args, **kwargs)
+                    self.client = _FullEndpointEmbeddingsClient(self.client)
+
             self.state_dir.mkdir(parents=True, exist_ok=True)
             self.store = MilvusLiteStore(uri=str(self.state_dir / "knowledge.db"))
             await self.store.__aenter__()
-            embedding = OpenAIEmbeddingModel(
+            # full_endpoint：注册地址即完整 /embeddings 端点，请求发往根路径；
+            # base_url：SDK 标准拼接 {base_url}/embeddings。
+            embedding_cls = (
+                FullEndpointEmbeddingModel
+                if self.runtime.embedding_gateway_mode == "full_endpoint"
+                else OpenAIEmbeddingModel
+            )
+            embedding = embedding_cls(
                 credential=OpenAICredential(
                     api_key=SecretStr(self.runtime.embedding_api_key),
                     base_url=self.runtime.embedding_base_url,

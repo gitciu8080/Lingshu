@@ -57,6 +57,7 @@ def init_sessions_db():
                 goal TEXT DEFAULT '',
                 provider TEXT DEFAULT 'deepseek',
                 model TEXT DEFAULT 'Min',
+                thinking_intensity TEXT DEFAULT 'medium',
                 phase TEXT DEFAULT 'planning',
                 status TEXT DEFAULT 'active',
                 success BOOLEAN,
@@ -136,6 +137,7 @@ def init_sessions_db():
             "scope_approval_requested_at": "TEXT DEFAULT ''",
             "scope_approval_resolved_at": "TEXT DEFAULT ''",
             # ── v0.3.0 Workspace v2 ──
+            "thinking_intensity": "TEXT DEFAULT 'medium'",
             "workspace_id": "TEXT DEFAULT ''",
             "workspace_version": "INTEGER DEFAULT 0",
             "resume_status": "TEXT DEFAULT 'fresh'",
@@ -185,6 +187,7 @@ def create_session(
     model: str = 'Min',
     title: str = '',
     session_id: str = '',
+    thinking_intensity: str = 'medium',
 ) -> str:
     """创建一条新会话记录，返回 session_id。
     
@@ -197,9 +200,9 @@ def create_session(
     conn = get_db()
     try:
         conn.execute(
-            """INSERT INTO sessions (id, user_id, title, target, goal, provider, model)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, user_id, title, target, goal, provider, model),
+            """INSERT INTO sessions (id, user_id, title, target, goal, provider, model, thinking_intensity)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, user_id, title, target, goal, provider, model, thinking_intensity),
         )
         conn.commit()
     finally:
@@ -210,6 +213,7 @@ def create_session(
 # update_session 允许更新的字段白名单
 _UPDATABLE_FIELDS = {
     'phase', 'status', 'success', 'flag', 'summary', 'title', 'target_info',
+    'thinking_intensity',
     'pending_approval', 'pending_scope_approval', 'pending_exploitation_approval', 'updated_at',
     'approval_status', 'approval_decision', 'approval_requested_at',
     'approval_resolved_at',
@@ -493,12 +497,13 @@ def apply_persistence_batch(operations: list[dict]) -> list[int | None]:
                 fields = dict(operation.get("fields") or {})
                 conn.execute(
                     """INSERT OR IGNORE INTO sessions
-                       (id, user_id, title, target, goal, provider, model)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       (id, user_id, title, target, goal, provider, model, thinking_intensity)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id, fields["user_id"], fields.get("title") or fields["target"],
                         fields["target"], fields.get("goal", ""),
-                        fields.get("provider", "deepseek"), fields.get("model", "Min"),
+                        fields.get("provider", "deepseek"), fields.get("model", ""),
+                        fields.get("thinking_intensity", "medium"),
                     ),
                 )
                 results.append(None)

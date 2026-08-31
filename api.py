@@ -78,11 +78,21 @@ from Tools.target import normalize_target
 from core.model_registry import (
     ModelRegistryError,
     active_llm_providers,
-    create_model_config,
-    delete_model_config,
-    get_model_config,
-    list_model_configs,
-    update_model_config,
+    add_provider_model,
+    create_embedding_config,
+    create_llm_provider,
+    delete_embedding_config,
+    delete_llm_provider,
+    delete_provider_model,
+    fetch_provider_models,
+    get_embedding_config,
+    get_llm_provider,
+    list_embedding_configs,
+    list_llm_providers,
+    provider_catalog,
+    update_embedding_config,
+    update_llm_provider,
+    update_provider_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -670,27 +680,19 @@ def _attach_model_metadata(
     session: dict,
     runtime: RuntimeConfig | None = None,
 ) -> None:
-    """为会话补充前端可直接展示的思考强度和实际模型名称。"""
-    provider = str(session.get("provider") or "deepseek").strip().lower()
-    stored_model = str(session.get("model") or "Min").strip()
-    canonical_levels = {"low": "Low", "min": "Min", "max": "Max"}
-    model_level = canonical_levels.get(stored_model.lower())
+    """为会话补充前端可直接展示的模型信息。
 
-    if model_level is None:
-        # 兼容早期直接将真实模型名写入 model 字段的会话。
-        model_level = str(session.get("model_level") or "自定义")
-        model_name = stored_model
-    else:
-        try:
-            model_name = (runtime or RuntimeConfig.from_env()).model_name(
-                model_level,
-                provider=provider,
-            )
-        except (TypeError, ValueError):
-            model_name = stored_model
+    v2 语义：session.model 存具体模型名（空表示使用配置默认模型）；
+    旧会话的 Low/Min/Max 值原样展示，不再经 config.model_name 映射。
+    """
+    del runtime
+    stored_model = str(session.get("model") or "").strip()
+    session["model_level"] = stored_model or "默认模型"
+    session["model_name"] = stored_model or "默认模型"
+    session["thinking_intensity"] = str(
+        session.get("thinking_intensity") or "medium",
+    )
 
-    session["model_level"] = model_level
-    session["model_name"] = model_name
 
 
 # ── 长期记忆保存辅助函数 ──
@@ -718,6 +720,7 @@ def _save_long_term_memory(session_id, target, goal, phase, success, flag, summa
 
 async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, goal: str,
                            model_ver: str, provider: str, callback, initial_context: str | None = None,
+                           thinking_intensity: str = "medium",
                            nss_context: dict | None = None, slab_context: dict | None = None, resume: bool = False,
                            qwen_tool_call_mode: str | None = None,
                            authorized_target: str | None = None):
@@ -732,6 +735,11 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
     try:
         mission_state = await run_mission(
             target=target, goal=goal, model_ver=model_ver,
+            # model 字段历史形态兼容：思考级别（Low/Min/Max，workbench/旧
+            # 会话落库值）不能直接作为模型名下发 API；级别场景由工厂按
+            # 供应商配置的默认模型执行。
+            model_name=model_ver if model_ver and model_ver not in {"Low", "Min", "Max"} else None,
+            thinking_intensity=thinking_intensity,
             provider=provider, event_callback=callback,
             qwen_tool_call_mode=qwen_tool_call_mode,
             session_id=session_id, input_queue=ctx.input_queue,
@@ -1254,8 +1262,9 @@ class MissionStartRequest(BaseModel):
         description="已上传附件的服务器路径；与 target 同时提供时，target 作为网络授权目标",
     )
     goal: str = Field(default="获取 Flag", description="任务目标描述")
-    provider: str = Field(default="deepseek", pattern="^[a-z][a-z0-9_-]{1,31}$", description="模型提供商标识")
-    model: str = Field(default="Min", pattern="^(Low|Min|Max)$", description="思考级别: Low | Min | Max；Zhipu 未显式指定时默认 Max")
+    provider: str = Field(default="deepseek", pattern="^[a-z][a-z0-9_-]{1,31}(::[0-9]+)?$", description="运行时 key：provider 或 provider::配置ID（同一供应商多条启用）")
+    model: str = Field(default="", max_length=300, description="具体模型名；为空时使用该配置的默认模型")
+    thinking_intensity: str = Field(default="medium", pattern="^(off|low|medium|high)$", description="思考强度: off | low | medium | high")
     qwen_tool_call_mode: str | None = Field(
         default=None, pattern="^(simple|standard)$",
         description="Qwen 工具调用难度: simple（扁平兼容）| standard（批量嵌套）",
@@ -1310,26 +1319,75 @@ class ModelRuntimeSettingsPayload(BaseModel):
     thinking_enabled: bool = True
 
 
-class ModelAPIConfigPayload(BaseModel):
-    """超级管理员维护的模型端点；api_key 为空时编辑操作保留原密钥。"""
+class EmbeddingConfigPayload(BaseModel):
+    """超级管理员维护的嵌入模型端点；api_key 为空时编辑操作保留原密钥。"""
 
     name: str = Field(min_length=2, max_length=80)
-    category: str = Field(pattern="^(llm|embedding)$")
-    provider: str = Field(min_length=2, max_length=32)
-    api_style: str = Field(pattern="^(chat_completions|responses|embeddings)$")
+    category: str = Field(pattern="^embedding$")
+    provider: str = Field(default="openai-compatible", max_length=32)
+    api_style: str = Field(default="embeddings", pattern="^embeddings$")
     base_url: str = Field(min_length=8, max_length=500)
-    gateway_mode: str = Field(default="base_url", pattern="^(base_url|full_endpoint)$")
-    native_tools: list[str] = Field(default_factory=list, max_length=8)
     api_key: str | None = Field(default=None, max_length=4096)
     clear_api_key: bool = False
-    model_low: str = Field(default="", max_length=300)
-    model_min: str = Field(default="", max_length=300)
-    model_max: str = Field(default="", max_length=300)
     model_name: str = Field(default="", max_length=300)
     dimensions: int = Field(default=0, ge=0, le=65536)
     pass_dimensions: bool = True
     enabled: bool = False
     settings: ModelRuntimeSettingsPayload = Field(default_factory=ModelRuntimeSettingsPayload)
+
+
+class ProviderModelSettingsPayload(BaseModel):
+    """单个模型的超参数（温度 / top_p / top_k / 思考 / 上下文等）。"""
+
+    temperature: float = Field(default=0.7, ge=0, le=2)
+    top_p: float = Field(default=0.95, gt=0, le=1)
+    top_k: int | None = Field(default=None, ge=1, le=128)
+    max_tokens: int = Field(default=0, ge=0, le=1048576)
+    max_retries: int = Field(default=3, ge=0, le=10)
+    context_size: int = Field(default=128000, ge=1024, le=10485760)
+    timeout_seconds: float = Field(default=600, ge=1, le=3600)
+    thinking_enabled: bool = True
+    thinking_budget: int = Field(default=0, ge=0, le=1048576)
+
+
+class ProviderModelPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=300)
+    enabled: bool = True
+    vision: bool = False
+    settings: ProviderModelSettingsPayload = Field(
+        default_factory=ProviderModelSettingsPayload,
+    )
+
+
+class ProviderModelUpdatePayload(BaseModel):
+    """更新单个模型；``model`` 指定目标模型名，省略字段保持不变。"""
+
+    model: str = Field(min_length=1, max_length=300)
+    name: str | None = Field(default=None, min_length=1, max_length=300)
+    enabled: bool | None = None
+    vision: bool | None = None
+    settings: ProviderModelSettingsPayload | None = None
+
+
+class LLMProviderPayload(BaseModel):
+    """供应商端点（添加向导产物：凭据 + 启用工具 + 初始模型列表）。"""
+
+    name: str = Field(min_length=2, max_length=80)
+    provider: str = Field(min_length=2, max_length=32)
+    api_style: str = Field(pattern="^(chat_completions|responses|anthropic|gemini)$")
+    base_url: str = Field(default="", max_length=500)
+    gateway_mode: str = Field(default="base_url", pattern="^(base_url|full_endpoint)$")
+    enabled_tools: list[str] = Field(default_factory=list, max_length=8)
+    api_key: str | None = Field(default=None, max_length=4096)
+    clear_api_key: bool = False
+    enabled: bool = False
+    models: list[ProviderModelPayload] = Field(default_factory=list, max_length=64)
+
+
+class ProbeModelsRequest(BaseModel):
+    provider: str = Field(min_length=2, max_length=32)
+    base_url: str = Field(default="", max_length=500)
+    api_key: str = Field(default="", max_length=4096)
 
 
 # ── 前次任务上下文构建（"再打一次"重跑用）──
@@ -1573,11 +1631,30 @@ async def superadmin_delete_user(user_id: int, current_user: dict = Depends(get_
     return {"message": "用户已删除"}
 
 
-def _model_payload(data: ModelAPIConfigPayload) -> dict[str, Any]:
+def _provider_payload(data: LLMProviderPayload) -> dict[str, Any]:
     payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
     fields_set = getattr(data, "model_fields_set", getattr(data, "__fields_set__", set()))
-    if "settings" not in fields_set:
-        payload.pop("settings", None)
+    for key in ("api_key", "clear_api_key"):
+        if key not in fields_set:
+            payload.pop(key, None)
+    return payload
+
+
+def _model_entry_payload(
+    data: ProviderModelPayload | ProviderModelUpdatePayload,
+) -> dict[str, Any]:
+    """创建用全量 dump；更新用 exclude_unset（仅提交显式修改的字段）。"""
+    if isinstance(data, ProviderModelUpdatePayload):
+        return data.model_dump(exclude_unset=True)
+    return data.model_dump()
+
+
+def _embedding_payload(data: EmbeddingConfigPayload) -> dict[str, Any]:
+    payload = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+    fields_set = getattr(data, "model_fields_set", getattr(data, "__fields_set__", set()))
+    for key in ("api_key", "clear_api_key"):
+        if key not in fields_set:
+            payload.pop(key, None)
     return payload
 
 
@@ -1590,40 +1667,222 @@ async def _reload_embedding_after_change(category: str) -> dict[str, Any] | None
     return rag.status()
 
 
+# ══════════════════════════════════════════════════
+# 大模型供应商管理（v2：供应商 → 模型列表 → 每模型超参数 → 原生工具）
+# ══════════════════════════════════════════════════
+
+@app.get("/api/superadmin/providers/catalog")
+async def superadmin_provider_catalog(current_user: dict = Depends(get_current_user)):
+    """内置供应商目录（添加向导第一步：选择供应商）。"""
+    _require_superadmin(current_user)
+    return {"providers": provider_catalog()}
+
+
+@app.get("/api/superadmin/model-providers")
+async def superadmin_list_llm_providers(current_user: dict = Depends(get_current_user)):
+    """已配置的 LLM 供应商端点列表。"""
+    _require_superadmin(current_user)
+    providers = await asyncio.to_thread(list_llm_providers)
+    return {"providers": providers}
+
+
+@app.post("/api/superadmin/model-providers", status_code=status.HTTP_201_CREATED)
+async def superadmin_create_llm_provider(
+    data: LLMProviderPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_superadmin(current_user)
+    try:
+        provider = await asyncio.to_thread(
+            create_llm_provider, _provider_payload(data), current_user["id"],
+        )
+        return {"provider": provider}
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/superadmin/model-providers/{provider_id}")
+async def superadmin_update_llm_provider(
+    provider_id: int,
+    data: LLMProviderPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_superadmin(current_user)
+    try:
+        provider = await asyncio.to_thread(
+            update_llm_provider, provider_id, _provider_payload(data), current_user["id"],
+        )
+        return {"provider": provider}
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/superadmin/model-providers/{provider_id}")
+async def superadmin_delete_llm_provider(
+    provider_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_superadmin(current_user)
+    try:
+        await asyncio.to_thread(delete_llm_provider, provider_id, current_user["id"])
+        return {"message": "模型供应商配置已删除"}
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/superadmin/model-providers/probe-models")
+async def superadmin_probe_models(
+    data: ProbeModelsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """向导第三步：按填写的凭据访问供应商 models 端点拉取模型列表。"""
+    _require_superadmin(current_user)
+    try:
+        result = await asyncio.to_thread(
+            fetch_provider_models, data.provider, data.base_url, data.api_key,
+        )
+        return result
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/superadmin/model-providers/{provider_id}/probe-models")
+async def superadmin_probe_models_saved(
+    provider_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """编辑对话框：用已保存凭据重新拉取该供应商的模型列表。"""
+    _require_superadmin(current_user)
+    try:
+        saved = await asyncio.to_thread(
+            get_llm_provider, provider_id, include_secret=True,
+        )
+        if saved is None:
+            raise HTTPException(status_code=404, detail="模型 API 配置不存在")
+        result = await asyncio.to_thread(
+            fetch_provider_models,
+            saved["provider"], saved.get("base_url") or "", saved.get("api_key") or "",
+        )
+        return result
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/superadmin/model-providers/{provider_id}/models", status_code=status.HTTP_201_CREATED)
+async def superadmin_add_provider_model(
+    provider_id: int,
+    data: ProviderModelPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """向导第三步：手动添加模型（或把拉取结果加入供应商）。"""
+    _require_superadmin(current_user)
+    try:
+        model = await asyncio.to_thread(
+            add_provider_model, provider_id, _model_entry_payload(data), current_user["id"],
+        )
+        return {"model": model}
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/superadmin/model-providers/{provider_id}/models")
+async def superadmin_update_provider_model(
+    provider_id: int,
+    data: ProviderModelUpdatePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """更新单个模型的超参数 / 多模态标记 / 启停（body.model 指定目标）。"""
+    _require_superadmin(current_user)
+    payload = _model_entry_payload(data)
+    model_name = str(payload.pop("model", "") or "").strip()
+    if not model_name:
+        raise HTTPException(status_code=422, detail="缺少目标模型名称 model")
+    try:
+        model = await asyncio.to_thread(
+            update_provider_model, provider_id, model_name, payload, current_user["id"],
+        )
+        return {"model": model}
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/superadmin/model-providers/{provider_id}/models")
+async def superadmin_delete_provider_model(
+    provider_id: int,
+    model: str,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_superadmin(current_user)
+    try:
+        await asyncio.to_thread(
+            delete_provider_model, provider_id, model, current_user["id"],
+        )
+        return {"message": f"模型 {model} 已删除"}
+    except ModelRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/model-providers")
+async def model_providers(current_user: dict = Depends(get_current_user)):
+    """返回已启用 LLM 供应商（含可用模型列表），供任务创建页选择。
+
+    ``id`` 为运行时标识：provider 唯一时即 provider 名；同一 provider
+    存在多条启用配置时为 ``provider::配置ID``。``models`` 为模型名列表
+    （向后兼容字符串数组），``models_detail`` 额外携带 vision 标记。
+    """
+    del current_user
+    providers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in await asyncio.to_thread(active_llm_providers, usable_only=True):
+        runtime_key = str(item.get("runtime_key") or item["provider"])
+        if runtime_key in seen:
+            continue
+        seen.add(runtime_key)
+        detail = [
+            {"name": m.get("name"), "vision": bool(m.get("vision"))}
+            for m in (item.get("models_detail") or [])
+        ]
+        providers.append({
+            "id": runtime_key,
+            "label": item["name"],
+            "provider": item["provider"],
+            "api_style": item["api_style"],
+            "builtin": item["provider"] in {"deepseek", "qwen", "zhipu"},
+            "models": item.get("models") or [],
+            "models_detail": detail,
+            "vision_model": item.get("vision_model") or "",
+        })
+    return {"providers": providers}
+
+
+# ══════════════════════════════════════════════════
+# 嵌入模型管理（保留旧接口；LLM 已迁移到 model-providers）
+# ══════════════════════════════════════════════════
+
 @app.get("/api/superadmin/model-configs")
 async def superadmin_model_configs(
     category: str | None = None,
     current_user: dict = Depends(get_current_user),
 ):
     _require_superadmin(current_user)
-    if category not in {None, "llm", "embedding"}:
-        raise HTTPException(status_code=422, detail="category 仅支持 llm 或 embedding")
-    configs = await asyncio.to_thread(list_model_configs, category)
+    if category not in {None, "embedding"}:
+        raise HTTPException(
+            status_code=422,
+            detail="LLM 配置已迁移到 /api/superadmin/model-providers；category 仅支持 embedding",
+        )
+    configs = await asyncio.to_thread(list_embedding_configs)
     return {"configs": configs}
-
-
-@app.get("/api/model-providers")
-async def model_providers(current_user: dict = Depends(get_current_user)):
-    """仅返回 Web 模型注册表中已启用的 Provider。"""
-    del current_user
-    providers: dict[str, dict[str, Any]] = {}
-    for item in await asyncio.to_thread(active_llm_providers):
-        providers[item["provider"]] = {
-            "id": item["provider"], "label": item["name"],
-            "api_style": item["api_style"], "builtin": item["provider"] in {"deepseek", "qwen", "zhipu"},
-        }
-    return {"providers": list(providers.values())}
 
 
 @app.post("/api/superadmin/model-configs", status_code=status.HTTP_201_CREATED)
 async def superadmin_create_model_config(
-    data: ModelAPIConfigPayload,
+    data: EmbeddingConfigPayload,
     current_user: dict = Depends(get_current_user),
 ):
     _require_superadmin(current_user)
-    payload = _model_payload(data)
+    payload = _embedding_payload(data)
     try:
-        config = await asyncio.to_thread(create_model_config, payload, current_user["id"])
+        config = await asyncio.to_thread(create_embedding_config, payload, current_user["id"])
         rag_status = await _reload_embedding_after_change(config["category"])
         return {"config": config, "rag_status": rag_status}
     except ModelRegistryError as exc:
@@ -1633,14 +1892,14 @@ async def superadmin_create_model_config(
 @app.put("/api/superadmin/model-configs/{config_id}")
 async def superadmin_update_model_config(
     config_id: int,
-    data: ModelAPIConfigPayload,
+    data: EmbeddingConfigPayload,
     current_user: dict = Depends(get_current_user),
 ):
     _require_superadmin(current_user)
-    payload = _model_payload(data)
+    payload = _embedding_payload(data)
     try:
         config = await asyncio.to_thread(
-            update_model_config, config_id, payload, current_user["id"],
+            update_embedding_config, config_id, payload, current_user["id"],
         )
         rag_status = await _reload_embedding_after_change(config["category"])
         return {"config": config, "rag_status": rag_status}
@@ -1654,18 +1913,17 @@ async def superadmin_delete_model_config(
     current_user: dict = Depends(get_current_user),
 ):
     _require_superadmin(current_user)
-    existing = await asyncio.to_thread(get_model_config, config_id)
+    existing = await asyncio.to_thread(get_embedding_config, config_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="模型 API 配置不存在")
     try:
-        await asyncio.to_thread(delete_model_config, config_id, current_user["id"])
+        await asyncio.to_thread(delete_embedding_config, config_id, current_user["id"])
         rag_status = await _reload_embedding_after_change(existing["category"])
         return {"message": "模型 API 配置已删除", "rag_status": rag_status}
     except ModelRegistryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-# ── 路由 ──
 @app.get("/", response_class=HTMLResponse)
 @app.get("/index.html", response_class=HTMLResponse)
 async def index():
@@ -1797,16 +2055,36 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         get_workspace_service().ensure_capacity()
     except WorkspaceCapacityError as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
-    fields_set = getattr(req, "model_fields_set", set())
-    model_level = "Max" if req.provider == "zhipu" and "model" not in fields_set else req.model
-    enabled_providers = {
-        item["provider"] for item in await asyncio.to_thread(active_llm_providers)
-    }
-    if req.provider not in enabled_providers:
+    model_field = (req.model or "").strip()
+    enabled_configs = await asyncio.to_thread(active_llm_providers)
+    enabled_keys = {item["runtime_key"] for item in enabled_configs}
+    if req.provider not in enabled_keys:
         raise HTTPException(
             status_code=422,
-            detail=f"模型提供商未在 Web 管理中启用：{req.provider}",
+            detail=f"模型配置未在 Web 管理中启用：{req.provider}",
         )
+    enabled_entry = next(
+        (item for item in enabled_configs if item.get("runtime_key") == req.provider),
+        None,
+    )
+    enabled_models = list((enabled_entry or {}).get("models") or [])
+    thinking_intensity = (req.thinking_intensity or "medium").strip().lower()
+    if model_field in {"Low", "Min", "Max"}:
+        # workbench / CLI 脚本把思考级别放进 model 字段：映射为该配置对应
+        # 档位的具体模型（Min=首个、Max=第二、Low=第三，缺失顺延首个），
+        # 并按 CLI 时代语义推导思考强度。
+        idx = {"Min": 0, "Max": 1, "Low": 2}[model_field]
+        model_key = (
+            enabled_models[idx] if len(enabled_models) > idx
+            else (enabled_models[0] if enabled_models else "")
+        )
+        thinking_intensity = {"Low": "off", "Min": "medium", "Max": "high"}[model_field]
+    elif not model_field:
+        # 未显式选择具体模型：解析为该供应商配置的默认（首个启用）模型，
+        # 落库真实模型名让会话展示不退回"默认模型"兜底文案。
+        model_key = str((enabled_entry or {}).get("model_name") or "")
+    else:
+        model_key = model_field
     # target 可以是直接输入的网络目标，也可以是上传文件返回的路径。
     # 当 attachment_target 存在时，target 明确表示网络授权目标，附件只
     # 作为本地分析对象传入 run_mission，二者不再互相覆盖。
@@ -1823,7 +2101,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     async with _session_creation_lock:
         fingerprint = (
             current_user["id"], authorized_target, execution_target, req.goal.strip(),
-            req.provider, model_level, req.source_session_id or "",
+            req.provider, model_key, req.source_session_id or "",
         )
         now = time.monotonic()
         # 清除过期请求指纹，限制内存增长。
@@ -1861,8 +2139,9 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         await ps.submit([
             session_create_operation(
                 session_id, user_id=current_user["id"], target=authorized_target,
-                goal=req.goal, provider=req.provider, model=model_level,
+                goal=req.goal, provider=req.provider, model=model_key,
                 title=f"[{session_id[:8]}] 安全测试任务",
+                thinking_intensity=thinking_intensity,
             ),
             target_info_operation(session_id, {
                 "authorized_target": authorized_target,
@@ -1894,13 +2173,16 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     # 推送启动事件
     callback("mission_start", target=authorized_target, goal=req.goal,
              attachment_target=attachment_target or "",
-             provider=req.provider, model=model_level, qwen_tool_call_mode=req.qwen_tool_call_mode)
+             provider=req.provider, model=model_key,
+             qwen_tool_call_mode=req.qwen_tool_call_mode,
+             thinking_intensity=thinking_intensity)
 
     # 创建后台任务
     task = asyncio.create_task(
-        _run_and_cleanup(session_id, ctx, execution_target, req.goal, model_level, req.provider, callback,
+        _run_and_cleanup(session_id, ctx, execution_target, req.goal, model_key, req.provider, callback,
                          initial_context=initial_context, nss_context=req.nss_context,
                          slab_context=req.slab_context,
+                         thinking_intensity=thinking_intensity,
                          qwen_tool_call_mode=req.qwen_tool_call_mode,
                          authorized_target=(authorized_target if attachment_target else None))
     )
@@ -2612,7 +2894,9 @@ async def resume_session(
              attachment_target=attachment_target or "")
     task = asyncio.create_task(
         _run_and_cleanup(session_id, ctx, execution_target, goal, model, provider, callback,
-                         resume=True, authorized_target=(authorized_target if attachment_target else None)),
+                         resume=True,
+                         thinking_intensity=str(session.get("thinking_intensity") or "medium"),
+                         authorized_target=(authorized_target if attachment_target else None)),
     )
     ctx.task = task
     return {"session_id": session_id, "status": "resumed"}

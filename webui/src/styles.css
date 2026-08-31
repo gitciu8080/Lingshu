@@ -606,3 +606,60 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 .python-package-summary .ok{color:var(--orchestrator)}.python-package-summary .warn{color:var(--analysis)}.python-package-summary .bad{color:var(--accent)}
 .python-package-search{position:relative;display:block;color:var(--dim)}.python-package-search svg{position:absolute;left:8px;top:8px}.python-package-search input{width:100%;padding:7px 8px 7px 27px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--text);font-size:10px;outline:none}.python-package-search input:focus{border-color:var(--accent)}
 .python-package-list{max-height:360px;overflow:auto;margin-top:8px;padding-right:2px}.python-package-row{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:6px 1px;border-bottom:1px solid var(--line2)}.python-package-row>div{min-width:0}.python-package-row b,.python-package-row small{display:block;overflow-wrap:anywhere}.python-package-row b{font:10px ui-monospace,SFMono-Regular,Menlo,monospace}.python-package-row small{margin-top:2px;color:var(--dim);font-size:8px}.python-package-row em{flex:none;font:normal 8px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim);text-align:right}.python-package-row em.matched{color:var(--orchestrator)}.python-package-row em.missing,.python-package-row em.version_mismatch{color:var(--accent)}.python-package-row em.untracked{color:var(--analysis)}
+
+
+/* ── 模型 chips：深色面板配色（与暗色主题一致），尺寸加大 ── */
+.model-chips{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0}
+.model-chip{display:inline-flex;align-items:center;gap:7px;padding:6px 14px;border:1px solid #3a3a3a;border-radius:99px;background:#181818;color:#ccc;font-size:12.5px;font-weight:600}
+.model-chip.vision{border-color:color-mix(in srgb,var(--orchestrator) 55%,#3a3a3a);color:var(--orchestrator)}
+.superadmin-table .model-chip{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;padding:3px 10px}
+.key-invalid{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border:1px solid var(--accent);border-radius:6px;background:var(--soft-red);color:var(--accent);font-weight:800;cursor:help}
+
+/* ── v2 大模型供应商管理（自 Docker 版移植） ── */
+.key-invalid-hint{color:#ff9d6f;border:1px dashed #5a3524;background:#1d1210;padding:7px 10px;border-radius:6px}
+
+/* ── v2 大模型供应商添加向导 ── */
+.wizard-steps{display:flex;gap:6px;margin:0 0 16px;padding:0;list-style:none;flex-wrap:wrap}
+.wizard-steps li{display:flex;align-items:center;gap:6px;padding:5px 11px;border:1px solid #333;border-radius:99px;font-size:10px;color:#777;background:#101010}
+.wizard-steps li i{display:grid;place-items:center;height:16px;width:16px;border-radius:50%;background:#222;font-style:normal;font-size:9px}
+.wizard-steps li.active{border-color:var(--accent);color:#fff}
+.wizard-steps li.active i{background:var(--accent);color:#fff}
+.wizard-steps li.done{color:#aaa}
+.wizard-steps li.done i{background:#2c5c3f;color:#cfe9d8}
+.provider-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:9px}
+.provider-card{display:flex;flex-direction:column;gap:4px;padding:11px 12px;border:1px solid #3c3c3c;border-radius:9px;background:#0d0d0d;color:#ddd;text-align:left;cursor:pointer;transition:.15s}
+.provider-card:hover{border-color:#666}
+.provider-card.selected{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 9%,transparent)}
+.provider-card b{font-size:13px;color:#fff}
+.provider-card small{font-size:9px;color:#888;line-height:1.4}
+.model-probe-row{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.model-probe-row .manual-add{display:flex;gap:6px;flex:1;min-width:220px}
+.model-probe-row input{flex:1}
+.model-chips{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 10px}
+.model-chip{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border:1px solid #3a3a3a;border-radius:99px;background:#181818;color:#ccc;font-size:10px}
+.model-chip.off{opacity:.45;text-decoration:line-through}
+.model-chip.addable{border-style:dashed;border-color:var(--accent);color:var(--accent);cursor:pointer}
+.model-chip.addable:hover{background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.wizard-model-list{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+.wizard-model-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border:1px solid #2e2e2e;border-radius:8px;background:#111}
+.wizard-model-row.off{opacity:.55}
+.wizard-model-row code{font-size:11px;color:#ddd}
+.tool-stack{font-size:10px;color:#9c9c9c}
+.spin{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:700px){.provider-cards{grid-template-columns:1fr 1fr}}
+
+/* 向导第 3 步按钮：显式深色配色，避免回落到浏览器默认白底与文字换行 */
+/* 拉取按钮 / 手动输入框 / 添加按钮统一 38px 高，消除三者大小不一 */
+.model-probe-row .quiet-button,
+.manual-add .quiet-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:38px;padding:0 14px;line-height:1;white-space:nowrap;width:auto;border:1px solid #4a4a4a;border-radius:8px;background:#202020;color:#d6d6d6;font-size:12px;cursor:pointer;transition:.15s}
+.model-probe-row .quiet-button:hover,
+.manual-add .quiet-button:hover{border-color:#777;background:#2a2a2a;color:#fff}
+.model-probe-row .quiet-button:disabled{opacity:.5;cursor:not-allowed}
+.model-chip{white-space:nowrap}
+.model-chip.addable{flex:none}
+.manual-add{gap:8px}
+.manual-add input{flex:1;min-width:140px}
+/* margin:0 抵消 .modal label 的 10px 外边距与 .modal input 的 margin-top，保证与按钮同行等高 */
+.model-probe-row .manual-add{margin:0}
+.model-probe-row .manual-add input{height:38px;padding:0 10px;line-height:normal;margin:0;border-radius:8px}

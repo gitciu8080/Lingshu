@@ -12,6 +12,7 @@ export type Session = {
   model?: string;
   model_level?: string;
   model_name?: string;
+  thinking_intensity?: string;
 };
 export type Event = Record<string, unknown> & {
   seq?: number;
@@ -50,10 +51,12 @@ export type ModelApiConfig = {
   native_tools: string[];
   has_api_key: boolean;
   api_key_masked: string;
+  api_key_status?: "ok" | "invalid" | "unset";
   model_low: string;
   model_min: string;
   model_max: string;
   model_name: string;
+  vision_model?: string;
   dimensions: number;
   pass_dimensions: boolean;
   enabled: boolean;
@@ -76,8 +79,82 @@ export type ModelApiConfigInput = Omit<
 export type ModelProviderOption = {
   id: string;
   label: string;
+  provider?: string;
   api_style: string;
   builtin: boolean;
+  models?: string[];
+  models_detail?: { name: string; vision: boolean }[];
+  vision_model?: string;
+};
+
+// ── v2 供应商管理（core/providers.py 目录驱动） ──
+export type ProviderModelSettings = {
+  temperature: number;
+  top_p: number;
+  top_k: number | null;
+  max_tokens: number;
+  max_retries: number;
+  context_size: number;
+  timeout_seconds: number;
+  thinking_enabled: boolean;
+  thinking_budget: number;
+};
+export type ManagedProviderModel = {
+  name: string;
+  enabled: boolean;
+  vision: boolean;
+  settings: ProviderModelSettings;
+};
+export type ProviderCatalogEntry = {
+  key: string;
+  label: string;
+  driver: string;
+  api_styles: string[];
+  default_api_style: string;
+  default_base_url: string;
+  models_endpoint: string | null;
+  models_probe: string;
+  params: {
+    temperature: boolean;
+    top_p: boolean;
+    top_k: boolean;
+    max_tokens: boolean;
+    thinking_budget: boolean;
+    reasoning_efforts: string[];
+  };
+  native_tools: Record<string, { label: string; description: string; wire: string }>;
+  default_models: string[];
+  default_settings: Record<string, unknown>;
+  docs_url: string;
+};
+export type ManagedProvider = {
+  id: number;
+  name: string;
+  provider: string;
+  api_style: string;
+  base_url: string;
+  gateway_mode: string;
+  enabled_tools: string[];
+  has_api_key: boolean;
+  api_key_masked: string;
+  api_key_status?: "ok" | "invalid" | "unset";
+  enabled: boolean;
+  models: ManagedProviderModel[];
+  enabled_models?: string[];
+  created_at?: string;
+  updated_at?: string;
+};
+export type LLMProviderInput = {
+  name: string;
+  provider: string;
+  api_style: string;
+  base_url: string;
+  gateway_mode: string;
+  enabled_tools: string[];
+  api_key?: string;
+  clear_api_key?: boolean;
+  enabled: boolean;
+  models: ManagedProviderModel[];
 };
 export type ToolStatus = {
   id: string;
@@ -179,6 +256,59 @@ export const api = {
   deleteModelConfig: (id: number) =>
     request<{ message: string; rag_status?: Record<string, unknown> }>(
       `/api/superadmin/model-configs/${encodeURIComponent(String(id))}`,
+      { method: "DELETE" },
+    ),
+  // ── v2 供应商管理 ──
+  providerCatalog: () =>
+    request<{ providers: ProviderCatalogEntry[] }>(
+      "/api/superadmin/providers/catalog",
+    ),
+  llmProviders: () =>
+    request<{ providers: ManagedProvider[] }>("/api/superadmin/model-providers"),
+  createLLMProvider: (data: LLMProviderInput) =>
+    request<{ provider: ManagedProvider }>("/api/superadmin/model-providers", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateLLMProvider: (id: number, data: LLMProviderInput) =>
+    request<{ provider: ManagedProvider }>(
+      `/api/superadmin/model-providers/${encodeURIComponent(String(id))}`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+  deleteLLMProvider: (id: number) =>
+    request<{ message: string }>(
+      `/api/superadmin/model-providers/${encodeURIComponent(String(id))}`,
+      { method: "DELETE" },
+    ),
+  probeModels: (data: { provider: string; base_url: string; api_key: string }) =>
+    request<{ models: string[]; endpoint: string }>(
+      "/api/superadmin/model-providers/probe-models",
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  probeModelsSaved: (id: number) =>
+    request<{ models: string[]; endpoint: string }>(
+      `/api/superadmin/model-providers/${encodeURIComponent(String(id))}/probe-models`,
+      { method: "POST" },
+    ),
+  addProviderModel: (
+    id: number,
+    model: { name: string; enabled?: boolean; vision?: boolean; settings?: Partial<ProviderModelSettings> },
+  ) =>
+    request<{ model: ManagedProviderModel }>(
+      `/api/superadmin/model-providers/${encodeURIComponent(String(id))}/models`,
+      { method: "POST", body: JSON.stringify(model) },
+    ),
+  updateProviderModel: (
+    id: number,
+    payload: { model: string } & Partial<ManagedProviderModel>,
+  ) =>
+    request<{ model: ManagedProviderModel }>(
+      `/api/superadmin/model-providers/${encodeURIComponent(String(id))}/models`,
+      { method: "PUT", body: JSON.stringify(payload) },
+    ),
+  deleteProviderModel: (id: number, model: string) =>
+    request<{ message: string }>(
+      `/api/superadmin/model-providers/${encodeURIComponent(String(id))}/models?model=${encodeURIComponent(model)}`,
       { method: "DELETE" },
     ),
   sessions: async (offset = 0, limit = 30) => {

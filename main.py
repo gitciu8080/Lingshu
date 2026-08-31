@@ -36,9 +36,10 @@ from agentscope.message import UserMsg  # AgentScope 用户消息封装
 from agentscope.types import ReplyFinishedReason
 
 from core.config import RuntimeConfig  # 运行时配置（API Key、超时等，从环境变量读取）
-from LLM.model import (  # 创建 LLM 模型实例（deepseek / qwen）
+from LLM.model import (  # 创建 LLM 模型实例（供应商目录驱动）
     QwenModelUnavailableError,
     create_model,
+    create_vision_model,
     resolve_qwen_model,
 )
 from core.TaskState import MissionState, MissionStore, Phase  # 任务状态、持久化存储、阶段枚举
@@ -693,6 +694,7 @@ async def run_summary_report(
     *,
     provider: str,
     model_ver: str,
+    model_name: str | None = None,
     messages: list[dict],
     event_callback: Callable[[str, dict[str, Any]], None] | None,
     reports_dir: Path,
@@ -736,9 +738,15 @@ async def run_summary_report(
         )
     try:
         runtime = RuntimeConfig.from_env()
+        # 报告使用与主任务相同的模型；思考强度沿用级别映射（旧 Ver 语义），
+        # model_ver 为具体模型名（API 路径）时取 medium。
+        summary_intensity = {"Low": "off", "Min": "medium", "Max": "high"}.get(
+            str(model_ver or ""), "medium",
+        )
         model = create_model(
             provider=provider,
-            Ver=model_ver,
+            model=model_name,
+            thinking_intensity=summary_intensity,
             temperature=0.2,
             web_search=False,
             config=runtime,
@@ -831,6 +839,7 @@ async def _finalize_summary_report(
     *,
     provider: str,
     model_ver: str,
+    model_name: str | None = None,
     messages: list[dict],
     event_callback: Callable[[str, dict[str, Any]], None] | None,
     reports_dir: Path,
@@ -855,6 +864,7 @@ async def _finalize_summary_report(
             mission,
             provider=provider,
             model_ver=model_ver,
+            model_name=model_name,
             messages=messages,
             event_callback=event_callback,
             reports_dir=reports_dir,
@@ -1368,6 +1378,8 @@ async def run_mission(
     resume: bool = False,
     user_id: int | None = None,
     authorized_target: str | None = None,
+    model_name: str | None = None,
+    thinking_intensity: str = "medium",
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
@@ -2160,7 +2172,13 @@ async def run_mission(
 
         # 创建共享模型；Qwen 的纯文本温度沿用这里的配置，工具调用由模型
         # 适配层固定为 0.1。
-        model = create_model(provider=provider, Ver=model_ver, temperature=None, config=runtime)
+        model = create_model(
+            provider=provider,
+            model=model_name,
+            thinking_intensity=thinking_intensity,
+            temperature=None,
+            config=runtime,
+        )
         # 视觉模型只在文件/视觉题型存在实际需求时创建；网络任务不会再因空
         # Workspace 默认承担额外模型和 schema 上下文。
         vision_model = None
@@ -2176,24 +2194,13 @@ async def run_mission(
             or visual_signal
             or bool(initial_categories.intersection({"forensics", "misc", "osint", "ai-ml"}))
         )
-        if (
-            needs_vision
-            and runtime.get_api_key("deepseek")
-            and runtime.get_base_url("deepseek")
-        ):
+        if needs_vision:
+            # 视觉模型由模型注册表驱动：任意登记了多模态模型（vision_models）
+            # 的启用配置均可充当；未登记时回退 .env 的 DeepSeek 视觉模型。
             try:
-                vision_model = create_model(
-                    provider="deepseek",
-                    Ver="Min",
-                    temperature=None,
-                    web_search=False,
-                    model_name=runtime.deepseek_vision_model,
-                    thinking_intensity="medium",
-                    vision=True,
-                    config=runtime,
-                )
-            except (TypeError, ValueError) as exc:
-                logger.warning("DeepSeek 视觉模型初始化失败，本任务不挂载视觉工具: %s", exc)
+                vision_model = create_vision_model(runtime)
+            except Exception as exc:  # noqa: BLE001 - 视觉失败不阻断任务
+                logger.warning("视觉模型初始化失败，本任务不挂载视觉工具: %s", exc)
 
         # 图片只允许来自本会话 Workspace；文件类任务还允许其上传/解压目录。
         # API 网络任务不暴露共享 WorkDir，防止跨会话读取扫描产物。
@@ -3237,6 +3244,7 @@ async def run_mission(
             mission,
             provider=provider,
             model_ver=model_ver,
+            model_name=model_name,
             messages=_runtime_messages,
             event_callback=event_callback,
             reports_dir=_SUMMARY_REPORTS_DIR,
@@ -3270,6 +3278,7 @@ async def run_mission(
             mission,
             provider=provider,
             model_ver=model_ver,
+            model_name=model_name,
             messages=_runtime_messages,
             event_callback=event_callback,
             reports_dir=_SUMMARY_REPORTS_DIR,
@@ -3291,6 +3300,7 @@ async def run_mission(
                 mission,
                 provider=provider,
                 model_ver=model_ver,
+                model_name=model_name,
                 messages=_runtime_messages,
                 event_callback=event_callback,
                 reports_dir=_SUMMARY_REPORTS_DIR,

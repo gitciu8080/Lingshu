@@ -73,12 +73,20 @@ NSS_FLAG_PATTERN = re.compile(r"NSSCTF\{[^{}\r\n]+\}")
 
 
 def _resolve_model_level(provider: str, requested: str | None) -> str:
-    """解析推理强度：Zhipu/GLM 默认 Max，其它 Provider 默认 Min。"""
+    """解析 -m 参数：思考级别（Low/Min/Max）或具体模型名。
+
+    级别由后端映射为该配置对应档位的具体模型与思考强度（Min=首个、
+    Max=第二、Low=第三）；具体模型名原样透传，配合 --thinking 指定强度。
+    未指定时 Zhipu/GLM 默认 Max，其它 Provider 默认 Min。
+    """
     if requested:
-        if requested not in {"Low", "Min", "Max"}:
-            raise ValueError("推理强度仅支持 Low、Min、Max")
+        # Low/Min/Max（后端映射档位模型与强度）或具体模型名，均原样透传
         return requested
     return "Max" if provider.strip().lower() == "zhipu" else "Min"
+
+
+def _is_model_level(value: str | None) -> bool:
+    return str(value or "").strip() in {"Low", "Min", "Max"}
 
 
 def _mask_token(token: str) -> str:
@@ -278,6 +286,7 @@ async def _start_session(
     provider: str,
     model: str,
     nss_context: dict | None = None,
+    thinking: str | None = None,
 ) -> dict:
     """通过 /api/session/start 创建会话，返回 {session_id, ...}。"""
     headers = {"Authorization": f"Bearer {token}"}
@@ -290,6 +299,8 @@ async def _start_session(
                 "goal": goal,
                 "provider": provider,
                 "model": model,
+                # -m 为具体模型名时显式携带思考强度；级别模式由后端按级别映射
+                **({"thinking_intensity": thinking} if thinking else {}),
                 "nss_context": nss_context,
             },
         )
@@ -387,6 +398,7 @@ async def _solve_attempt(
     provider: str,
     model: str,
     retries: int,
+    thinking: str | None = None,
 ) -> bool:
     attempt_id = attempt.get("id")
     problem = attempt.get("problem") or {}
@@ -445,7 +457,7 @@ async def _solve_attempt(
         try:
             start = await _start_session(
                 api_url, web_token, target, goal, provider, model,
-                nss_context=nss_context,
+                nss_context=nss_context, thinking=thinking,
             )
         except Exception as exc:
             print(f"[workbench] 创建 Web 会话失败: {exc}")
@@ -732,6 +744,7 @@ async def _play_round(
     provider: str,
     model: str,
     retries: int,
+    thinking: str | None = None,
 ) -> bool | None:
     """领取/复用一道题并处理。返回 True 解出 / False 未解出 / None 无题。"""
     headers = {"Authorization": f"Bearer {nss_token}", "Content-Type": "application/json"}
@@ -762,7 +775,7 @@ async def _play_round(
     print(f"[workbench] 当前题目状态: {state} (reused={data.get('reused', False)})")
     return await _solve_attempt(
         api_url, web_token, nss_client, nss_token,
-        attempt, provider, model, retries,
+        attempt, provider, model, retries, thinking=thinking,
     )
 
 
@@ -802,10 +815,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model", "-m", default=DEFAULT_MODEL or None,
-        choices=["Low", "Min", "Max"],
         help=(
-            "思考级别：Zhipu/GLM 默认 Max，其它 Provider 默认 Min；"
+            "思考级别（Low/Min/Max，映射该配置对应档位模型；Zhipu/GLM 默认 "
+            "Max，其它默认 Min）或具体模型名（如 deepseek-v4-flash-vision-exp）；"
             "也可用 NSS_MODEL_LEVEL 设置"
+        ),
+    )
+    parser.add_argument(
+        "--thinking", default=None,
+        choices=["off", "low", "medium", "high"],
+        help=(
+            "思考强度覆盖（off/low/medium/high）。-m 为级别时后端自动映射，"
+            "无需传；-m 为具体模型名时建议显式指定（默认 medium）"
         ),
     )
     parser.add_argument(
@@ -861,6 +882,7 @@ async def main() -> None:
             outcome = await _play_round(
                 args.api_url, web_token, nss_client, nss_token,
                 args.provider, args.model, args.retries,
+                thinking=args.thinking,
             )
             if outcome is None:
                 break

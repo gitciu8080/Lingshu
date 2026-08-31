@@ -6,6 +6,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from typing import Any
 from pathlib import Path
 
 
@@ -66,7 +67,6 @@ class RuntimeConfig:
     deepseek_model_low: str = "deepseek-v4-flash"       # 低推理（chat 已弃用合并为 flash）
     deepseek_model_min: str = "deepseek-v4-flash"       # 默认
     deepseek_model_max: str = "deepseek-v4-pro"         # 深度推理
-    deepseek_vision_model: str = "deepseek-v4-flash-vision-exp"
     deepseek_web_search: bool = False                   # Responses API 服务端联网搜索开关
     # V4 Flash / Pro 均走 OpenAI Responses 协议；可由环境变量覆盖，兼容
     # 尚未提供 Responses 端点的私有网关。
@@ -109,6 +109,9 @@ class RuntimeConfig:
     embedding_model: str = ""
     embedding_dimensions: int = 0
     embedding_pass_dimensions: bool = True
+    # base_url: SDK 自动向 {base_url}/embeddings 发请求；
+    # full_endpoint: 注册地址即完整 embeddings 端点，请求发往根路径。
+    embedding_gateway_mode: str = "base_url"
     embedding_model_settings: dict[str, object] = field(default_factory=dict)
 
     command_timeout: int = 300
@@ -149,9 +152,6 @@ class RuntimeConfig:
             deepseek_model_low=os.getenv("DEEPSEEK_MODEL_LOW", "deepseek-v4-flash"),
             deepseek_model_min=os.getenv("DEEPSEEK_MODEL_MIN", "deepseek-v4-flash"),
             deepseek_model_max=os.getenv("DEEPSEEK_MODEL_MAX", "deepseek-v4-pro"),
-            deepseek_vision_model=os.getenv(
-                "DEEPSEEK_VISION_MODEL", "deepseek-v4-flash-vision-exp",
-            ),
             deepseek_web_search=os.getenv("DEEPSEEK_WEB_SEARCH", "0").strip().lower()
             in ("1", "true", "yes", "on"),
             deepseek_responses_models=tuple(
@@ -192,6 +192,9 @@ class RuntimeConfig:
             embedding_dimensions=max(0, int(os.getenv("LINGSHU_EMBEDDING_DIMENSIONS", "0"))),
             embedding_pass_dimensions=os.getenv("LINGSHU_EMBEDDING_PASS_DIMENSIONS", "1").strip().lower()
             in ("1", "true", "yes", "on"),
+            embedding_gateway_mode=os.getenv(
+                "LINGSHU_EMBEDDING_GATEWAY_MODE", "base_url",
+            ).strip().lower(),
             # 通用
             command_timeout=max(10, min(int(os.getenv("LINGSHU_COMMAND_TIMEOUT", "300")), 600)),
             # Workspace 模式：默认 local；legacy 仅用于打开旧会话
@@ -251,32 +254,112 @@ class RuntimeConfig:
         except KeyError as exc:
             raise ValueError(f"不支持的思考级别: {version}，可选 Low/Min/Max") from exc
 
+    def _llm_entry(self, provider: str) -> dict[str, object] | None:
+        """查注册表条目：键为 provider 或 provider::配置ID。
+
+        ``provider::id`` 形态的键精确命中 custom_llm_configs；纯 provider
+        键在多条启用时由注册表层解析为首条启用配置，不会落到这里。
+        """
+        entry = self.custom_llm_configs.get(provider)
+        if entry is not None:
+            return entry
+        if "::" in provider:
+            base = provider.split("::", 1)[0]
+            return self.custom_llm_configs.get(base)
+        return None
+
     def model_settings(self, provider: str) -> dict[str, object]:
         """返回管理员为对应提供商启用的 AgentScope 构造/生成参数。"""
+        entry = self._llm_entry(provider)
+        if entry is not None:
+            return dict(entry.get("settings") or {})
         if provider == "qwen":
             return self.qwen_model_settings
         if provider == "deepseek":
             return self.deepseek_model_settings
         if provider == "zhipu":
             return self.zhipu_model_settings
-        return dict(self.custom_llm_configs.get(provider, {}).get("settings") or {})
+        return {}
 
     def get_api_key(self, provider: str) -> str:
-        """返回对应提供商的 API Key。"""
+        """返回对应提供商（或 provider::配置ID）的 API Key。"""
+        entry = self._llm_entry(provider)
+        if entry is not None:
+            return str(entry.get("api_key") or "")
         if provider == "qwen":
             return self.qwen_api_key
         if provider == "zhipu":
             return self.zhipu_api_key
         if provider != "deepseek":
-            return str(self.custom_llm_configs.get(provider, {}).get("api_key") or "")
+            return ""
         return self.deepseek_api_key
 
     def get_base_url(self, provider: str) -> str:
-        """返回对应提供商的 Base URL。"""
+        """返回对应提供商（或 provider::配置ID）的 Base URL。"""
+        entry = self._llm_entry(provider)
+        if entry is not None:
+            return str(entry.get("base_url") or "")
         if provider == "qwen":
             return self.qwen_base_url
         if provider == "zhipu":
             return self.zhipu_base_url
         if provider != "deepseek":
-            return str(self.custom_llm_configs.get(provider, {}).get("base_url") or "")
+            return ""
         return self.deepseek_base_url
+
+    def resolve_llm_entry(self, key: str) -> dict[str, Any] | None:
+        """把运行时 key（provider 或 provider::配置ID）解析为统一条目。
+
+        注册表条目直接返回；内置 provider（deepseek/zhipu/qwen）在注册表
+        未启用时按 .env 字段合成等价条目，保证旧部署路径可用。
+        """
+        from core.providers import get_provider_spec  # 延迟导入避免环
+
+        entry = self._llm_entry(key)
+        if entry is not None:
+            resolved = dict(entry)
+            resolved.setdefault("gateway_mode", "base_url")
+            resolved.setdefault("native_tools", [])
+            resolved.setdefault("models", [])
+            resolved["model_name"] = (resolved.get("models") or [str(resolved.get("model_name") or "")])[0]
+            return resolved
+        base = str(key or "").strip().lower()
+        if "::" in base:
+            base = base.split("::", 1)[0]
+        spec = get_provider_spec(base)
+        if spec is None or base not in {"deepseek", "zhipu", "qwen"}:
+            return None
+        models: list[str] = []
+        if base == "deepseek":
+            models = [m for m in (self.deepseek_model_min, self.deepseek_model_max, self.deepseek_model_low) if m]
+            api_style = "responses" if base in self.deepseek_responses_models or self.deepseek_responses_models else (
+                "responses" if self.deepseek_responses_models else "chat_completions"
+            )
+            return {
+                "id": 0, "name": spec["label"], "provider": base,
+                "api_style": "responses" if self.deepseek_responses_models else "chat_completions",
+                "base_url": self.deepseek_base_url, "api_key": self.deepseek_api_key,
+                "gateway_mode": self.deepseek_gateway_mode,
+                "native_tools": list(self.deepseek_native_tools),
+                "settings": dict(self.deepseek_model_settings), "models": models,
+                "model_name": models[0] if models else self.deepseek_model_min,
+            }
+        if base == "zhipu":
+            models = [m for m in (self.zhipu_model_min, self.zhipu_model_max, self.zhipu_model_low) if m]
+            return {
+                "id": 0, "name": spec["label"], "provider": base,
+                "api_style": "responses" if self.zhipu_responses_models else "chat_completions",
+                "base_url": self.zhipu_base_url, "api_key": self.zhipu_api_key,
+                "gateway_mode": self.zhipu_gateway_mode,
+                "native_tools": list(self.zhipu_native_tools),
+                "settings": dict(self.zhipu_model_settings), "models": models,
+                "model_name": models[0] if models else self.zhipu_model_min,
+            }
+        return {
+            "id": 0, "name": spec["label"], "provider": "qwen",
+            "api_style": "chat_completions",
+            "base_url": self.qwen_base_url, "api_key": self.qwen_api_key,
+            "gateway_mode": "base_url", "native_tools": [],
+            "settings": dict(self.qwen_model_settings), "models": [self.qwen_model],
+            "model_name": self.qwen_model,
+        }
