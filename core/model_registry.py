@@ -12,6 +12,9 @@
 
 - API Key 使用 Fernet 加密后存储（``api_key_ciphertext``），列表/API 永不
   返回明文；加密密钥来自 ``LINGSHU_MODEL_CONFIG_KEY`` 或 ``data/model_api.key``。
+- providers[] 条目携带 ``owner_id``（null=平台池，整数=用户私有池）：普通用户
+  仅可见/可用自己的私有池；超级管理员额外可见平台池；CLI（无用户上下文）
+  仅平台池。embeddings[] 保持全局语义，不划分归属。
 - 历史遗留的 v1 扁平 ``configs`` 结构在首次读取时自动升级为 v2，并把
   原文件备份为 ``model_api_configs.v1-<时间戳>.bak.json``；更早的
   ``users.db`` 模型表沿用既有的一次性迁移入口。
@@ -55,6 +58,37 @@ _MODEL_NAME_MAX = 300
 _MAX_MODELS_PER_PROVIDER = 64
 _PROBE_TIMEOUT = 15.0
 _AUDIT_KEEP = 500
+_UNSET: Any = object()  # 作用域哨兵：_UNSET=不过滤（旧行为）；显式 None=仅平台池（CLI）
+
+
+def _owner_visible(
+    item: dict[str, Any], owner_user_id: int | None, owner_is_superadmin: bool,
+) -> bool:
+    """按作用域判断 provider 条目对调用方是否可见。
+
+    - 无用户上下文（CLI）：仅平台池（owner_id 为 null）；
+    - 普通用户：仅自己的私有池；
+    - 超级管理员：平台池 + 自己的私有池。
+    """
+    owner = item.get("owner_id")
+    if owner_user_id is None:
+        return owner is None
+    if owner is None:
+        return owner_is_superadmin
+    return int(owner) == int(owner_user_id)
+
+
+def _require_provider_owner(
+    item: dict[str, Any], actor_user_id: int | None, actor_is_superadmin: bool,
+) -> None:
+    """变更类操作的归属校验；未提供执行者上下文时保持旧行为（不校验）。"""
+    if actor_user_id is None:
+        return
+    if actor_is_superadmin:
+        return
+    owner = item.get("owner_id")
+    if owner is None or int(owner) != int(actor_user_id):
+        raise ModelRegistryError("无权访问该模型配置")
 
 
 class ModelRegistryError(ValueError):
@@ -536,13 +570,32 @@ def provider_catalog() -> list[dict[str, Any]]:
     return catalog_for_client()
 
 
-def list_llm_providers() -> list[dict[str, Any]]:
+def _name_taken(
+    data: dict[str, Any], name: str, owner_id: int | None, exclude_id: int = 0,
+) -> bool:
+    """配置名称在同一个归属池内唯一（跨用户可重名，仅作展示标签）。"""
+    for item in data["providers"]:
+        if int(item["id"]) == int(exclude_id):
+            continue
+        if item.get("name") == name and item.get("owner_id", None) == owner_id:
+            return True
+    return False
+
+
+def list_llm_providers(
+    *,
+    owner_user_id: Any = _UNSET,
+    owner_is_superadmin: bool = False,
+) -> list[dict[str, Any]]:
     with _LOCK:
         data = _read_unlocked()
-        items = sorted(
-            (dict(p) for p in data["providers"]),
-            key=lambda p: (not p.get("enabled"), -int(p["id"])),
-        )
+        items = [dict(p) for p in data["providers"]]
+        if owner_user_id is not _UNSET:
+            items = [
+                p for p in items
+                if _owner_visible(p, owner_user_id, owner_is_superadmin)
+            ]
+        items.sort(key=lambda p: (not p.get("enabled"), -int(p["id"])))
         items = [_mask_provider(item) for item in items]
         for item in items:
             item["enabled_models"] = [
@@ -557,11 +610,18 @@ def _find_provider(data: dict[str, Any], provider_id: int) -> dict[str, Any] | N
     )
 
 
-def get_llm_provider(provider_id: int, *, include_secret: bool = False) -> dict[str, Any] | None:
+def get_llm_provider(
+    provider_id: int,
+    *,
+    include_secret: bool = False,
+    actor_user_id: int | None = None,
+    actor_is_superadmin: bool = False,
+) -> dict[str, Any] | None:
     with _LOCK:
         item = _find_provider(_read_unlocked(), provider_id)
         if item is None:
             return None
+        _require_provider_owner(item, actor_user_id, actor_is_superadmin)
         item = dict(item)
         if include_secret:
             output = dict(item)
@@ -570,14 +630,17 @@ def get_llm_provider(provider_id: int, *, include_secret: bool = False) -> dict[
         return _mask_provider(item)
 
 
-def create_llm_provider(payload: dict[str, Any], actor_id: int) -> dict[str, Any]:
+def create_llm_provider(
+    payload: dict[str, Any], actor_id: int, owner_id: int | None = None,
+) -> dict[str, Any]:
     normalized = _normalize_provider(payload)
     secret = str(payload.get("api_key") or "").strip()
     spec = get_provider_spec(normalized["provider"])
     assert spec is not None
+    owner: int | None = int(owner_id) if owner_id is not None else None
     with _LOCK:
         data = _read_unlocked()
-        if any(p.get("name") == normalized["name"] for p in data["providers"]):
+        if _name_taken(data, normalized["name"], owner):
             raise ModelRegistryError("配置名称已存在")
         provider_id = int(data["next_provider_id"])
         data["next_provider_id"] = provider_id + 1
@@ -594,6 +657,7 @@ def create_llm_provider(payload: dict[str, Any], actor_id: int) -> dict[str, Any
         now = _now()
         item = {
             "id": provider_id, **normalized,
+            "owner_id": owner,
             "api_key_ciphertext": _encrypt(secret),
             "api_key_hint": secret[-4:] if secret else "",
             "models": models,
@@ -605,7 +669,14 @@ def create_llm_provider(payload: dict[str, Any], actor_id: int) -> dict[str, Any
         return _mask_provider(item)
 
 
-def update_llm_provider(provider_id: int, payload: dict[str, Any], actor_id: int) -> dict[str, Any]:
+def update_llm_provider(
+    provider_id: int,
+    payload: dict[str, Any],
+    actor_id: int,
+    *,
+    actor_user_id: int | None = None,
+    actor_is_superadmin: bool = False,
+) -> dict[str, Any]:
     normalized = _normalize_provider(payload)
     spec = get_provider_spec(normalized["provider"])
     assert spec is not None
@@ -614,9 +685,9 @@ def update_llm_provider(provider_id: int, payload: dict[str, Any], actor_id: int
         item = _find_provider(data, provider_id)
         if item is None:
             raise ModelRegistryError("模型 API 配置不存在")
-        if any(
-            p.get("name") == normalized["name"] and int(p["id"]) != int(provider_id)
-            for p in data["providers"]
+        _require_provider_owner(item, actor_user_id, actor_is_superadmin)
+        if _name_taken(
+            data, normalized["name"], item.get("owner_id", None), exclude_id=provider_id,
         ):
             raise ModelRegistryError("配置名称已存在")
         if payload.get("clear_api_key"):
@@ -646,12 +717,19 @@ def update_llm_provider(provider_id: int, payload: dict[str, Any], actor_id: int
         return _mask_provider(item)
 
 
-def delete_llm_provider(provider_id: int, actor_id: int) -> None:
+def delete_llm_provider(
+    provider_id: int,
+    actor_id: int,
+    *,
+    actor_user_id: int | None = None,
+    actor_is_superadmin: bool = False,
+) -> None:
     with _LOCK:
         data = _read_unlocked()
         item = _find_provider(data, provider_id)
         if item is None:
             raise ModelRegistryError("模型 API 配置不存在")
+        _require_provider_owner(item, actor_user_id, actor_is_superadmin)
         data["providers"] = [
             p for p in data["providers"] if int(p["id"]) != int(provider_id)
         ]
@@ -664,23 +742,38 @@ def delete_llm_provider(provider_id: int, actor_id: int) -> None:
 # 供应商下的模型列表 CRUD
 # ────────────────────────────────────────────────────────────────
 
-def _provider_spec_from_data(data: dict[str, Any], provider_id: int) -> dict[str, Any]:
+
+def _owned_provider_from_data(
+    data: dict[str, Any],
+    provider_id: int,
+    actor_user_id: int | None,
+    actor_is_superadmin: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """定位 provider 条目并做归属校验，返回 (条目, 供应商目录 spec)。"""
     item = _find_provider(data, provider_id)
     if item is None:
         raise ModelRegistryError("模型 API 配置不存在")
+    _require_provider_owner(item, actor_user_id, actor_is_superadmin)
     spec = get_provider_spec(str(item.get("provider") or ""))
     if spec is None:
         raise ModelRegistryError(f"不支持的供应商: {item.get('provider')}")
-    return spec
+    return item, spec
 
 
-def add_provider_model(provider_id: int, payload: dict[str, Any], actor_id: int) -> dict[str, Any]:
+def add_provider_model(
+    provider_id: int,
+    payload: dict[str, Any],
+    actor_id: int,
+    *,
+    actor_user_id: int | None = None,
+    actor_is_superadmin: bool = False,
+) -> dict[str, Any]:
     with _LOCK:
         data = _read_unlocked()
-        spec = _provider_spec_from_data(data, provider_id)
+        item, spec = _owned_provider_from_data(
+            data, provider_id, actor_user_id, actor_is_superadmin,
+        )
         entry = _normalize_model_entry(payload, spec)
-        item = _find_provider(data, provider_id)
-        assert item is not None
         if any(m.get("name") == entry["name"] for m in item.get("models") or []):
             raise ModelRegistryError(f"模型 {entry['name']} 已存在于该供应商配置中")
         if len(item.get("models") or []) >= _MAX_MODELS_PER_PROVIDER:
@@ -693,13 +786,19 @@ def add_provider_model(provider_id: int, payload: dict[str, Any], actor_id: int)
 
 
 def update_provider_model(
-    provider_id: int, model_name: str, payload: dict[str, Any], actor_id: int,
+    provider_id: int,
+    model_name: str,
+    payload: dict[str, Any],
+    actor_id: int,
+    *,
+    actor_user_id: int | None = None,
+    actor_is_superadmin: bool = False,
 ) -> dict[str, Any]:
     with _LOCK:
         data = _read_unlocked()
-        spec = _provider_spec_from_data(data, provider_id)
-        item = _find_provider(data, provider_id)
-        assert item is not None
+        item, spec = _owned_provider_from_data(
+            data, provider_id, actor_user_id, actor_is_superadmin,
+        )
         models = item.get("models") or []
         current = next((m for m in models if m.get("name") == model_name), None)
         if current is None:
@@ -719,12 +818,19 @@ def update_provider_model(
         return dict(entry)
 
 
-def delete_provider_model(provider_id: int, model_name: str, actor_id: int) -> None:
+def delete_provider_model(
+    provider_id: int,
+    model_name: str,
+    actor_id: int,
+    *,
+    actor_user_id: int | None = None,
+    actor_is_superadmin: bool = False,
+) -> None:
     with _LOCK:
         data = _read_unlocked()
-        _provider_spec_from_data(data, provider_id)
-        item = _find_provider(data, provider_id)
-        assert item is not None
+        item, _spec = _owned_provider_from_data(
+            data, provider_id, actor_user_id, actor_is_superadmin,
+        )
         models = item.get("models") or []
         if not any(m.get("name") == model_name for m in models):
             raise ModelRegistryError(f"模型 {model_name} 不存在")
@@ -856,6 +962,8 @@ def active_llm_providers(
     *,
     include_secrets: bool = False,
     usable_only: bool = False,
+    owner_user_id: Any = _UNSET,
+    owner_is_superadmin: bool = False,
 ) -> list[dict[str, Any]]:
     """已启用的 LLM 供应商运行时视图。
 
@@ -864,12 +972,21 @@ def active_llm_providers(
     （含 vision 标记与每模型 settings）与默认 ``model_name``/``vision_model``；
     同时附带本地运行时兼容字段 ``native_tools``（= enabled_tools）、
     ``vision_models``（视觉模型名列表）。
+
+    ``owner_user_id`` 传 ``_UNSET``（默认）时不过滤（历史行为）；显式传
+    ``None`` 表示 CLI/无用户上下文（仅平台池）；传用户 id 时按
+    ``_owner_visible`` 规则过滤，且 runtime_key 在过滤后的集合内计算。
     """
     with _LOCK:
         data = _read_unlocked()
         items = [
             dict(p) for p in sorted(data["providers"], key=lambda p: int(p["id"]))
             if p.get("enabled")
+        ]
+    if owner_user_id is not _UNSET:
+        items = [
+            p for p in items
+            if _owner_visible(p, owner_user_id, owner_is_superadmin)
         ]
     prepared: list[dict[str, Any]] = []
     for item in items:
@@ -905,13 +1022,20 @@ def active_llm_providers(
     return prepared
 
 
-def load_runtime_overrides() -> dict[str, Any]:
+def load_runtime_overrides(
+    *,
+    owner_user_id: Any = _UNSET,
+    owner_is_superadmin: bool = False,
+) -> dict[str, Any]:
     """把注册表转换为 RuntimeConfig 覆盖值。
 
     - 每条启用的 LLM 供应商以 ``runtime_key``（provider 或 provider::配置ID）
       注册进 ``custom_llm_configs``，供统一模型工厂解析；条目同时携带
       models_detail（每模型超参）与旧读取方兼容的 models/vision_models/
       native_tools/model_low/model_min/model_max 字段；
+    - ``owner_user_id`` 语义同 ``active_llm_providers``：_UNSET 不过滤（历史
+      行为，供旧测试与无用户上下文的调用方）；None=CLI 平台池；用户 id=
+      按可见性过滤。embedding 始终全局，不参与过滤；
     - deepseek/qwen/zhipu 的全局字段沿用该 provider 首条启用配置，保持
       .env 回退与旧调用路径兼容；
     - API Key 无法解密的配置（invalid）整条跳过，不影响其他配置；
@@ -920,7 +1044,11 @@ def load_runtime_overrides() -> dict[str, Any]:
     overrides: dict[str, Any] = {}
     custom: dict[str, dict[str, Any]] = {}
     first_by_provider: dict[str, dict[str, Any]] = {}
-    for item in active_llm_providers(include_secrets=True):
+    for item in active_llm_providers(
+        include_secrets=True,
+        owner_user_id=owner_user_id,
+        owner_is_superadmin=owner_is_superadmin,
+    ):
         provider = item["provider"]
         models = list(item.get("models") or [])
         first_model = models[0] if models else ""

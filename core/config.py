@@ -14,6 +14,17 @@ logger = logging.getLogger(__name__)
 _WARNED_REPEAT_PENALTIES: set[float] = set()
 
 
+def _lookup_is_superadmin(user_id: int) -> bool:
+    """查询用户角色是否为超级管理员；查询失败按普通用户处理（更保守）。"""
+    try:
+        from core.auth import get_user_role  # 延迟导入避免环
+
+        return get_user_role(user_id) == "superadmin"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("查询用户 %s 角色失败，按普通用户加载模型池: %s", user_id, exc)
+        return False
+
+
 def _load_dotenv(dotenv_path: str | Path = ".env") -> None:
     """加载 .env 文件到 os.environ（不覆盖已有的环境变量）。"""
     path = Path(dotenv_path).resolve()
@@ -122,7 +133,14 @@ class RuntimeConfig:
     workspace_mode: str = "local"
 
     @classmethod
-    def from_env(cls) -> "RuntimeConfig":
+    def from_env(cls, user_id: int | None = None) -> "RuntimeConfig":
+        """构建运行时配置；注册表覆盖按 ``user_id`` 划定的模型池加载。
+
+        - ``user_id=None``（CLI / 无用户上下文）：仅平台池（owner_id 为
+          null 的注册表条目）+ .env 回退；
+        - ``user_id=<uid>``：按用户可见性过滤（普通用户仅自己的私有池；
+          超级管理员为平台池 + 自己的私有池），角色由 users.db 查询。
+        """
         _load_dotenv()
         workspace_mode = os.getenv("LINGSHU_WORKSPACE_MODE", "local").strip().lower()
         if workspace_mode not in {"local", "legacy"}:
@@ -200,12 +218,19 @@ class RuntimeConfig:
             # Workspace 模式：默认 local；legacy 仅用于打开旧会话
             workspace_mode=workspace_mode,
         )
-        # 超级管理员启用的数据库配置优先于 .env。注册表故障不能阻断主服务，
+        # Web 管理界面启用的注册表配置优先于 .env，且按 user_id 划定的
+        # 模型池加载（详见 from_env docstring）。注册表故障不能阻断主服务，
         # 此时保留环境变量配置并记录原因，便于运维恢复加密密钥或数据库。
         try:
             from core.model_registry import load_runtime_overrides
 
-            values.update(load_runtime_overrides())
+            owner_is_superadmin = False
+            if user_id is not None:
+                owner_is_superadmin = _lookup_is_superadmin(user_id)
+            values.update(load_runtime_overrides(
+                owner_user_id=user_id,
+                owner_is_superadmin=owner_is_superadmin,
+            ))
         except Exception as exc:  # noqa: BLE001
             logger.warning("读取模型 API 注册表失败，继续使用环境变量配置: %s", exc)
         return cls(**values)

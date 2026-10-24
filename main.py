@@ -36,6 +36,11 @@ from agentscope.message import UserMsg  # AgentScope 用户消息封装
 from agentscope.types import ReplyFinishedReason
 
 from core.config import RuntimeConfig  # 运行时配置（API Key、超时等，从环境变量读取）
+from core.auth import get_user_role  # 用户角色查询（模型池作用域）
+from core.model_bindings import (  # 用户级 Agent 模型分工（角色 → 供应商/模型）
+    get_agent_model_bindings,
+    resolve_role_models,
+)
 from LLM.model import (  # 创建 LLM 模型实例（供应商目录驱动）
     QwenModelUnavailableError,
     create_model,
@@ -702,6 +707,7 @@ async def run_summary_report(
     offloader: Any = None,
     agent_tasks: set[asyncio.Task[Any]] | None = None,
     store: MissionStore | None = None,
+    user_id: int | None = None,
 ) -> str:
     """调用 Summary Agent，总结完整会话并原子生成 PDF 报告（run_mission 收尾阶段）。
 
@@ -715,6 +721,8 @@ async def run_summary_report(
         offloader: Summary Agent 的上下文卸载器（复用会话 Workspace）
         agent_tasks: 当前会话活跃的 Agent reply task 注册表
         store: 任务状态持久化（可选；提供时保存更新后的 mission）
+        user_id: Web 用户 id；提供时按用户模型池加载配置，并优先使用
+            用户为 summary 角色设置的模型分工绑定
 
     Returns:
         生成的报告正文 Markdown
@@ -737,15 +745,23 @@ async def run_summary_report(
             agent=SUMMARY_EXPERT,
         )
     try:
-        runtime = RuntimeConfig.from_env()
+        runtime = RuntimeConfig.from_env(user_id=user_id)
         # 报告使用与主任务相同的模型；思考强度沿用级别映射（旧 Ver 语义），
         # model_ver 为具体模型名（API 路径）时取 medium。
         summary_intensity = {"Low": "off", "Min": "medium", "Max": "high"}.get(
             str(model_ver or ""), "medium",
         )
+        summary_provider, summary_model_name = provider, model_name
+        if user_id is not None:
+            binding = get_agent_model_bindings(user_id).get("summary")
+            if binding and binding.get("provider") and binding.get("model"):
+                summary_provider = str(binding["provider"])
+                summary_model_name = str(binding["model"])
+                if binding.get("thinking_intensity"):
+                    summary_intensity = str(binding["thinking_intensity"])
         model = create_model(
-            provider=provider,
-            model=model_name,
+            provider=summary_provider,
+            model=summary_model_name,
             thinking_intensity=summary_intensity,
             temperature=0.2,
             web_search=False,
@@ -847,6 +863,7 @@ async def _finalize_summary_report(
     offloader: Any = None,
     agent_tasks: set[asyncio.Task[Any]] | None = None,
     store: MissionStore | None = None,
+    user_id: int | None = None,
 ) -> None:
     """兜底 Summary 收尾：无论任务成败都尽力生成报告，且不改变任务终态。
 
@@ -872,6 +889,7 @@ async def _finalize_summary_report(
             offloader=offloader,
             agent_tasks=agent_tasks,
             store=store,
+            user_id=user_id,
         )
     except asyncio.CancelledError:
         # 任务已固化终态时，报告阶段的取消不得覆盖任务结论。
@@ -1468,8 +1486,9 @@ async def run_mission(
         print(f"[系统]   证据: {ev}")
 
     # ── 4. 运行时配置与任务状态初始化 ──
-    # RuntimeConfig 从环境变量读取（API Key、命令超时等）
-    runtime = RuntimeConfig.from_env()
+    # RuntimeConfig 从环境变量读取（API Key、命令超时等）；Web 任务按
+    # user_id 划定的模型池加载注册表覆盖（普通用户=自己的私有池）。
+    runtime = RuntimeConfig.from_env(user_id=user_id)
     if qwen_tool_call_mode is not None:
         selected_mode = qwen_tool_call_mode.strip().lower()
         if selected_mode not in {"simple", "standard"}:
@@ -2179,6 +2198,58 @@ async def run_mission(
             temperature=None,
             config=runtime,
         )
+        # ── 用户级 Agent 模型分工（Web 任务）──
+        # 普通用户可为每个 Agent 角色单独指定模型；未绑定/绑定失效的角色
+        # 沿用上面的共享主模型。summary 角色在收尾阶段（run_summary_report）
+        # 自行读取绑定，这里不预构建。
+        role_models: dict[str, Any] = {}
+        if user_id is not None:
+            try:
+                _bindings = {
+                    role: binding
+                    for role, binding in get_agent_model_bindings(user_id).items()
+                    if role != "summary"
+                }
+            except Exception as exc:  # noqa: BLE001 - 分工表读取失败不阻断任务
+                _bindings = {}
+                logger.warning("读取用户 %s 的 Agent 模型分工失败: %s", user_id, exc)
+            if _bindings:
+
+                def _build_role_model(r_provider, r_model, r_intensity):  # noqa: ANN001
+                    return create_model(
+                        provider=r_provider,
+                        model=r_model,
+                        thinking_intensity=r_intensity,
+                        temperature=None,
+                        config=runtime,
+                    )
+
+                role_models, _model_warnings = resolve_role_models(
+                    _bindings, _build_role_model, model, thinking_intensity,
+                )
+                for _warning in _model_warnings:
+                    logger.warning("[模型分工] %s", _warning)
+                    print(f"[系统] [模型分工] {_warning}")
+                mission.record(
+                    "system", "agent_model_assignment",
+                    roles={
+                        role: {
+                            "provider": binding.get("provider"),
+                            "model": binding.get("model"),
+                            "resolved": role in role_models,
+                        }
+                        for role, binding in _bindings.items()
+                    },
+                )
+                store.save(mission)
+
+        def _role_model(role: str):
+            """角色绑定的模型实例；未绑定时回退共享主模型。"""
+            return role_models.get(role, model)
+
+        _user_is_superadmin = (
+            user_id is not None and get_user_role(user_id) == "superadmin"
+        )
         # 视觉模型只在文件/视觉题型存在实际需求时创建；网络任务不会再因空
         # Workspace 默认承担额外模型和 schema 上下文。
         vision_model = None
@@ -2198,7 +2269,11 @@ async def run_mission(
             # 视觉模型由模型注册表驱动：任意登记了多模态模型（vision_models）
             # 的启用配置均可充当；未登记时回退 .env 的 DeepSeek 视觉模型。
             try:
-                vision_model = create_vision_model(runtime)
+                vision_model = create_vision_model(
+                    runtime,
+                    owner_user_id=user_id,
+                    owner_is_superadmin=_user_is_superadmin,
+                )
             except Exception as exc:  # noqa: BLE001 - 视觉失败不阻断任务
                 logger.warning("视觉模型初始化失败，本任务不挂载视觉工具: %s", exc)
 
@@ -2327,7 +2402,7 @@ async def run_mission(
             else [create_submit_plan_tool(mission, store, event_callback)]
         )
         brain = create_brain_agent(
-            model,
+            _role_model("brain"),
             tools=brain_tools,
             # Qwen 的逐条 AddPlan 通常需要 4~8 次登记加一次正文输出。
             max_iters=(15 if qwen_flat_plan_tools else _max_react_iters(
@@ -2344,7 +2419,7 @@ async def run_mission(
         analysis = LazyAgent(
             ANALYSIS_EXPERT,
             lambda: create_analysis_agent(
-                model,
+                _role_model("analysis"),
                 offloader=workspace,
                 context_config=_role_context("analysis"),
                 state=(
@@ -2362,7 +2437,7 @@ async def run_mission(
         artifact_recon = None
         if target_spec.kind == "network":
             network_recon = create_network_recon_agent(
-                model, execution_target, command_workdir, runtime.command_timeout,
+                _role_model("recon"), execution_target, command_workdir, runtime.command_timeout,
                 scope_registry=scope_registry,
                 max_iters=_max_react_iters("network", "recon", complexity, thinking=model_ver),
                 offloader=workspace,
@@ -2379,7 +2454,7 @@ async def run_mission(
             if "unknown" in triage_categories:
                 triage_categories.update({"forensics", "reverse", "misc"})
             artifact_recon = create_artifact_triage_agent(
-                model, workdir, project_dir, runtime.command_timeout,
+                _role_model("triage"), workdir, project_dir, runtime.command_timeout,
                 max_iters=_max_react_iters(target_spec.kind, "recon", complexity, thinking=model_ver),
                 offloader=workspace,
                 context_config=_role_context("recon"),
@@ -2396,7 +2471,7 @@ async def run_mission(
             recon = artifact_recon
             if declared_network_targets:
                 network_recon = create_network_recon_agent(
-                model, execution_target, command_workdir, runtime.command_timeout,
+                _role_model("recon"), execution_target, command_workdir, runtime.command_timeout,
                     scope_registry=scope_registry,
                     max_iters=_max_react_iters("network", "recon", complexity, thinking=model_ver),
                     offloader=workspace,
@@ -2583,7 +2658,7 @@ async def run_mission(
                     store.checkpoint(mission, "dynamic_network_scope_approved")
                     execution_target = discovered_targets[0]
                     network_recon = create_network_recon_agent(
-                        model, execution_target, command_workdir, runtime.command_timeout,
+                        _role_model("recon"), execution_target, command_workdir, runtime.command_timeout,
                         scope_registry=scope_registry,
                         max_iters=_max_react_iters("network", "recon", complexity, thinking=model_ver),
                         offloader=workspace,
@@ -2791,7 +2866,7 @@ async def run_mission(
                 or bool(re.search(r"CVE-\d{4}-\d+", current_capability_context))
             )
             return await create_attack_agent(
-                model,
+                _role_model("attack"),
                 analysis,
                 execution_target,
                 project_dir,
@@ -2885,7 +2960,7 @@ async def run_mission(
             )
             store.save(mission)
             return await create_reverse_agent(
-                model,
+                _role_model("reserve"),
                 analysis,
                 mission.target,
                 project_dir,
@@ -2920,7 +2995,7 @@ async def run_mission(
         # 战术调度核心：持有 recon/attack/state/store 的唯一调度者，
         # 负责推进阶段、调度侦察与攻击、处理重分类、最终调用 complete_mission 收尾。
         orchestrator = create_orchestrator_agent(
-            model=model,
+            model=_role_model("orchestrator"),
             recon_agent=recon,
             attack_agent=attack,
             reserve_agent=reserve,
@@ -3252,6 +3327,7 @@ async def run_mission(
             offloader=workspace,
             agent_tasks=active_agent_tasks,
             store=store,
+            user_id=user_id,
         )
         return mission
 
@@ -3286,6 +3362,7 @@ async def run_mission(
             offloader=workspace,
             agent_tasks=active_agent_tasks,
             store=store,
+            user_id=user_id,
         )
         if event_callback is not None:
             event_callback("task_error", error=str(exc), agent="system")
@@ -3308,6 +3385,7 @@ async def run_mission(
                 offloader=workspace,
                 agent_tasks=active_agent_tasks,
                 store=store,
+                user_id=user_id,
             )
         except Exception as summary_exc:  # noqa: BLE001 - 兜底报告绝不允许掩盖原异常
             logger.exception("失败路径 summary 兜底调用异常: %s", summary_exc)

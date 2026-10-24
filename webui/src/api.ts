@@ -85,6 +85,7 @@ export type ModelProviderOption = {
   models?: string[];
   models_detail?: { name: string; vision: boolean }[];
   vision_model?: string;
+  owner?: "platform" | "mine";
 };
 
 // ── v2 供应商管理（core/providers.py 目录驱动） ──
@@ -141,6 +142,8 @@ export type ManagedProvider = {
   enabled: boolean;
   models: ManagedProviderModel[];
   enabled_models?: string[];
+  owner?: "platform" | "mine";
+  owner_id?: number | null;
   created_at?: string;
   updated_at?: string;
 };
@@ -155,6 +158,23 @@ export type LLMProviderInput = {
   clear_api_key?: boolean;
   enabled: boolean;
   models: ManagedProviderModel[];
+};
+export type AgentModelBindingInputType = {
+  provider: string;
+  model: string;
+  thinking_intensity: string | null;
+};
+export type AgentModelBindingRole = AgentModelBindingInputType & {
+  role: string;
+  label: string;
+};
+export type UserProfile = {
+  id: number;
+  username: string;
+  email: string;
+  role: string;
+  created_at?: string;
+  last_login?: string;
 };
 export type ToolStatus = {
   id: string;
@@ -311,6 +331,81 @@ export const api = {
       `/api/superadmin/model-providers/${encodeURIComponent(String(id))}/models?model=${encodeURIComponent(model)}`,
       { method: "DELETE" },
     ),
+  // ── 用户级模型管理（每用户私有供应商池 + Agent 模型分工）──
+  userProviderCatalog: () =>
+    request<{ providers: ProviderCatalogEntry[] }>("/api/providers/catalog"),
+  myLLMProviders: () =>
+    request<{ providers: ManagedProvider[] }>("/api/my/model-providers"),
+  myCreateLLMProvider: (data: LLMProviderInput) =>
+    request<{ provider: ManagedProvider }>("/api/my/model-providers", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  myUpdateLLMProvider: (id: number, data: LLMProviderInput) =>
+    request<{ provider: ManagedProvider }>(
+      `/api/my/model-providers/${encodeURIComponent(String(id))}`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+  myDeleteLLMProvider: (id: number) =>
+    request<{ message: string }>(
+      `/api/my/model-providers/${encodeURIComponent(String(id))}`,
+      { method: "DELETE" },
+    ),
+  myProbeModels: (data: { provider: string; base_url: string; api_key: string }) =>
+    request<{ models: string[]; endpoint: string }>(
+      "/api/my/model-providers/probe-models",
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  myProbeModelsSaved: (id: number) =>
+    request<{ models: string[]; endpoint: string }>(
+      `/api/my/model-providers/${encodeURIComponent(String(id))}/probe-models`,
+      { method: "POST" },
+    ),
+  myAddProviderModel: (
+    id: number,
+    model: { name: string; enabled?: boolean; vision?: boolean; settings?: Partial<ProviderModelSettings> },
+  ) =>
+    request<{ model: ManagedProviderModel }>(
+      `/api/my/model-providers/${encodeURIComponent(String(id))}/models`,
+      { method: "POST", body: JSON.stringify(model) },
+    ),
+  myUpdateProviderModel: (
+    id: number,
+    payload: { model: string } & Partial<ManagedProviderModel>,
+  ) =>
+    request<{ model: ManagedProviderModel }>(
+      `/api/my/model-providers/${encodeURIComponent(String(id))}/models`,
+      { method: "PUT", body: JSON.stringify(payload) },
+    ),
+  myDeleteProviderModel: (id: number, model: string) =>
+    request<{ message: string }>(
+      `/api/my/model-providers/${encodeURIComponent(String(id))}/models?model=${encodeURIComponent(model)}`,
+      { method: "DELETE" },
+    ),
+  agentModelBindings: () =>
+    request<{ roles: AgentModelBindingRole[]; intensities: string[] }>(
+      "/api/agent-model-bindings",
+    ),
+  saveAgentModelBindings: (
+    bindings: Record<string, AgentModelBindingInputType | null>,
+  ) =>
+    request<{ bindings: Record<string, AgentModelBindingInputType> }>(
+      "/api/agent-model-bindings",
+      { method: "PUT", body: JSON.stringify({ bindings }) },
+    ),
+  // ── 账号自助设置 ──
+  profile: () =>
+    request<UserProfile>("/auth/profile"),
+  updateProfile: (data: { username: string; email: string }) =>
+    request<{ profile: UserProfile; message: string }>("/auth/profile", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  changePassword: (data: { old_password: string; new_password: string }) =>
+    request<{ message: string }>("/auth/password", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
   sessions: async (offset = 0, limit = 30) => {
     const data = await request<{ sessions?: unknown; has_more?: unknown; next_offset?: unknown }>(
       `/api/sessions?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,

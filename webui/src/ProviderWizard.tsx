@@ -36,12 +36,37 @@ function toolsAvailableFor(spec: ProviderCatalogEntry | null, apiStyle: string):
 
 type WizardModel = ManagedProviderModel & { _new?: boolean; _origName?: string };
 
-export function ProviderWizardDialog({ editing, catalog, onClose, onSaved }: {
+// scope：superadmin=超管平台池（/api/superadmin/*）；user=用户私有池（/api/my/*）
+export type ProviderScope = "superadmin" | "user";
+
+function scopeApi(scope: ProviderScope) {
+  return scope === "user" ? {
+    create: api.myCreateLLMProvider,
+    update: api.myUpdateLLMProvider,
+    probeSaved: api.myProbeModelsSaved,
+    probe: api.myProbeModels,
+    addModel: api.myAddProviderModel,
+    updateModel: api.myUpdateProviderModel,
+    deleteModel: api.myDeleteProviderModel,
+  } : {
+    create: api.createLLMProvider,
+    update: api.updateLLMProvider,
+    probeSaved: api.probeModelsSaved,
+    probe: api.probeModels,
+    addModel: api.addProviderModel,
+    updateModel: api.updateProviderModel,
+    deleteModel: api.deleteProviderModel,
+  };
+}
+
+export function ProviderWizardDialog({ editing, catalog, scope = "superadmin", onClose, onSaved }: {
   editing: ManagedProvider | null;
   catalog: ProviderCatalogEntry[];
+  scope?: ProviderScope;
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const endpoints = scopeApi(scope);
   const [step, setStep] = useState(editing ? 2 : 1);
   const [spec, setSpec] = useState<ProviderCatalogEntry | null>(
     () => catalog.find((item) => item.key === editing?.provider) || null);
@@ -128,8 +153,8 @@ export function ProviderWizardDialog({ editing, catalog, onClose, onSaved }: {
       // 编辑已有配置且密钥健康时优先用服务端保存的凭据拉取
       const useSaved = editing && editing.api_key_status !== "invalid" && !draft.api_key.trim();
       const result = useSaved
-        ? await api.probeModelsSaved(editing.id)
-        : await api.probeModels({
+        ? await endpoints.probeSaved(editing.id)
+        : await endpoints.probe({
             provider: spec.key,
             base_url: draft.base_url.trim(),
             api_key: draft.api_key.trim(),
@@ -172,12 +197,12 @@ export function ProviderWizardDialog({ editing, catalog, onClose, onSaved }: {
       if (draft.api_key.trim()) payload.api_key = draft.api_key.trim();
       if (draft.clear_api_key) payload.clear_api_key = true;
       if (editing) {
-        await api.updateLLMProvider(editing.id, payload);
+        await endpoints.update(editing.id, payload);
         const currentNames = new Set(models.map((m) => m.name));
         for (const m of models) {
           if (m._new) {
             const { _new: _n, _origName: _o, ...clean } = m;
-            await api.addProviderModel(editing.id, clean);
+            await endpoints.addModel(editing.id, clean);
             continue;
           }
           const original = editing.models.find((x) => x.name === m._origName);
@@ -188,7 +213,7 @@ export function ProviderWizardDialog({ editing, catalog, onClose, onSaved }: {
             original.vision !== m.vision ||
             JSON.stringify(original.settings) !== JSON.stringify(m.settings)
           ) {
-            await api.updateProviderModel(editing.id, {
+            await endpoints.updateModel(editing.id, {
               model: m._origName || m.name,
               name: m.name,
               enabled: m.enabled,
@@ -199,11 +224,11 @@ export function ProviderWizardDialog({ editing, catalog, onClose, onSaved }: {
         }
         for (const m of editing.models) {
           if (!currentNames.has(m.name)) {
-            await api.deleteProviderModel(editing.id, m.name);
+            await endpoints.deleteModel(editing.id, m.name);
           }
         }
       } else {
-        await api.createLLMProvider(payload);
+        await endpoints.create(payload);
       }
       toast.success(editing ? "供应商配置已更新" : "供应商配置已创建");
       onSaved();

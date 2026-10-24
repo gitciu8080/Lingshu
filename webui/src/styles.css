@@ -663,3 +663,14 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 /* margin:0 抵消 .modal label 的 10px 外边距与 .modal input 的 margin-top，保证与按钮同行等高 */
 .model-probe-row .manual-add{margin:0}
 .model-probe-row .manual-add input{height:38px;padding:0 10px;line-height:normal;margin:0;border-radius:8px}
+
+/* ── 用户设置页（/settings）：表格内下拉、账号表单，沿用 superadmin 暗色体系 ── */
+.superadmin-table select{height:32px;min-width:150px;padding:0 9px;background:#0d0d0d;border:1px solid #3c3c3c;border-radius:0;color:#eee;font:12px ui-monospace,SFMono-Regular,monospace;outline:none}
+.superadmin-table select:focus{border-color:var(--sa-accent,var(--accent))}
+.superadmin-table select:disabled{opacity:.45;cursor:not-allowed}
+.superadmin-form{display:grid;gap:14px;max-width:480px;padding:20px}
+.superadmin-form label{display:grid;gap:7px;margin:0;color:#999;font:11px ui-monospace,SFMono-Regular,monospace;letter-spacing:.5px}
+.superadmin-form input{height:34px;margin:0;padding:0 10px;background:#0d0d0d;border:1px solid #3c3c3c;border-radius:0;color:#eee;font:12px ui-monospace,SFMono-Regular,monospace;outline:none}
+.superadmin-form input:focus{border-color:var(--sa-accent,var(--accent))}
+.superadmin-form .danger-button{justify-self:start;display:inline-flex;align-items:center;gap:6px}
+.superadmin-stats b.ellip{font-size:15px;line-height:1.3;word-break:break-all;max-width:220px;overflow:hidden;text-overflow:ellipsis}

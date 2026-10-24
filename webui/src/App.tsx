@@ -32,6 +32,7 @@ import {
   Swords,
   Terminal,
   Trash2,
+  UserCog,
   Wrench,
   X,
 } from "lucide-react";
@@ -40,6 +41,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { accountStream, api, auth, Event, ManagedProvider, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, ProviderCatalogEntry, PythonEnvironmentStatus, Session, stream, SystemUser, ToolStatus } from "./api";
 import { ProviderWizardDialog } from "./ProviderWizard";
+import UserSettingsPage from "./UserSettings";
 import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
 
@@ -1218,7 +1220,7 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
                 {!providers.length && <option value="">未配置可用模型</option>}
                 {providers.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.id}</option>)}
               </select>
-              {!providers.length && <small>请先前往 /superadmin 启用一个大模型 API</small>}
+              {!providers.length && <small>尚无可用模型：请点击左侧「模型管理」添加你自己的大模型 API</small>}
             </label>
             <div className="select-row">
               <label>
@@ -1412,7 +1414,7 @@ function RerunMission({
                 {!providers.length && <option value="">未配置可用模型</option>}
                 {providers.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.id}</option>)}
               </select>
-              {!providers.length && <small>请先前往 /superadmin 启用一个大模型 API</small>}
+              {!providers.length && <small>尚无可用模型：请点击左侧「模型管理」添加你自己的大模型 API</small>}
             </label>
             <div className="select-row">
               <label>
@@ -3178,6 +3180,14 @@ function ConsoleApp() {
               >
                 <Wrench size={16} />
               </button>
+              <button
+                className="icon-button"
+                onClick={() => { window.location.href = "/settings"; }}
+                title="用户设置：我的模型供应商、Agent 模型分工与账号安全"
+                aria-label="用户设置"
+              >
+                <UserCog size={17} />
+              </button>
               {active && (
                 <button
                   className="icon-button danger"
@@ -3438,5 +3448,8 @@ function ConsoleApp() {
 }
 
 export default function App() {
-  return window.location.pathname.replace(/\/+$/, "") === "/superadmin" ? <SuperAdminPage /> : <ConsoleApp />;
+  const path = window.location.pathname.replace(/\/+$/, "");
+  if (path === "/superadmin") return <SuperAdminPage />;
+  if (path === "/settings") return <UserSettingsPage />;
+  return <ConsoleApp />;
 }

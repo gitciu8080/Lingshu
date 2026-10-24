@@ -158,7 +158,31 @@ def init_db():
                 UNIQUE(session_id, seq)
             )
         """)
+        # 用户级 Agent 模型分工（每个角色绑定一个 LLM 运行时 key + 模型名）。
+        # role 取值见 core/model_bindings.py 的 AGENT_MODEL_ROLES。
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_model_bindings (
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                thinking_intensity TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, role),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
         conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user_role(user_id: int) -> Optional[str]:
+    """按 id 查询用户角色；用户不存在时返回 None（调用方按普通用户处理）。"""
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+        return str(row["role"]) if row else None
     finally:
         conn.close()
 
@@ -201,6 +225,80 @@ def get_user_by_username(username: str) -> Optional[dict]:
             "SELECT * FROM users WHERE username = ?", (username,)
         ).fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_user_by_id(user_id: int) -> Optional[dict]:
+    """返回用户资料（不含密码散列），供自助设置页展示。"""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id, username, email, role, created_at, last_login "
+            "FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+_USERNAME_RE = re.compile(r"^[\w\u4e00-\u9fa5-]{2,32}$")
+
+
+def update_user_profile(user_id: int, username: str, email: str) -> dict:
+    """用户自助修改登录名与邮箱；用户名全库唯一。"""
+    username = username.strip()
+    email = email.strip()
+    if not _USERNAME_RE.fullmatch(username):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="用户名需为 2~32 位字母、数字、下划线、连字符或中文",
+        )
+    if len(email) > 120:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="邮箱过长")
+    conn = get_db()
+    try:
+        exists = conn.execute(
+            "SELECT id FROM users WHERE username = ? AND id != ?",
+            (username, user_id),
+        ).fetchone()
+        if exists:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="用户名已被占用",
+            )
+        conn.execute(
+            "UPDATE users SET username = ?, email = ? WHERE id = ?",
+            (username, email, user_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, username, email, role, created_at, last_login "
+            "FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+def change_own_password(user_id: int, old_password: str, new_password: str) -> None:
+    """用户自助改密：校验旧密码与强度；auth_epoch+1 使所有旧登录态失效。"""
+    validate_password_strength(new_password)
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT password_hash FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if not row or not pwd_context.verify(old_password or "", row["password_hash"]):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="当前密码不正确",
+            )
+        conn.execute(
+            "UPDATE users SET password_hash = ?, auth_epoch = auth_epoch + 1 WHERE id = ?",
+            (pwd_context.hash(new_password), user_id),
+        )
+        conn.commit()
     finally:
         conn.close()
 

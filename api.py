@@ -36,6 +36,9 @@ from core.auth import (
     create_access_token,
     decode_access_token,
     get_user_by_username,
+    get_user_by_id,
+    update_user_profile,
+    change_own_password,
     list_users,
     reset_user_password,
     delete_user,
@@ -93,6 +96,14 @@ from core.model_registry import (
     update_embedding_config,
     update_llm_provider,
     update_provider_model,
+)
+from core.model_bindings import (
+    AGENT_MODEL_ROLES,
+    INTENSITIES,
+    ROLE_LABELS,
+    clear_agent_model_binding,
+    get_agent_model_bindings,
+    set_agent_model_binding,
 )
 
 logger = logging.getLogger(__name__)
@@ -1162,6 +1173,7 @@ _AUTH_SKIP_PATHS = (
     "/auth/register",
     "/api/version",
     "/superadmin",
+    "/settings",
 )
 
 
@@ -1390,6 +1402,20 @@ class ProbeModelsRequest(BaseModel):
     api_key: str = Field(default="", max_length=4096)
 
 
+class AgentModelBindingInput(BaseModel):
+    """单个 Agent 角色的模型绑定；thinking_intensity 为空表示跟随主模型。"""
+
+    provider: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=300)
+    thinking_intensity: str | None = Field(default=None, pattern="^(off|low|medium|high)$")
+
+
+class AgentModelBindingsPayload(BaseModel):
+    """整体保存用户级 Agent 模型分工；某角色传 null 表示清除绑定。"""
+
+    bindings: dict[str, AgentModelBindingInput | None]
+
+
 # ── 前次任务上下文构建（"再打一次"重跑用）──
 _CONTEXT_MAX_TOTAL = 4000
 _CONTEXT_FINDING_MAX = 500
@@ -1541,6 +1567,50 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     return current_user
 
 
+class ProfileUpdatePayload(BaseModel):
+    username: str = Field(min_length=2, max_length=32)
+    email: str = Field(default="", max_length=120)
+
+
+class PasswordChangePayload(BaseModel):
+    old_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+@app.get("/auth/profile")
+async def get_profile(current_user: dict = Depends(get_current_user)):
+    """当前登录用户的资料（自助设置页展示）。"""
+    profile = await asyncio.to_thread(get_user_by_id, int(current_user["id"]))
+    if not profile:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return profile
+
+
+@app.put("/auth/profile")
+async def update_profile(
+    data: ProfileUpdatePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """自助修改登录名与邮箱。"""
+    profile = await asyncio.to_thread(
+        update_user_profile, int(current_user["id"]), data.username, data.email,
+    )
+    return {"profile": profile, "message": "资料已更新"}
+
+
+@app.put("/auth/password")
+async def change_password(
+    data: PasswordChangePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """自助修改密码：成功后所有旧登录态失效（含当前 Token），需重新登录。"""
+    await asyncio.to_thread(
+        change_own_password,
+        int(current_user["id"]), data.old_password, data.new_password,
+    )
+    return {"message": "密码已修改，所有登录状态已失效，请使用新密码重新登录"}
+
+
 @app.post("/auth/logout")
 async def logout(current_user: dict = Depends(get_current_user)):
     return {"message": "登出成功"}
@@ -1680,9 +1750,13 @@ async def superadmin_provider_catalog(current_user: dict = Depends(get_current_u
 
 @app.get("/api/superadmin/model-providers")
 async def superadmin_list_llm_providers(current_user: dict = Depends(get_current_user)):
-    """已配置的 LLM 供应商端点列表。"""
+    """超管可管理的 LLM 配置：平台池 + 自己的私有配置。"""
     _require_superadmin(current_user)
-    providers = await asyncio.to_thread(list_llm_providers)
+    providers = await asyncio.to_thread(
+        list_llm_providers,
+        owner_user_id=int(current_user["id"]),
+        owner_is_superadmin=True,
+    )
     return {"providers": providers}
 
 
@@ -1711,6 +1785,8 @@ async def superadmin_update_llm_provider(
     try:
         provider = await asyncio.to_thread(
             update_llm_provider, provider_id, _provider_payload(data), current_user["id"],
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=True,
         )
         return {"provider": provider}
     except ModelRegistryError as exc:
@@ -1724,7 +1800,11 @@ async def superadmin_delete_llm_provider(
 ):
     _require_superadmin(current_user)
     try:
-        await asyncio.to_thread(delete_llm_provider, provider_id, current_user["id"])
+        await asyncio.to_thread(
+            delete_llm_provider, provider_id, current_user["id"],
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=True,
+        )
         return {"message": "模型供应商配置已删除"}
     except ModelRegistryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1756,6 +1836,8 @@ async def superadmin_probe_models_saved(
     try:
         saved = await asyncio.to_thread(
             get_llm_provider, provider_id, include_secret=True,
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=True,
         )
         if saved is None:
             raise HTTPException(status_code=404, detail="模型 API 配置不存在")
@@ -1779,6 +1861,8 @@ async def superadmin_add_provider_model(
     try:
         model = await asyncio.to_thread(
             add_provider_model, provider_id, _model_entry_payload(data), current_user["id"],
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=True,
         )
         return {"model": model}
     except ModelRegistryError as exc:
@@ -1800,6 +1884,8 @@ async def superadmin_update_provider_model(
     try:
         model = await asyncio.to_thread(
             update_provider_model, provider_id, model_name, payload, current_user["id"],
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=True,
         )
         return {"model": model}
     except ModelRegistryError as exc:
@@ -1816,24 +1902,37 @@ async def superadmin_delete_provider_model(
     try:
         await asyncio.to_thread(
             delete_provider_model, provider_id, model, current_user["id"],
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=True,
         )
         return {"message": f"模型 {model} 已删除"}
     except ModelRegistryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _owner_scope(current_user: dict) -> dict[str, Any]:
+    """注册表作用域参数：普通用户=自己的私有池；超级管理员=平台池+自己的。"""
+    return {
+        "owner_user_id": int(current_user["id"]),
+        "owner_is_superadmin": current_user.get("role") == "superadmin",
+    }
+
+
 @app.get("/api/model-providers")
 async def model_providers(current_user: dict = Depends(get_current_user)):
-    """返回已启用 LLM 供应商（含可用模型列表），供任务创建页选择。
+    """返回当前用户可用的已启用 LLM 供应商（含模型列表），供任务创建页选择。
 
     ``id`` 为运行时标识：provider 唯一时即 provider 名；同一 provider
     存在多条启用配置时为 ``provider::配置ID``。``models`` 为模型名列表
     （向后兼容字符串数组），``models_detail`` 额外携带 vision 标记。
+    作用域：普通用户仅自己添加的私有配置；超级管理员为平台池+自己的。
     """
-    del current_user
+    scope = _owner_scope(current_user)
     providers: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for item in await asyncio.to_thread(active_llm_providers, usable_only=True):
+    for item in await asyncio.to_thread(
+        active_llm_providers, usable_only=True, **scope,
+    ):
         runtime_key = str(item.get("runtime_key") or item["provider"])
         if runtime_key in seen:
             continue
@@ -1851,8 +1950,250 @@ async def model_providers(current_user: dict = Depends(get_current_user)):
             "models": item.get("models") or [],
             "models_detail": detail,
             "vision_model": item.get("vision_model") or "",
+            "owner": "platform" if item.get("owner_id") is None else "mine",
         })
     return {"providers": providers}
+
+
+# ══════════════════════════════════════════════════
+# 用户级模型管理（每用户私有供应商池 + Agent 模型分工）
+# 超管页面继续走 /api/superadmin/*（平台池）；本组端点对任意登录用户开放。
+# ══════════════════════════════════════════════════
+
+
+def _registry_http_error(exc: ModelRegistryError) -> HTTPException:
+    """归属校验失败按 404 返回（不向其他用户泄露配置存在性）。"""
+    if "无权访问" in str(exc):
+        return HTTPException(status_code=404, detail="模型 API 配置不存在")
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/providers/catalog")
+async def user_provider_catalog(current_user: dict = Depends(get_current_user)):
+    """内置供应商目录（添加向导第一步；对全部登录用户开放）。"""
+    del current_user
+    return {"providers": provider_catalog()}
+
+
+@app.get("/api/my/model-providers")
+async def my_list_llm_providers(current_user: dict = Depends(get_current_user)):
+    """当前用户可管理的 LLM 供应商配置（掩码视图，管理表格用）。"""
+    scope = _owner_scope(current_user)
+    providers = await asyncio.to_thread(list_llm_providers, **scope)
+    for item in providers:
+        item["owner"] = "platform" if item.get("owner_id") is None else "mine"
+    return {"providers": providers}
+
+
+@app.post("/api/my/model-providers", status_code=status.HTTP_201_CREATED)
+async def my_create_llm_provider(
+    data: LLMProviderPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """用户添加自己的供应商配置（owner=当前用户，私有池）。"""
+    try:
+        provider = await asyncio.to_thread(
+            create_llm_provider,
+            _provider_payload(data), current_user["id"], int(current_user["id"]),
+        )
+        return {"provider": provider}
+    except ModelRegistryError as exc:
+        raise _registry_http_error(exc) from exc
+
+
+@app.put("/api/my/model-providers/{provider_id}")
+async def my_update_llm_provider(
+    provider_id: int,
+    data: LLMProviderPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        provider = await asyncio.to_thread(
+            update_llm_provider,
+            provider_id, _provider_payload(data), current_user["id"],
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=current_user.get("role") == "superadmin",
+        )
+        return {"provider": provider}
+    except ModelRegistryError as exc:
+        raise _registry_http_error(exc) from exc
+
+
+@app.delete("/api/my/model-providers/{provider_id}")
+async def my_delete_llm_provider(
+    provider_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        await asyncio.to_thread(
+            delete_llm_provider,
+            provider_id, current_user["id"],
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=current_user.get("role") == "superadmin",
+        )
+        return {"message": "模型供应商配置已删除"}
+    except ModelRegistryError as exc:
+        raise _registry_http_error(exc) from exc
+
+
+@app.post("/api/my/model-providers/probe-models")
+async def my_probe_models(
+    data: ProbeModelsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """向导第三步：按填写的凭据访问供应商 models 端点拉取模型列表。"""
+    del current_user
+    try:
+        result = await asyncio.to_thread(
+            fetch_provider_models, data.provider, data.base_url, data.api_key,
+        )
+        return result
+    except ModelRegistryError as exc:
+        raise _registry_http_error(exc) from exc
+
+
+@app.post("/api/my/model-providers/{provider_id}/probe-models")
+async def my_probe_models_saved(
+    provider_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """编辑对话框：用已保存凭据重新拉取该供应商的模型列表（限自己的配置）。"""
+    try:
+        saved = await asyncio.to_thread(
+            get_llm_provider, provider_id, include_secret=True,
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=current_user.get("role") == "superadmin",
+        )
+        if saved is None:
+            raise HTTPException(status_code=404, detail="模型 API 配置不存在")
+        result = await asyncio.to_thread(
+            fetch_provider_models,
+            saved["provider"], saved.get("base_url") or "", saved.get("api_key") or "",
+        )
+        return result
+    except ModelRegistryError as exc:
+        raise _registry_http_error(exc) from exc
+
+
+@app.post("/api/my/model-providers/{provider_id}/models", status_code=status.HTTP_201_CREATED)
+async def my_add_provider_model(
+    provider_id: int,
+    data: ProviderModelPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        model = await asyncio.to_thread(
+            add_provider_model, provider_id, _model_entry_payload(data), current_user["id"],
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=current_user.get("role") == "superadmin",
+        )
+        return {"model": model}
+    except ModelRegistryError as exc:
+        raise _registry_http_error(exc) from exc
+
+
+@app.put("/api/my/model-providers/{provider_id}/models")
+async def my_update_provider_model(
+    provider_id: int,
+    data: ProviderModelUpdatePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    payload = _model_entry_payload(data)
+    model_name = str(payload.pop("model", "") or "").strip()
+    if not model_name:
+        raise HTTPException(status_code=422, detail="缺少目标模型名称 model")
+    try:
+        model = await asyncio.to_thread(
+            update_provider_model, provider_id, model_name, payload, current_user["id"],
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=current_user.get("role") == "superadmin",
+        )
+        return {"model": model}
+    except ModelRegistryError as exc:
+        raise _registry_http_error(exc) from exc
+
+
+@app.delete("/api/my/model-providers/{provider_id}/models")
+async def my_delete_provider_model(
+    provider_id: int,
+    model: str,
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        await asyncio.to_thread(
+            delete_provider_model, provider_id, model, current_user["id"],
+            actor_user_id=int(current_user["id"]),
+            actor_is_superadmin=current_user.get("role") == "superadmin",
+        )
+        return {"message": f"模型 {model} 已删除"}
+    except ModelRegistryError as exc:
+        raise _registry_http_error(exc) from exc
+
+
+@app.get("/api/agent-model-bindings")
+async def get_my_agent_model_bindings(current_user: dict = Depends(get_current_user)):
+    """当前用户的 Agent 模型分工（全部角色，未绑定为空）。"""
+    bindings = await asyncio.to_thread(get_agent_model_bindings, int(current_user["id"]))
+    return {
+        "roles": [
+            {
+                "role": role,
+                "label": ROLE_LABELS.get(role, role),
+                **(bindings.get(role) or {
+                    "provider": "", "model": "", "thinking_intensity": None,
+                }),
+            }
+            for role in AGENT_MODEL_ROLES
+        ],
+        "intensities": list(INTENSITIES),
+    }
+
+
+@app.put("/api/agent-model-bindings")
+async def put_my_agent_model_bindings(
+    data: AgentModelBindingsPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """整体保存 Agent 模型分工；绑定值校验限于当前用户作用域内可用配置。"""
+    user_id = int(current_user["id"])
+    invalid_role = next((r for r in data.bindings if r not in AGENT_MODEL_ROLES), None)
+    if invalid_role:
+        raise HTTPException(
+            status_code=422, detail=f"未知的 Agent 角色: {invalid_role}",
+        )
+    to_upsert = {
+        role: binding for role, binding in data.bindings.items() if binding is not None
+    }
+    if to_upsert:
+        scope = _owner_scope(current_user)
+        available: dict[str, set[str]] = {}
+        for item in await asyncio.to_thread(active_llm_providers, **scope):
+            available[str(item.get("runtime_key") or item["provider"])] = {
+                str(m) for m in (item.get("models") or [])
+            }
+        for role, binding in to_upsert.items():
+            models = available.get(binding.provider)
+            if models is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"角色 {role} 绑定的供应商 {binding.provider} 未启用或不存在",
+                )
+            if binding.model not in models:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"角色 {role} 绑定的模型 {binding.model} 不在供应商可用模型列表中",
+                )
+    for role, binding in data.bindings.items():
+        if binding is None:
+            await asyncio.to_thread(clear_agent_model_binding, user_id, role)
+        else:
+            await asyncio.to_thread(
+                set_agent_model_binding,
+                user_id, role, binding.provider, binding.model,
+                binding.thinking_intensity,
+            )
+    bindings = await asyncio.to_thread(get_agent_model_bindings, user_id)
+    return {"bindings": bindings}
 
 
 # ══════════════════════════════════════════════════
@@ -2056,12 +2397,15 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
     except WorkspaceCapacityError as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from exc
     model_field = (req.model or "").strip()
-    enabled_configs = await asyncio.to_thread(active_llm_providers)
+    # 校验范围限定为当前用户可用的模型池（普通用户=私有配置；超管=平台+私有）。
+    enabled_configs = await asyncio.to_thread(
+        active_llm_providers, **_owner_scope(current_user),
+    )
     enabled_keys = {item["runtime_key"] for item in enabled_configs}
     if req.provider not in enabled_keys:
         raise HTTPException(
             status_code=422,
-            detail=f"模型配置未在 Web 管理中启用：{req.provider}",
+            detail=f"模型配置未启用或不在你的可用模型池中：{req.provider}",
         )
     enabled_entry = next(
         (item for item in enabled_configs if item.get("runtime_key") == req.provider),

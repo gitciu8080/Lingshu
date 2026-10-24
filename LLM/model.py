@@ -899,18 +899,29 @@ def create_model(
     )
 
 
-def create_vision_model(runtime: RuntimeConfig | None = None):
+def create_vision_model(
+    runtime: RuntimeConfig | None = None,
+    owner_user_id: int | None = None,
+    owner_is_superadmin: bool = False,
+):
     """从模型注册表解析视觉模型并构建实例（多供应商通用）。
 
     仅当注册表中有启用配置登记了 ``vision_models``（如智谱 glm-5.3-flash
     被标记多模态）时返回视觉模型实例；否则返回 None——本部署即为纯文本
     大模型，调用方不挂载视觉工具。不存在 .env 回退。
+
+    ``owner_user_id`` 按用户作用域过滤候选配置（None=平台池/CLI，
+    与 RuntimeConfig.from_env 语义一致）。
     """
     runtime = runtime or RuntimeConfig.from_env()
     try:
         from core.model_registry import active_llm_providers
 
-        for item in active_llm_providers(include_secrets=True):
+        for item in active_llm_providers(
+            include_secrets=True,
+            owner_user_id=owner_user_id,
+            owner_is_superadmin=owner_is_superadmin,
+        ):
             if item.get("api_key_status") == "invalid":
                 continue
             vision_models = [
