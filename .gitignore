@@ -35,3 +35,16 @@ docs/
 docs/*
 *.bak
 .zcode/*
+data/users.db.example.ntyx2po5-shm
+.gitignore
+data/model_api_configs.v1-20260830T173326Z.bak.json
+serveo2.log
+reasonix.toml
+model_management_migration.patch
+git
+.htaccess
+Tools/volatility/.gitattributes
+.gitignore
+docs/session_stats.csv
+docs/session_statistics.md
+reasonix.toml

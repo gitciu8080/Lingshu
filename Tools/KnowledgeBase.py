@@ -159,27 +159,84 @@ class RAGService:
             from pydantic import SecretStr
 
             class _FullEndpointEmbeddingsClient:
-                """把 ``embeddings.create`` 重定向到网关根路径的客户端代理。
-
-                注册地址本身已是完整的 ``/embeddings`` 资源端点（如聚合网关
-                直接暴露该资源），标准 SDK 拼接会形成重复路径，因此改用根
-                路径 POST，请求体保持 OpenAI embeddings 原生格式。
-                """
-
+                """把 embeddings.create 重定向到网关根路径，并自动分批。"""
+            
+                MAX_BATCH_SIZE = 64
+            
                 def __init__(self, inner) -> None:
                     self._inner = inner
                     self.embeddings = self
-
+            
                 async def create(self, **api_kwargs):
                     from openai.types.embedding import CreateEmbeddingResponse
-
-                    return await self._inner.post(
-                        "/",
-                        cast_to=CreateEmbeddingResponse,
-                        body=api_kwargs,
-                        stream=False,
+            
+                    inputs = api_kwargs.get("input")
+            
+                    # 单条字符串，直接发送
+                    if isinstance(inputs, str):
+                        return await self._inner.post(
+                            "/",
+                            cast_to=CreateEmbeddingResponse,
+                            body=api_kwargs,
+                            stream=False,
+                        )
+            
+                    # 不是列表，直接发送
+                    if not isinstance(inputs, list):
+                        return await self._inner.post(
+                            "/",
+                            cast_to=CreateEmbeddingResponse,
+                            body=api_kwargs,
+                            stream=False,
+                        )
+            
+                    # ≤64 条，不分批
+                    if len(inputs) <= self.MAX_BATCH_SIZE:
+                        return await self._inner.post(
+                            "/",
+                            cast_to=CreateEmbeddingResponse,
+                            body=api_kwargs,
+                            stream=False,
+                        )
+            
+                    # 超过 64 条，自动切批
+                    all_data = []
+                    total_tokens = 0
+            
+                    for i in range(0, len(inputs), self.MAX_BATCH_SIZE):
+                        batch = inputs[i:i + self.MAX_BATCH_SIZE]
+            
+                        body = dict(api_kwargs)
+                        body["input"] = batch
+            
+                        resp = await self._inner.post(
+                            "/",
+                            cast_to=CreateEmbeddingResponse,
+                            body=body,
+                            stream=False,
+                        )
+            
+                        # 合并 embeddings
+                        if hasattr(resp, "data"):
+                            for item in resp.data:
+                                item.index = len(all_data)
+                                all_data.append(item)
+            
+                        # 合并 token 使用量
+                        if hasattr(resp, "usage") and resp.usage:
+                            total_tokens += getattr(resp.usage, "total_tokens", 0)
+            
+                    # 构造最终返回对象
+                    return CreateEmbeddingResponse(
+                        object="list",
+                        data=all_data,
+                        model=api_kwargs.get("model", ""),
+                        usage={
+                            "prompt_tokens": total_tokens,
+                            "total_tokens": total_tokens,
+                        },
                     )
-
+            
                 def __getattr__(self, name: str) -> Any:
                     return getattr(self._inner, name)
 
