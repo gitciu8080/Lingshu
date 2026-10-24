@@ -31,3 +31,7 @@ data/*.db
 data/users.db
 data/*.db-wal
 data/*.db-shm
+docs/
+docs/*
+*.bak
+.zcode/*
