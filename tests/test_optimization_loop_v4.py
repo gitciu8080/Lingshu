@@ -107,13 +107,14 @@ class ReclassificationIntegrationTest(unittest.TestCase):
             "Iris - 文件分析专家",
         )
         self.assertTrue(result.accepted)
-        self.assertEqual(final.primary, "pwn")
-        self.assertEqual(mission.category_decision["primary"], "pwn")
+        # ELF 条件归属：纯 ELF（无远程服务线索）→ reverse，不再默认 pwn。
+        self.assertEqual(final.primary, "reverse")
+        self.assertEqual(mission.category_decision["primary"], "reverse")
         self.assertEqual(mission.category_history[-1]["evidence_id"], evidence.id)
         self.assertGreaterEqual(len(mission.facts), 1)
 
         skills = _build_skill_list(mission.category_decision, Path(__file__).parents[1])
-        self.assertTrue(any("ctf-pwn" in item for item in skills))
+        self.assertTrue(any("ctf-reverse" in item for item in skills))
         self.assertFalse(any("ctf-web" in item for item in skills))
 
     def test_same_recon_batch_is_not_scored_twice(self) -> None:

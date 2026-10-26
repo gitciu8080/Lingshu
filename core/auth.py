@@ -112,6 +112,8 @@ def init_db():
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
         if "auth_epoch" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 0")
+        if "onboarded" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN onboarded INTEGER NOT NULL DEFAULT 0")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS user_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,6 +174,18 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_onboarded(user_id: int) -> None:
+    """标记用户已完成首次登录引导（幂等）。"""
+    conn: sqlite3.Connection = get_db()
+    try:
+        conn.execute(
+            "UPDATE users SET onboarded = 1 WHERE id = ?", (user_id,),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -425,6 +439,7 @@ def get_current_user(
         "username": user["username"],
         "email": user.get("email", ""),
         "role": user["role"],
+        "onboarded": bool(user.get("onboarded")),
     }
 
 

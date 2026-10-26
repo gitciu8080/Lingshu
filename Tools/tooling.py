@@ -137,6 +137,32 @@ def reset_action_lifecycle_handler(token: Token) -> None:
     _ACTION_LIFECYCLE_HANDLER.reset(token)
 
 
+# 技能索引瘦身模板：框架默认模板（agentscope/tool/_toolkit.py
+# DEFAULT_SKILL_INSTRUCTION）逐字注入 description，ctf 类技能描述偏长时
+# 索引体积可观；这里保持结构不变，仅对超长描述截断（目录保留，模型经
+# Skill 工具仍可读到完整正文）。
+_SKILL_DESC_LIMIT = 240
+SKILL_INSTRUCTION_TEMPLATE = (
+    """<agent-skills>
+Skills are a collection of instructions, scripts, and resources to extend your capabilities.
+
+**IMPORTANT**: Skills are NOT tools, and you cannot call a skill directly. To use a skill, you MUST use the `{{ skill_viewer }}` tool to read the skill's full instructions, and then follow those instructions to use the tools and resources provided by the skill.
+
+# Available Skills:{% for skill in skills %}
+<skill>
+<name>{{ skill.name }}</name>
+<description>{{ skill.description[:"""
+    + str(_SKILL_DESC_LIMIT)
+    + """] }}{% if skill.description|length > """
+    + str(_SKILL_DESC_LIMIT)
+    + """ %}…{% endif %}</description>
+<dir>{{ skill.dir }}</dir>
+</skill>{% endfor %}
+</agent-skills>
+"""
+)
+
+
 class StrictJSONToolkit(Toolkit):
     """在 AgentScope 的宽松 JSON 修复器之前执行严格工具参数闸门。
 
@@ -145,6 +171,7 @@ class StrictJSONToolkit(Toolkit):
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("skill_instruction_template", SKILL_INSTRUCTION_TEMPLATE)
         super().__init__(*args, **kwargs)
         self._consecutive_json_failures = 0
 
@@ -1257,6 +1284,7 @@ def create_scoped_shell_tool(
     role: str = "",
     artifact_root: str | Path | None = None,
     return_tail: int = 4000,
+    read_only: bool = False,
 ) -> AllowedFunctionTool:
     """创建仅允许触达指定目标的 Shell 工具。
 
@@ -1272,6 +1300,8 @@ def create_scoped_shell_tool(
             不再硬截断 20KB/6KB；同时维护 ``artifacts/manifest.jsonl``。
             为 None 时保持旧行为（内存截断，向后兼容）。
         return_tail: v2 模式下返回值携带的尾部字节数。
+        read_only: 只读模式（快速模式指挥官用）：整条命令（含管道每段）
+            必须命中白名单命令，禁止重定向；执行类操作应派专家 Agent。
     """
     workdir = str(Path(cwd).resolve())
     artifacts_root = Path(artifact_root).resolve() if artifact_root is not None else None
@@ -1285,6 +1315,10 @@ def create_scoped_shell_tool(
         Args:
             command: 要执行的 shell 命令；所有网络命令必须显式包含授权目标。
         """
+        if read_only:
+            check = _check_read_only_command(command)
+            if check is not None:
+                return check
         try:
             result = await _run_scoped_command(
                 command,
@@ -1306,9 +1340,56 @@ def create_scoped_shell_tool(
     return AllowedFunctionTool(
         scoped_shell,
         name="scoped_shell",
-        description="在 Kali 中执行仅限当前授权目标的命令，并返回退出码、标准输出和错误。",
+        description=(
+            "在 Kali 中执行仅限当前授权目标的命令，并返回退出码、标准输出和错误。"
+            + ("（只读模式：仅允许本地查验类白名单命令，禁止重定向）" if read_only else "")
+        ),
         is_concurrency_safe=False,
     )
+
+
+# 只读模式白名单：本地查验类命令（快速模式指挥官自有 shell 用）。
+# 任何写操作/网络探测/脚本执行都不在列——需要时派对应专家 Agent。
+# 注意：sed/awk 不在列（-i 原地写、system() 执行能力无法在命令层排除）。
+_READ_ONLY_COMMANDS: frozenset[str] = frozenset({
+    "file", "cat", "head", "tail", "strings", "xxd", "od", "hexdump",
+    "binwalk", "ls", "find", "stat", "wc", "md5sum", "sha1sum", "sha256sum",
+    "sha512sum", "exiftool", "identify", "du", "basename", "dirname",
+    "realpath", "readlink", "grep", "egrep", "fgrep", "rg",
+    "cut", "sort", "uniq", "tr", "diff", "cmp", "date", "uname", "id",
+    "base64", "rev", "seq",
+})
+_READ_ONLY_OUTPUT_REDIRECT = re.compile(r"(?:^|[^<>])>{1,2}|<")
+
+
+def _check_read_only_command(command: str) -> str | None:
+    """只读校验：返回错误说明文本（拒绝），None 表示放行。
+
+    规则：无重定向/输入重定向/命令替换/分号与 && 串联中的每段命令
+    （含管道每段）的首命令必须在白名单内。
+    """
+    command = command.strip()
+    if not command:
+        return "命令为空。"
+    if _READ_ONLY_OUTPUT_REDIRECT.search(command) or "`" in command or "$(" in command:
+        return (
+            "[只读 Shell] 禁止重定向、输入重定向与命令替换。"
+            "需要写文件或执行脚本时，请改用 spawn_expert 派对应专家。"
+        )
+    segments = re.split(r"[;|&]{1,2}", command)
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+        head = segment.split()[0]
+        head_base = Path(head).name
+        if head_base not in _READ_ONLY_COMMANDS:
+            return (
+                f"[只读 Shell] 命令 “{head_base}” 不在只读白名单内"
+                "（允许：file/cat/strings/xxd/binwalk/grep 等本地查验命令）。"
+                "执行类操作请用 spawn_expert 派对应专家。"
+            )
+    return None
 
 
 def create_parallel_scoped_shell_tool(

@@ -37,6 +37,7 @@ from core.auth import (
     decode_access_token,
     get_user_by_username,
     get_user_by_id,
+    mark_onboarded,
     update_user_profile,
     change_own_password,
     list_users,
@@ -734,7 +735,8 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                            thinking_intensity: str = "medium",
                            nss_context: dict | None = None, slab_context: dict | None = None, resume: bool = False,
                            qwen_tool_call_mode: str | None = None,
-                           authorized_target: str | None = None):
+                           authorized_target: str | None = None,
+                           run_mode: str = "standard"):
     """运行任务并处理清理逻辑。"""
     status_val = "failed"
     phase = "initializing"
@@ -762,6 +764,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             resume=resume,
             user_id=ctx.user_id,
             authorized_target=authorized_target,
+            run_mode=run_mode,
         )
         # 如果 Orchestrator 已经确定完成并取得 Flag，迟到的前端取消请求不得覆盖成功终态。
         mission_completed = bool(
@@ -1226,6 +1229,7 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
             "username": user["username"],
             "email": user.get("email", ""),
             "role": user["role"],
+            "onboarded": bool(user.get("onboarded")),
         }
         return await call_next(request)
 
@@ -1282,8 +1286,12 @@ class MissionStartRequest(BaseModel):
         description="Qwen 工具调用难度: simple（扁平兼容）| standard（批量嵌套）",
     )
     source_session_id: str | None = Field(default=None, description="重跑来源会话ID，用于注入前次任务上下文")
-    nss_context: dict | None = Field(default=None, description="NSSCTF Arena 上下文（attempt_id/token/api_base），供 Orchestrator 在线提交 Flag")
-    slab_context: dict | None = Field(default=None, description="slab-match 平台上下文（exercise_id/access_key/api_base），供 Orchestrator 在线提交 Flag")
+    mode: str | None = Field(
+        default=None, pattern="^(standard|fast)$",
+        description="运行模式：standard=完整渗透工作流（默认）| fast=快速模式（单指挥官调度，主打夺旗速度）",
+    )
+    nss_context: dict | None = Field(default=None, description="NSSCTF Arena 上下文（attempt_id/token/api_base），供在线提交 Flag")
+    slab_context: dict | None = Field(default=None, description="slab-match 平台上下文（exercise_id/access_key/api_base），供在线提交 Flag")
 
 
 def _normalize_user_authorized_target(value: str) -> str:
@@ -1609,6 +1617,13 @@ async def change_password(
         int(current_user["id"]), data.old_password, data.new_password,
     )
     return {"message": "密码已修改，所有登录状态已失效，请使用新密码重新登录"}
+
+
+@app.put("/auth/onboarded")
+async def mark_user_onboarded(current_user: dict = Depends(get_current_user)):
+    """标记当前用户已完成首次登录引导向导（幂等）。"""
+    await asyncio.to_thread(mark_onboarded, int(current_user["id"]))
+    return {"message": "引导已完成"}
 
 
 @app.post("/auth/logout")
@@ -2515,7 +2530,9 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
         _active_sessions[session_id] = ctx
         _recent_session_creations[fingerprint] = (now, session_id)
 
-    # 持久化到 DB（传入 API 层生成的 session_id）
+    # 持久化到 DB（传入 API 层生成的 session_id；run_mode 写入 target_info
+    # 作为会话模式标识——零 schema 变更，前端据此显示 FAST 徽章）
+    run_mode = (req.mode or "standard").strip().lower()
     workspace_id = get_workspace_service().workspace_id(current_user["id"], session_id)
     try:
         await ps.submit([
@@ -2528,6 +2545,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
             target_info_operation(session_id, {
                 "authorized_target": authorized_target,
                 "attachment_target": attachment_target or "",
+                "run_mode": run_mode,
             }),
             session_update_operation(
                 session_id, workspace_id=workspace_id, workspace_version=2,
@@ -2566,7 +2584,8 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
                          slab_context=req.slab_context,
                          thinking_intensity=thinking_intensity,
                          qwen_tool_call_mode=req.qwen_tool_call_mode,
-                         authorized_target=(authorized_target if attachment_target else None))
+                         authorized_target=(authorized_target if attachment_target else None),
+                         run_mode=run_mode)
     )
     ctx.task = task
 

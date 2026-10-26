@@ -90,20 +90,49 @@ _KEYWORD_WEIGHTS: dict[CategoryName, list[str]] = {
 }
 
 # 文件类型检测信号（强信号，高分值）
+# 注意：ELF 特征不在此表 —— ELF 是 pwn 与 reverse 的共同载体，归属需按
+# "是否伴随远程服务线索" 条件判定（见 _attribute_elf_signals）。
 _FILE_TYPE_SIGNALS: dict[str, list[str]] = {
-    "pwn": ["ELF", "executable, x86", "LSB executable", "ELF 64-bit"],
     "reverse": ["Mach-O", "PE32", "DEX", "Java class", "WASM", "APK"],
     "forensics": ["pcap", "pcapng", "tcpdump", "PCAP", "PCAPNG"],
     "malware": ["PE32+", "Microsoft executable"],
     "misc": ["Python script", "ASCII text"],
 }
 
+# ELF 文件特征（file 魔法输出片段与扩展名）：单独收集后条件归属。
+_ELF_FILE_TYPE_SIGNALS: list[str] = [
+    "ELF", "executable, x86", "LSB executable", "ELF 64-bit",
+]
+_ELF_EXTENSIONS: list[str] = [".elf"]
+
+# 远程服务连接线索：nc/ncat host port、host:port 连接提示等。
+# CTF 惯例：pwn 题（二进制利用）会提供远程服务；逆向题只给单文件。
+_REMOTE_SERVICE_RE = re.compile(
+    r"\bnc(?:at)?\s+[a-z0-9.\-]+\s+\d{1,5}\b"          # nc 1.2.3.4 8888
+    r"|\b(?:telnet|ssh|连接|攻击)\s*(?:远程|目标)?\s*[a-z0-9.\-]+:\d{1,5}\b"
+    r"|\bremote\s+(?:service|server|instance)\b"
+    r"|(?:远程|remote)[^\n]{0,12}(?:服务器|服务|地址|端口)"
+    r"|[a-z0-9.\-]+:\d{4,5}\s*(?:端口|连接)",
+    re.IGNORECASE,
+)
+
+# ELF 存在时的辅助偏置（弱于文件信号）。libc/ld 附件是 ret2libc 类
+# pwn 题的标志性提供物，权重与文件信号持平。
+_PWN_BIAS_RE = re.compile(r"\blibc\b|\bld-linux\b|\bld\.[-\w]*linux|ret2libc", re.IGNORECASE)
+_REVERSE_BIAS_RE = re.compile(
+    r"\bupx\b|packed|加壳|脱壳|\blicense\b|\bkeygen\b|注册码|序列号|crackme",
+    re.IGNORECASE,
+)
+
 # 文件类型信号权重
 _FILE_SIGNAL_WEIGHT = 10
+# ELF 辅助偏置权重：libc 偏置 = 文件信号级；加壳/注册类偏置 = 弱偏置
+_ELF_PWN_BIAS_WEIGHT = 10
+_ELF_REVERSE_BIAS_WEIGHT = 6
 
 # 扩展名强信号：独立于题面文本，文件类型证据优先于弱关键词
+# （.elf 已移入 _ELF_EXTENSIONS 条件归属）
 _EXTENSION_SIGNALS: dict[str, list[str]] = {
-    "pwn": [".elf"],
     "reverse": [".exe", ".dll", ".apk", ".dex", ".class", ".wasm", ".so", ".ko"],
     "forensics": [
         ".pcap", ".pcapng", ".raw", ".img", ".dd", ".mem", ".vmem",
@@ -186,6 +215,38 @@ class ReclassificationResult:
 # ---------------------------------------------------------------------------
 
 
+def _attribute_elf_signals(
+    scores: dict[str, float],
+    evidence: list[str],
+    *,
+    elf_hits: list[str],
+    context_text: str,
+    source: str = "",
+    weight: float = _FILE_SIGNAL_WEIGHT,
+) -> None:
+    """ELF 证据的条件归属：伴随远程服务线索 → pwn，否则 → reverse。
+
+    CTF 惯例：pwn 题（二进制利用）在 ELF 之外还会提供 nc/远程服务地址；
+    逆向题通常只给一个可执行文件。辅助偏置：libc/ld 附件偏 pwn，
+    加壳/license/序列号特征偏 reverse（仅在 ELF 证据存在时生效）。
+    """
+    if not elf_hits:
+        return
+    lowered = context_text.lower()
+    if _REMOTE_SERVICE_RE.search(lowered):
+        scores["pwn"] = scores.get("pwn", 0) + weight
+        evidence.append(f"{source}ELF 信号且含远程服务线索 → pwn: {'、'.join(elf_hits)}")
+    else:
+        scores["reverse"] = scores.get("reverse", 0) + weight
+        evidence.append(f"{source}ELF 信号（无远程服务线索）→ reverse: {'、'.join(elf_hits)}")
+    if _PWN_BIAS_RE.search(lowered):
+        scores["pwn"] = scores.get("pwn", 0) + _ELF_PWN_BIAS_WEIGHT
+        evidence.append(f"{source}libc/ld 附件特征偏置 → pwn +{_ELF_PWN_BIAS_WEIGHT}")
+    if _REVERSE_BIAS_RE.search(lowered):
+        scores["reverse"] = scores.get("reverse", 0) + _ELF_REVERSE_BIAS_WEIGHT
+        evidence.append(f"{source}加壳/注册类特征偏置 → reverse +{_ELF_REVERSE_BIAS_WEIGHT}")
+
+
 def classify(
     target_spec: TargetSpec,
     goal: str,
@@ -241,10 +302,29 @@ def classify(
                     scores[cat] += _FILE_SIGNAL_WEIGHT
                     evidence.append(f"文件信号命中 {cat}: {signal}")
                     break
-        # 扩展名强信号（独立于题面文本，文件类型证据优先）
+        # ELF 证据条件归属（pwn 需远程服务线索，纯 ELF 归 reverse）
+        elf_hits = [
+            signal for signal in _ELF_FILE_TYPE_SIGNALS
+            if signal.lower() in manifest_text
+        ] + [
+            ext for ext in _ELF_EXTENSIONS if ext in manifest_text
+        ]
+        _attribute_elf_signals(
+            scores, evidence,
+            elf_hits=elf_hits,
+            context_text=f"{goal_lower} {manifest_text}",
+            source="文件信号：",
+        )
+        # 扩展名强信号（独立于题面文本，文件类型证据优先）。
+        # 例外：libc/ld 运行时附件的 .so 是 pwn 题提供物而非逆向对象，
+        # 出现 libc 偏置特征时 .so 不再给 reverse 加分。
+        libc_attachment = bool(_PWN_BIAS_RE.search(manifest_text))
         for cat, extensions in _EXTENSION_SIGNALS.items():
             for ext in extensions:
                 if ext in manifest_text:
+                    if ext == ".so" and libc_attachment:
+                        evidence.append("扩展名 .so 为 libc 运行时附件，不计 reverse")
+                        break
                     scores[cat] += _FILE_SIGNAL_WEIGHT
                     evidence.append(f"扩展名信号命中 {cat}: {ext}")
                     break
@@ -333,6 +413,16 @@ def reclassify(
                 evidence.append(f"Recon 文件信号命中 {cat}: {signal}")
                 break
 
+    # ELF 证据条件归属（pwn 需远程服务线索，纯 ELF 归 reverse）
+    elf_hits = [signal for signal in _ELF_FILE_TYPE_SIGNALS if signal.lower() in all_text]
+    if elf_hits:
+        _attribute_elf_signals(
+            scores, evidence,
+            elf_hits=elf_hits,
+            context_text=f"{all_text} {' '.join(recon_evidence)}",
+            source="Recon ",
+        )
+
     # 重新排名
     if all(v == 0 for v in scores.values()):
         return CategoryDecision(
@@ -389,6 +479,21 @@ def extract_recon_signals(recon_evidence: list[str]) -> list[ReconSignal]:
                     0.95,
                 )
                 break
+
+    # ELF 证据条件归属：报告同时出现 ELF 与远程服务连接线索 → pwn 强信号；
+    # 纯 ELF（无远程）→ reverse 强信号。
+    for pattern in _ELF_FILE_TYPE_SIGNALS:
+        if pattern.lower() in lowered:
+            has_remote = bool(_REMOTE_SERVICE_RE.search(lowered))
+            owner: CategoryName = "pwn" if has_remote else "reverse"
+            suffix = "且含远程服务连接线索" if has_remote else "（无远程服务线索）"
+            add(
+                owner,
+                f"Recon 工具输出确认 ELF 文件{suffix}：{pattern}",
+                float(_FILE_SIGNAL_WEIGHT),
+                0.95,
+            )
+            break
 
     # HTTP 状态行、响应头和结构化侦察结论中的“协议: HTTP”都属于协议级
     # 证据，比题面中的普通“web/http”关键词可靠。报告通常会把 curl 原始
@@ -468,9 +573,11 @@ def evaluate_reclassification(
             candidate.confidence >= 0.55 or strong_new_signal
         )
     else:
+        # pwn 与 reverse 共享 ELF 特征、易互混，翻盘领先门槛放宽为 3 分。
+        lead = 3.0 if {previous.primary, candidate.primary} == {"pwn", "reverse"} else 5.0
         accepted = (
             candidate.confidence >= 0.55
-            and candidate_score >= previous_score + 5.0
+            and candidate_score >= previous_score + lead
             and strong_new_signal
         )
     reason = (

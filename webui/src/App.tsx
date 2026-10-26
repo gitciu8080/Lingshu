@@ -36,6 +36,7 @@ import {
   UserCog,
   Wrench,
   X,
+  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
@@ -43,6 +44,7 @@ import remarkGfm from "remark-gfm";
 import { accountStream, api, auth, Event, ManagedProvider, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, PlatformUsageSummary, ProviderCatalogEntry, PythonEnvironmentStatus, Session, stream, SystemUser, ToolStatus } from "./api";
 import { ProviderWizardDialog } from "./ProviderWizard";
 import UserSettingsPage, { UsageDayPicker, UsageGroupTable, UsageStatCards } from "./UserSettings";
+import OnboardingWizard, { onboardingResumeStep } from "./OnboardingWizard";
 import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
 
@@ -1092,8 +1094,48 @@ function useModelProviders() {
   return providers;
 }
 
-function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
+// ── 运行模式（standard=完整渗透工作流 / fast=快速夺旗）：全局默认 + 单任务可改 ──
+export type RunMode = "standard" | "fast";
+
+function useRunMode() {
+  const [runMode, setRunMode] = useState<RunMode>(() =>
+    localStorage.getItem("lingshu_run_mode") === "fast" ? "fast" : "standard");
+  const toggleRunMode = useCallback((mode?: RunMode) => {
+    setRunMode((old) => {
+      const next = mode ?? (old === "fast" ? "standard" : "fast");
+      localStorage.setItem("lingshu_run_mode", next);
+      return next;
+    });
+  }, []);
+  return { runMode, toggleRunMode };
+}
+
+function ModePicker({ value, onChange }: { value: RunMode; onChange: (mode: RunMode) => void }) {
+  return (
+    <div className="mode-picker" role="radiogroup" aria-label="运行模式">
+      <button
+        type="button"
+        className={value === "standard" ? "selected" : ""}
+        onClick={() => onChange("standard")}
+      >
+        <b>标准模式</b>
+        <small>完整渗透工作流：侦察 → 规划 → 审批 → 攻击 → 报告</small>
+      </button>
+      <button
+        type="button"
+        className={value === "fast" ? "selected" : ""}
+        onClick={() => onChange("fast")}
+      >
+        <b>快速模式 ⚡</b>
+        <small>单指挥官调度专家子 Agent，跳过规划与人工审批，主打夺旗速度</small>
+      </button>
+    </div>
+  );
+}
+
+function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => void; openSignal?: number }) {
   const providers = useModelProviders();
+  const { runMode, toggleRunMode } = useRunMode();
   const [open, setOpen] = useState(false),
     [target, setTarget] = useState(""),
     [files, setFiles] = useState<File[]>([]),
@@ -1103,6 +1145,10 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
     [model, setModel] = useState(""),
     [intensity, setIntensity] = useState("medium"),
     [qwenToolMode, setQwenToolMode] = useState("simple");
+  // 单任务模式（默认跟随全局，对话框内可改）
+  const [mode, setMode] = useState<RunMode>("standard");
+  useEffect(() => { if (open) setMode(runMode); }, [open, runMode]);
+  useEffect(() => { if (openSignal > 0) setOpen(true); }, [openSignal]);
   const selectedProvider = providers.find((item) => item.id === provider);
   const submitLock = useRef(false);
   useEffect(() => {
@@ -1144,6 +1190,7 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
         provider,
         model,
         thinking_intensity: intensity,
+        ...(mode === "fast" ? { mode: "fast" } : {}),
         ...(provider === "qwen" || provider.startsWith("qwen::")
           ? { qwen_tool_call_mode: qwenToolMode } : {}),
       });
@@ -1170,9 +1217,12 @@ function NewMission({ onCreated }: { onCreated: (id: string) => void }) {
         <Dialog.Overlay className="overlay" />
         <Dialog.Content className="modal submission-modal">
           <Dialog.Title>创建授权测试任务</Dialog.Title>
-          <p>所有攻击类操作都将在利用前要求人工批准。</p>
+          <p>{mode === "fast"
+            ? "快速模式：指挥官直接调度专家解题，利用审批已自动预置（CTF 沙箱场景）。"
+            : "所有攻击类操作都将在利用前要求人工批准。"}</p>
           <form onSubmit={submit}>
             <fieldset disabled={submitting} className="submission-fields">
+            <ModePicker value={mode} onChange={setMode} />
             <label>
               授权目标（可与附件同时填写）
               <input
@@ -1276,6 +1326,7 @@ function RerunMission({
   onCreated: (id: string) => void;
 }) {
   const providers = useModelProviders();
+  const { runMode, toggleRunMode } = useRunMode();
   const [target, setTarget] = useState(""),
     [goal, setGoal] = useState("获取 Flag / 执行任务书内容 / 测试目标"),
     [provider, setProvider] = useState("deepseek"),
@@ -1283,7 +1334,8 @@ function RerunMission({
     [intensity, setIntensity] = useState("medium"),
     [qwenToolMode, setQwenToolMode] = useState("simple"),
     [withContext, setWithContext] = useState(true),
-    [submitting, setSubmitting] = useState(false);
+    [submitting, setSubmitting] = useState(false),
+    [mode, setMode] = useState<RunMode>("standard");
   const selectedProvider = providers.find((item) => item.id === provider);
   const submitLock = useRef(false);
 
@@ -1294,7 +1346,13 @@ function RerunMission({
     setProvider(String(source.provider || "deepseek"));
     setModel(String(source.model || ""));
     setWithContext(true);
-  }, [open, source]);
+    // 默认沿用全局模式；来源会话自身是快速模式时跟随它
+    setMode(
+      (source as { target_info?: { run_mode?: string } }).target_info?.run_mode === "fast"
+        ? "fast"
+        : runMode,
+    );
+  }, [open, source, runMode]);
 
   useEffect(() => {
     if (!open || !providers.length) return;
@@ -1347,6 +1405,7 @@ function RerunMission({
         provider,
         model,
         thinking_intensity: intensity,
+        ...(mode === "fast" ? { mode: "fast" } : {}),
         ...(provider === "qwen" || provider.startsWith("qwen::")
           ? { qwen_tool_call_mode: qwenToolMode } : {}),
         ...(withContext ? { source_session_id: source.id } : {}),
@@ -1389,6 +1448,7 @@ function RerunMission({
           </div>
           <form onSubmit={submit}>
             <fieldset disabled={submitting} className="submission-fields">
+            <ModePicker value={mode} onChange={setMode} />
             <label>
               授权目标
               <input
@@ -2355,6 +2415,9 @@ const SessionRow = memo(function SessionRow({
         <small>
           {phaseLabel(session.phase)} · {session.target || "等待任务信息"}
         </small>
+        {session.target_info?.run_mode === "fast" && (
+          <small className="fast-badge">⚡ FAST</small>
+        )}
       </div>
     </button>
   );
@@ -2392,6 +2455,9 @@ function ConsoleApp() {
       unknown
     > | null>(null),
     [outgoingQueue, setOutgoingQueue] = useState<OutgoingMessage[]>([]);
+  const { runMode, toggleRunMode } = useRunMode();
+  const [onboarding, setOnboarding] = useState(false),
+    [newMissionSignal, setNewMissionSignal] = useState(0);
   const feedRef = useRef<HTMLElement>(null);
   const autoScroll = useRef(true);
   const autoScrollEnabledRef = useRef(autoScrollEnabled);
@@ -2501,6 +2567,14 @@ function ConsoleApp() {
   }, [autoScrollEnabled]);
   useEffect(() => {
     if (ready) void load();
+  }, [ready]);
+  // 首次登录引导：后端 onboarded 标记 + 本地完成标记双保险
+  useEffect(() => {
+    if (!ready || !auth.get()) return;
+    if (localStorage.getItem("lingshu_onboarding_done") === "1") return;
+    api.me().then((me) => {
+      if (!me.onboarded || onboardingResumeStep() > 0) setOnboarding(true);
+    }).catch(() => undefined);
   }, [ready]);
   useEffect(() => {
     if (!ready) return;
@@ -3035,6 +3109,7 @@ function ConsoleApp() {
                   setActive(id);
                   void load();
                 }}
+                openSignal={newMissionSignal}
               />
             </header>
             <div className="session-search">
@@ -3190,6 +3265,18 @@ function ConsoleApp() {
                 aria-label="查看本地知识库"
               >
                 <Database size={17} />
+              </button>
+              <button
+                className={`mode-toggle ${runMode === "fast" ? "fast" : ""}`}
+                onClick={() => toggleRunMode()}
+                title={
+                  runMode === "fast"
+                    ? "当前默认：快速模式（点击切回标准模式）——单指挥官调度，跳过规划与人工审批"
+                    : "当前默认：标准模式（点击切换快速模式）——完整渗透工作流"
+                }
+              >
+                <Zap size={13} className={runMode === "fast" ? "" : "off"} />
+                {runMode === "fast" ? "FAST" : "STANDARD"}
               </button>
               <button
                 className="icon-button"
@@ -3423,6 +3510,12 @@ function ConsoleApp() {
       </div>
       <Knowledge open={knowledge} onClose={() => setKnowledge(false)} />
       <Tooling open={tooling} onClose={() => setTooling(false)} />
+      {onboarding && (
+        <OnboardingWizard
+          onClose={() => setOnboarding(false)}
+          onStartFirstMission={() => setNewMissionSignal((n) => n + 1)}
+        />
+      )}
       <MissionContextDialog
         open={missionContextOpen}
         onOpenChange={setMissionContextOpen}

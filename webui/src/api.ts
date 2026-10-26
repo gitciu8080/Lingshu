@@ -13,6 +13,7 @@ export type Session = {
   model_level?: string;
   model_name?: string;
   thinking_intensity?: string;
+  target_info?: { run_mode?: string } & Record<string, unknown>;
 };
 export type Event = Record<string, unknown> & {
   seq?: number;
@@ -271,7 +272,8 @@ export const api = {
       body: JSON.stringify({ username, password, email, invite_code }),
     }),
   version: () => request<{ branch: string; commit: string }>("/api/version"),
-  me: () => request<{ id: number; username: string; role: string }>("/auth/me"),
+  me: () => request<{ id: number; username: string; role: string; onboarded?: boolean }>("/auth/me"),
+  markOnboarded: () => request<{ message: string }>("/auth/onboarded", { method: "PUT" }),
   superadminUsers: () => request<{ users: SystemUser[] }>("/api/superadmin/users"),
   resetUserPassword: (userId: number, password: string) =>
     request<{ message: string }>(`/api/superadmin/users/${encodeURIComponent(String(userId))}/password`, {

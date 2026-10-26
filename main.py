@@ -60,6 +60,7 @@ from agent.categorize import (  # 题型自动分类与 Recon 后二次分类
     evaluate_reclassification,
 )
 from agent.Orchestrator import create_orchestrator_agent  # 战术调度核心 Agent
+from agent.Captain import create_fast_captain_agent  # 快速模式指挥官（fast）
 from agent.Recon import (
     create_artifact_triage_agent,  # 文件/归档目标的侦察（triage）Agent
     create_network_recon_agent,  # 网络目标侦察 Agent
@@ -1359,6 +1360,17 @@ def _is_session_lifecycle_tool(tool_name: str) -> bool:
     return any(token in lowered for token in _SESSION_LIFECYCLE_TOOL_TOKENS)
 
 
+def _fast_pending_report_hint(main_agent: Any) -> str | None:
+    """快速模式：后台专家报告就绪时的下一轮注入提示（无就绪报告返回 None）。"""
+    bg = getattr(main_agent, "_lingshu_bg", None)
+    if not isinstance(bg, dict) or not bg.get("ready"):
+        return None
+    return (
+        f"[系统] 有 {len(bg['ready'])} 份后台专家报告待收取，"
+        "本轮必须先调用 check_experts 收取并据此决策。"
+    )
+
+
 def _steering_interrupt_kind(steering_state: dict[str, Any] | None) -> str:
     """对 CancelledError 来源做无副作用分类（不消费 steering 队列）。
 
@@ -1400,8 +1412,16 @@ async def run_mission(
     authorized_target: str | None = None,
     model_name: str | None = None,
     thinking_intensity: str = "medium",
+    run_mode: str = "standard",
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
+
+    run_mode：
+      - standard（默认）：完整渗透工作流（Recon bootstrap → Brain 计划
+        → Orchestrator 主循环 → 人工审批），行为与历史版本完全一致；
+      - fast：快速模式（ZCode 式）——跳过 Brain/bootstrap/假设管理/
+        ScopeAuditor，由 CTF 指挥官（Captain）单 Agent 调度，经
+        spawn_expert 按需唤起专家子 Agent；exploitation 审批自动预置。
 
     整体流程（详见各阶段注释）:
       1. 解析并规范化目标（normalize_target）
@@ -1680,6 +1700,18 @@ async def run_mission(
 
     # ── 人工审批协调器（首次进入攻击阶段前的人工闸门） ──
     approval_broker = _ApprovalBroker(event_callback, input_queue)
+    if run_mode == "fast":
+        # 快速模式：CTF 靶机为短生命周期沙箱，exploitation 审批自动预置
+        # （审计可追溯）；标准模式审批语义不变。
+        if not mission.exploitation_approved:
+            mission.exploitation_approved = True
+            mission.exploitation_approval_status = "approved"
+            mission.exploitation_approval_decision = "fast_mode_auto_approved"
+            mission.record(
+                "system", "exploitation_auto_approved_fast_mode",
+                reason="快速模式预置审批（CTF 沙箱场景）",
+            )
+            store.save(mission)
 
     # 任务书声明的网络目标采用惰性范围审批（5e19dc2a 复盘）：启动不再阻塞
     # 等待人工决议，本地附件分析/Brain 规划先行；首次需要网络侦察/攻击时由
@@ -2411,26 +2443,29 @@ async def run_mission(
         qwen_flat_plan_tools = (
             provider == "qwen" and runtime.qwen_tool_call_mode == "simple"
         )
-        brain_tools = (
-            [create_add_plan_tool(mission, store, event_callback, default_origin="brain")]
-            if qwen_flat_plan_tools
-            else [create_submit_plan_tool(mission, store, event_callback)]
-        )
-        brain = create_brain_agent(
-            _role_model("brain"),
-            tools=brain_tools,
-            # Qwen 的逐条 AddPlan 通常需要 4~8 次登记加一次正文输出。
-            max_iters=(15 if qwen_flat_plan_tools else _max_react_iters(
-                target_spec.kind, "brain", complexity, thinking=model_ver,
-            )),
-            # 检索由 run_mission 在首轮 Recon 后确定性执行并显式注入，避免
-            # agentic middleware 是否被模型调用不可观测及 Brain/Attack 重复检索。
-            rag_middleware=None,
-            plan_tool_mode="item" if qwen_flat_plan_tools else "batch",
-            offloader=workspace,
-            context_config=_role_context("brain"),
-            state=build_role_agent_state(mission_id, "brain") if use_v2_workspace else None,
-        )
+        if run_mode != "fast":
+            brain_tools = (
+                [create_add_plan_tool(mission, store, event_callback, default_origin="brain")]
+                if qwen_flat_plan_tools
+                else [create_submit_plan_tool(mission, store, event_callback)]
+            )
+            brain = create_brain_agent(
+                _role_model("brain"),
+                tools=brain_tools,
+                # Qwen 的逐条 AddPlan 通常需要 4~8 次登记加一次正文输出。
+                max_iters=(15 if qwen_flat_plan_tools else _max_react_iters(
+                    target_spec.kind, "brain", complexity, thinking=model_ver,
+                )),
+                # 检索由 run_mission 在首轮 Recon 后确定性执行并显式注入，避免
+                # agentic middleware 是否被模型调用不可观测及 Brain/Attack 重复检索。
+                rag_middleware=None,
+                plan_tool_mode="item" if qwen_flat_plan_tools else "batch",
+                offloader=workspace,
+                context_config=_role_context("brain"),
+                state=build_role_agent_state(mission_id, "brain") if use_v2_workspace else None,
+            )
+        else:
+            brain = None
         analysis = LazyAgent(
             ANALYSIS_EXPERT,
             lambda: create_analysis_agent(
@@ -2498,351 +2533,378 @@ async def run_mission(
                     include_cve_search=bool(re.search(r"\bCVE-\d{4}-\d+\b", goal_text, re.IGNORECASE)),
                 )
 
-        # ── 6b. 首轮 Recon/Triage 与二次分类 ──
-        # 在 Attack/Reserve 创建前完成一次真实侦察，使接受后的分类能够直接
-        # 决定后续专家名称、Skill 与类别工具。恢复任务不重复执行该动作。
-        if not resume:
-            bootstrap_attempt = mission.begin_attempt(
-                "recon",
-                recon.name,
-                mission.target,
-                {"focus": "首轮最小化侦察与题型确认"},
+        if run_mode == "fast":
+            # ── 快速模式：跳过 bootstrap 侦察与 Brain 规划 ──
+            # 初始分类即执行分类（指挥官可随时 spawn 其它角色纠错）；
+            # 阶段直接推进到 ANALYSIS（ANALYSIS→COMPLETED/FAILED 均合法迁移）。
+            mission.plan = (
+                f"快速模式：单指挥官调度。目标：{mission.target}；"
+                f"初始题型：{category_decision.primary}。"
             )
-            try:
-                if (
-                    mission.scope_approval_status == "denied"
-                    and mission.mission_mode in {"authorized_pentest", "hybrid_taskbook"}
-                    and (mission.declared_scope or {}).get("targets")
-                ):
-                    # 范围被拒绝时不启动任何网络命令；复用降级分支生成可审计报告，
-                    # 让 Brain/Orchestrator 进入安全收尾路径。
-                    raise AgentMaxIterationsError("任务书网络范围审批未通过")
-                bootstrap_report = await run_expert_reply_with_continuation(
-                    recon,
-                    UserMsg(
-                        name="Orchestrator",
-                        content=(
-                            f"授权目标：{mission.target}\n"
-                            "本轮重点：执行首轮最小化侦察，确认协议、文件魔法或题型强信号。\n"
-                            "只收集决定题型和下一步所需的最少证据；取得明确证据后立即输出报告。"
-                        ),
-                    ),
-                    prefix="[Recon] ",
-                    on_event=event_callback,
-                    label="Recon",
-                ) or "[Recon] 未返回文本结果"
-            except AgentMaxIterationsError as exc:
-                # 降级而非中止：首轮侦察超迭代只代表本轮未产出有效报告，
-                # 记录 information_gain="none" 后继续流程，信息缺口由
-                # Orchestrator 的聚焦补侦（dispatch_recon）接管补齐。
-                mission.finish_attempt(
-                    bootstrap_attempt,
-                    "failure",
-                    str(exc),
-                    information_gain="none",
-                )
-                store.checkpoint(mission, "bootstrap_recon_max_iters")
-                mission.record(
-                    "system",
-                    "bootstrap_recon_max_iters_degraded",
-                    error=str(exc),
-                )
-                bootstrap_report = (
-                    "[Recon] 首轮侦察达到最大推理迭代次数，本轮未产出有效报告。\n"
-                    "本轮无任何新证据或事实；沿用启动时初始分类继续流程，"
-                    "关键信息缺口交由后续聚焦补侦补充。"
-                )
-                print(f"[系统] 首轮 Recon 超迭代，已降级继续（聚焦补侦接管）：{exc}")
-            except asyncio.CancelledError:
-                mission.finish_attempt(
-                    bootstrap_attempt,
-                    "interrupted",
-                    "首轮 Recon 被用户指令或停止请求中断",
-                )
-                store.checkpoint(mission, "bootstrap_recon_interrupted")
-                # cf6adcd1 复盘：操作员情报在 bootstrap 阶段到达时，此前无条件
-                # re-raise 会把任务整单取消——主循环尚未启动、无人消费该中断，
-                # api 层一律记"任务已被用户取消"。对齐 Brain 规划段的三态处理：
-                # 真停止/未知来源才向上传播；有新情报则降级继续——情报登记为
-                # fact 供 Brain 规划使用，steering 队列保留给 Orchestrator
-                # 首次调度时的 _check_steering 快速路径注入。
-                if _steering_interrupt_kind(steering) != "intel":
-                    raise
-                new_intel = str(
-                    (steering.get("queue") or [None])[0]
-                    or steering.get("pending")
-                    or ""
-                )
-                mission.add_fact(
-                    f"操作员补充情报：{new_intel}", "operator", [], confidence=0.9,
-                )
-                bootstrap_report = (
-                    "[Recon] 首轮侦察被操作员新情报中断。\n"
-                    "本轮已完成的工具产物与证据保留；操作员情报已登记为任务事实，"
-                    "行动指挥将在后续调度中直接使用。"
-                )
-                mission.record("system", "bootstrap_recon_steering_degraded")
-                store.save(mission)
-                if event_callback is not None:
-                    event_callback(
-                        "message",
-                        content=(
-                            "已接收操作员新情报，首轮侦察已中断；情报已登记，"
-                            "行动指挥将在后续调度中使用。"
-                        ),
-                        agent="system",
-                        event_type="agent_acknowledged",
-                    )
-                print(
-                    "[系统] 首轮 Recon 被操作员新情报中断，已降级继续"
-                    f"（情报已登记，交行动指挥使用）：{new_intel[:80]}"
-                )
-            else:
-                category_decision, reclassification, evidence = _commit_recon_reclassification(
-                    mission,
-                    category_decision,
-                    bootstrap_report,
+            _, expert_section = build_expert_assignments(
+                category_decision.primary, target_spec.kind, mission.plan, recon.name,
+            )
+            mission.title = prefix_session_title(
+                mission.session_id,
+                build_mission_title(
+                    category_decision.primary, target_spec.kind, mission.goal, mission.plan,
+                ),
+            )
+            mission.record("system", "fast_mode_plan_skipped", category=category_decision.primary)
+            mission.record("system", "session_title_created", title=mission.title)
+            if event_callback is not None:
+                event_callback("session_title", title=mission.title, agent="system")
+            expert_roster_token = bind_expert_roster()
+            mission.transition(Phase.RECON, "快速模式跳过战略规划")
+            mission.transition(Phase.ANALYSIS, "快速模式直接进入执行")
+            store.save(mission)
+            _push_target_info()
+        else:
+            # ── 6b. 首轮 Recon/Triage 与二次分类 ──
+            # 在 Attack/Reserve 创建前完成一次真实侦察，使接受后的分类能够直接
+            # 决定后续专家名称、Skill 与类别工具。恢复任务不重复执行该动作。
+            if not resume:
+                bootstrap_attempt = mission.begin_attempt(
+                    "recon",
                     recon.name,
+                    mission.target,
+                    {"focus": "首轮最小化侦察与题型确认"},
                 )
-                information_gain = (
-                    "high" if reclassification.accepted
-                    else "medium" if reclassification.signals
-                    else "low"
-                )
-                mission.finish_attempt(
-                    bootstrap_attempt,
-                    "success",
-                    bootstrap_report,
-                    [evidence.id],
-                    information_gain,
-                )
-                store.checkpoint(mission, "bootstrap_recon_classified")
-                print(
-                    f"[系统] Recon 后分类: primary={category_decision.primary} "
-                    f"accepted={reclassification.accepted}；{reclassification.reason}"
-                )
-
-        # ── 6c. ArtifactTriage 后动态发现网络目标 ──
-        # 归档任务常在启动时无法从压缩包元数据提取目标，目标会在首轮
-        # ArtifactTriage 报告中出现。此时不能继续把网络侦察锁在 Iris 上。
-        if network_recon is None and not resume:
-            discovered_targets = _extract_declared_network_targets(bootstrap_report)
-            if discovered_targets:
-                mission.record(
-                    "Orchestrator", "network_targets_discovered",
-                    targets=discovered_targets, source="artifact_triage_report",
-                )
-                declared_network_targets = sorted(set(declared_network_targets) | set(discovered_targets))
-                mission.declared_scope = {
-                    **(mission.declared_scope or {}),
-                    "targets": declared_network_targets,
-                    "source": "taskbook_or_artifact_triage",
-                }
-                approved_targets = False
-                if mission.mission_mode == "ctf":
-                    approved_targets = True
-                elif mission.mission_mode in {"authorized_pentest", "hybrid_taskbook"}:
-                    mission.scope_approval_status = "pending"
-                    mission.scope_approval_requested_at = datetime.now().astimezone().isoformat()
+                try:
+                    if (
+                        mission.scope_approval_status == "denied"
+                        and mission.mission_mode in {"authorized_pentest", "hybrid_taskbook"}
+                        and (mission.declared_scope or {}).get("targets")
+                    ):
+                        # 范围被拒绝时不启动任何网络命令；复用降级分支生成可审计报告，
+                        # 让 Brain/Orchestrator 进入安全收尾路径。
+                        raise AgentMaxIterationsError("任务书网络范围审批未通过")
+                    bootstrap_report = await run_expert_reply_with_continuation(
+                        recon,
+                        UserMsg(
+                            name="Orchestrator",
+                            content=(
+                                f"授权目标：{mission.target}\n"
+                                "本轮重点：执行首轮最小化侦察，确认协议、文件魔法或题型强信号。\n"
+                                "只收集决定题型和下一步所需的最少证据；取得明确证据后立即输出报告。"
+                            ),
+                        ),
+                        prefix="[Recon] ",
+                        on_event=event_callback,
+                        label="Recon",
+                    ) or "[Recon] 未返回文本结果"
+                except AgentMaxIterationsError as exc:
+                    # 降级而非中止：首轮侦察超迭代只代表本轮未产出有效报告，
+                    # 记录 information_gain="none" 后继续流程，信息缺口由
+                    # Orchestrator 的聚焦补侦（dispatch_recon）接管补齐。
+                    mission.finish_attempt(
+                        bootstrap_attempt,
+                        "failure",
+                        str(exc),
+                        information_gain="none",
+                    )
+                    store.checkpoint(mission, "bootstrap_recon_max_iters")
+                    mission.record(
+                        "system",
+                        "bootstrap_recon_max_iters_degraded",
+                        error=str(exc),
+                    )
+                    bootstrap_report = (
+                        "[Recon] 首轮侦察达到最大推理迭代次数，本轮未产出有效报告。\n"
+                        "本轮无任何新证据或事实；沿用启动时初始分类继续流程，"
+                        "关键信息缺口交由后续聚焦补侦补充。"
+                    )
+                    print(f"[系统] 首轮 Recon 超迭代，已降级继续（聚焦补侦接管）：{exc}")
+                except asyncio.CancelledError:
+                    mission.finish_attempt(
+                        bootstrap_attempt,
+                        "interrupted",
+                        "首轮 Recon 被用户指令或停止请求中断",
+                    )
+                    store.checkpoint(mission, "bootstrap_recon_interrupted")
+                    # cf6adcd1 复盘：操作员情报在 bootstrap 阶段到达时，此前无条件
+                    # re-raise 会把任务整单取消——主循环尚未启动、无人消费该中断，
+                    # api 层一律记"任务已被用户取消"。对齐 Brain 规划段的三态处理：
+                    # 真停止/未知来源才向上传播；有新情报则降级继续——情报登记为
+                    # fact 供 Brain 规划使用，steering 队列保留给 Orchestrator
+                    # 首次调度时的 _check_steering 快速路径注入。
+                    if _steering_interrupt_kind(steering) != "intel":
+                        raise
+                    new_intel = str(
+                        (steering.get("queue") or [None])[0]
+                        or steering.get("pending")
+                        or ""
+                    )
+                    mission.add_fact(
+                        f"操作员补充情报：{new_intel}", "operator", [], confidence=0.9,
+                    )
+                    bootstrap_report = (
+                        "[Recon] 首轮侦察被操作员新情报中断。\n"
+                        "本轮已完成的工具产物与证据保留；操作员情报已登记为任务事实，"
+                        "行动指挥将在后续调度中直接使用。"
+                    )
+                    mission.record("system", "bootstrap_recon_steering_degraded")
                     store.save(mission)
-                    dynamic_scope_result = await approval_broker.request(
-                        "ArtifactTriage 在任务书/附件中发现网络目标，需要确认是否允许启动 NetworkRecon。",
-                        {
-                            "approval_type": "scope",
-                            "target": mission.target,
-                            "goal": mission.goal,
-                            "scope_request": {
-                                "targets": discovered_targets,
-                                "source": "artifact_triage_report",
-                                "actions": ["network_recon", "service_enum"],
-                            },
-                        },
+                    if event_callback is not None:
+                        event_callback(
+                            "message",
+                            content=(
+                                "已接收操作员新情报，首轮侦察已中断；情报已登记，"
+                                "行动指挥将在后续调度中使用。"
+                            ),
+                            agent="system",
+                            event_type="agent_acknowledged",
+                        )
+                    print(
+                        "[系统] 首轮 Recon 被操作员新情报中断，已降级继续"
+                        f"（情报已登记，交行动指挥使用）：{new_intel[:80]}"
                     )
-                    approved_targets = bool(dynamic_scope_result.get("approved"))
-                    mission.scope_approval_decision = str(
-                        dynamic_scope_result.get("decision") or ("批准" if approved_targets else "拒绝")
-                    )
-                    mission.scope_approval_resolved_at = datetime.now().astimezone().isoformat()
-                    mission.scope_approval_status = "approved" if approved_targets else "denied"
-                if approved_targets:
-                    for candidate in discovered_targets:
-                        candidate_spec = normalize_target(candidate)
-                        if candidate_spec.host:
-                            scope_registry.add_base_target(candidate_spec.host)
-                    mission.authorized_scope = scope_registry.snapshot()
-                    store.checkpoint(mission, "dynamic_network_scope_approved")
-                    execution_target = discovered_targets[0]
-                    network_recon = create_network_recon_agent(
-                        _role_model("recon"), execution_target, command_workdir, runtime.command_timeout,
-                        scope_registry=scope_registry,
-                        max_iters=_max_react_iters("network", "recon", complexity, thinking=model_ver),
-                        offloader=workspace,
-                        context_config=_role_context("recon"),
-                        state=build_role_agent_state(mission_id, "recon-network") if use_v2_workspace else None,
-                        artifact_root=ws_root,
-                        vision_model=vision_model,
-                        vision_roots=vision_roots,
-                        include_cve_search=bool(re.search(r"\bCVE-\d{4}-\d+\b", goal_text, re.IGNORECASE)),
-                    )
-                    print(f"[系统] 已动态挂载 NetworkRecon，目标：{execution_target}")
                 else:
-                    scope_denied = True
-                    store.save(mission)
-                    print("[系统] 网络目标范围未获批准，NetworkRecon 保持禁用")
-
-        # 首轮 Recon 后再判断知识缺口，保证 Query 使用最终分类与真实 Facts。
-        # 该 Context 是参考知识，不写入 Facts/Evidence。
-        brain_knowledge_context = await _ensure_knowledge_context(
-            "Brain",
-            "基于首轮 Recon 的最终分类与信息缺口制定下一步分析、验证和回退计划",
-        )
-
-        # ── 7. Brain 战略规划（使用 Recon 后最终分类）──
-        # 把授权目标、任务目标与初始分类打包成提示词，交给 Brain 制定阶段计划。
-        # 设计要点：Brain 只能「建议」修正题型（proposed_category + reason），
-        # 最终修正需由 Orchestrator 审批，防止单一 Agent 越权篡改任务类型。
-        plan_prompt = (
-            f"授权目标：{mission.target}\n"
-            f"任务目标：{mission.goal}\n\n"
-            f"任务模式：{mission.mission_mode}\n"
-            f"声明范围：{json.dumps(mission.declared_scope, ensure_ascii=False)}\n"
-            f"有效范围：{json.dumps(mission.authorized_scope, ensure_ascii=False)}\n"
-            f"能力预检：{json.dumps(capability_preflight, ensure_ascii=False)}\n\n"
-            f"## 题型分析（系统最终分类）\n"
-            f"目标类型：{target_spec.kind}\n"
-            f"当前题型：{category_decision.primary}\n"
-            f"置信度：{category_decision.confidence:.0%}\n"
-            f"证据：{'; '.join(category_decision.evidence)}\n"
-            f"结构化 Facts：{'; '.join(item.content for item in mission.facts[-8:]) or '暂无'}\n"
-        )
-        if declared_network_targets:
-            plan_prompt += (
-                "用户任务说明中明确声明并已自动授权的网络目标："
-                f"{', '.join(declared_network_targets)}\n"
-            )
-        if category_decision.secondary:
-            plan_prompt += f"候选题型：{', '.join(category_decision.secondary)}\n"
-        if initial_context:
-            plan_prompt += (
-                f"\n## 前次任务上下文（同一目标重跑，供参考以避开失败路径）\n"
-                f"{initial_context}\n"
-            )
-        if brain_knowledge_context:
-            plan_prompt += (
-                "\n## Knowledge Context（本地知识库参考，不是当前目标事实/证据）\n"
-                f"{brain_knowledge_context}\n"
-                "只能把以上内容作为候选方法和检查清单；所有判断仍需由当前任务的 "
-                "Facts/Evidence 验证。\n"
-            )
-        # P0-C：Brain 规划前注入历史成功经验（仅参考，不写入 Facts/Evidence）。
-        # 长期记忆可能为空或文件损坏，安全降级为空字符串不阻断规划。
-        try:
-            experience_hint = get_experience_hint()
-        except Exception:
-            experience_hint = ""
-        if experience_hint:
-            plan_prompt += (
-                "\n## 历史成功经验（仅参考，须以当前目标真实证据核验，"
-                "不得直接当作已验证事实）\n"
-                f"{experience_hint}\n"
-            )
-            mission.record("Brain", "experience_injected", source="agentic_memory")
-        plan_prompt += (
-            "\n你的任务：\n"
-            "基于上述事实制定可审计的阶段计划。\n"
-            "先用 SubmitPlan 工具一次性提交 4~8 条结构化计划，再输出计划正文。\n"
-            "若证据不足，请在计划中加入「重新分类检查点」。\n"
-            "若你认为题型需要修正，请输出结构化建议（proposed_category + reason）。\n"
-            "不得擅自修改正式题型，修正需由 Orchestrator 审批。"
-        )
-
-        # 流式调用 Brain，实时打印前缀 [Brain] 并转发事件。
-        # Brain 通过 SubmitPlan 原子登记 plan_items（一次持久化并推送前端）。
-        # 规划阶段同样允许操作员插话：不能因为此时尚未进入 Orchestrator
-        # 循环，就让新情报被取消事件吞掉。
-        plan_text = ""
-        while True:
-            try:
-                plan_result = await run_interruptible_agent_reply(
-                    brain,
-                    UserMsg(name="user", content=plan_prompt),
-                    prefix="[Brain] ",
-                    on_event=event_callback,
-                )
-                plan_text = plan_result.get_text_content() or ""
-                break
-            except AgentMaxIterationsError:
-                if not mission.plan_items:
-                    raise
-                # Qwen 在系统已登记降级计划后仍可能继续空调用。计划本身已
-                # 持久化且不包含任何攻击动作，可以安全进入 Recon。
-                plan_text = "模型未能输出计划正文，已使用系统登记的保守阶段计划。"
-                mission.record(
-                    "system",
-                    "brain_max_iters_after_plan_fallback",
-                    provider=provider,
-                )
-                store.save(mission)
-                break
-            except asyncio.CancelledError:
-                if steering.get("cancel_requested"):
-                    raise
-                new_intel = _next_steering_input()
-                if not new_intel:
-                    raise
-                plan_prompt += (
-                    "\n\n## 操作员中途补充的新情报\n"
-                    f"{new_intel}\n"
-                    "请立即基于此情报更新后续计划；已有计划条目无需重复登记。"
-                )
-                if event_callback is not None:
-                    event_callback(
-                        "message",
-                        content="已接收操作员新情报，正在据此更新战略计划。",
-                        agent=brain.name,
-                        event_type="agent_acknowledged",
+                    category_decision, reclassification, evidence = _commit_recon_reclassification(
+                        mission,
+                        category_decision,
+                        bootstrap_report,
+                        recon.name,
                     )
-        # 保存计划文本（无输出时回退到内置四阶段计划）
-        mission.plan = plan_text or "使用内置四阶段计划"
-        category_decision = _review_brain_category(mission, category_decision, mission.plan)
-        store.save(mission)
-        phase_experts, expert_section = build_expert_assignments(
-            category_decision.primary,
-            target_spec.kind,
-            mission.plan,
-            recon.name,
-        )
-        mission.plan = f"{mission.plan.rstrip()}\n\n{expert_section}"
-        for item in mission.plan_items:
-            item["expert"] = phase_experts.get(
-                str(item.get("phase") or ""),
-                "Alex - 行动指挥专家",
+                    information_gain = (
+                        "high" if reclassification.accepted
+                        else "medium" if reclassification.signals
+                        else "low"
+                    )
+                    mission.finish_attempt(
+                        bootstrap_attempt,
+                        "success",
+                        bootstrap_report,
+                        [evidence.id],
+                        information_gain,
+                    )
+                    store.checkpoint(mission, "bootstrap_recon_classified")
+                    print(
+                        f"[系统] Recon 后分类: primary={category_decision.primary} "
+                        f"accepted={reclassification.accepted}；{reclassification.reason}"
+                    )
+
+            # ── 6c. ArtifactTriage 后动态发现网络目标 ──
+            # 归档任务常在启动时无法从压缩包元数据提取目标，目标会在首轮
+            # ArtifactTriage 报告中出现。此时不能继续把网络侦察锁在 Iris 上。
+            if network_recon is None and not resume:
+                discovered_targets = _extract_declared_network_targets(bootstrap_report)
+                if discovered_targets:
+                    mission.record(
+                        "Orchestrator", "network_targets_discovered",
+                        targets=discovered_targets, source="artifact_triage_report",
+                    )
+                    declared_network_targets = sorted(set(declared_network_targets) | set(discovered_targets))
+                    mission.declared_scope = {
+                        **(mission.declared_scope or {}),
+                        "targets": declared_network_targets,
+                        "source": "taskbook_or_artifact_triage",
+                    }
+                    approved_targets = False
+                    if mission.mission_mode == "ctf":
+                        approved_targets = True
+                    elif mission.mission_mode in {"authorized_pentest", "hybrid_taskbook"}:
+                        mission.scope_approval_status = "pending"
+                        mission.scope_approval_requested_at = datetime.now().astimezone().isoformat()
+                        store.save(mission)
+                        dynamic_scope_result = await approval_broker.request(
+                            "ArtifactTriage 在任务书/附件中发现网络目标，需要确认是否允许启动 NetworkRecon。",
+                            {
+                                "approval_type": "scope",
+                                "target": mission.target,
+                                "goal": mission.goal,
+                                "scope_request": {
+                                    "targets": discovered_targets,
+                                    "source": "artifact_triage_report",
+                                    "actions": ["network_recon", "service_enum"],
+                                },
+                            },
+                        )
+                        approved_targets = bool(dynamic_scope_result.get("approved"))
+                        mission.scope_approval_decision = str(
+                            dynamic_scope_result.get("decision") or ("批准" if approved_targets else "拒绝")
+                        )
+                        mission.scope_approval_resolved_at = datetime.now().astimezone().isoformat()
+                        mission.scope_approval_status = "approved" if approved_targets else "denied"
+                    if approved_targets:
+                        for candidate in discovered_targets:
+                            candidate_spec = normalize_target(candidate)
+                            if candidate_spec.host:
+                                scope_registry.add_base_target(candidate_spec.host)
+                        mission.authorized_scope = scope_registry.snapshot()
+                        store.checkpoint(mission, "dynamic_network_scope_approved")
+                        execution_target = discovered_targets[0]
+                        network_recon = create_network_recon_agent(
+                            _role_model("recon"), execution_target, command_workdir, runtime.command_timeout,
+                            scope_registry=scope_registry,
+                            max_iters=_max_react_iters("network", "recon", complexity, thinking=model_ver),
+                            offloader=workspace,
+                            context_config=_role_context("recon"),
+                            state=build_role_agent_state(mission_id, "recon-network") if use_v2_workspace else None,
+                            artifact_root=ws_root,
+                            vision_model=vision_model,
+                            vision_roots=vision_roots,
+                            include_cve_search=bool(re.search(r"\bCVE-\d{4}-\d+\b", goal_text, re.IGNORECASE)),
+                        )
+                        print(f"[系统] 已动态挂载 NetworkRecon，目标：{execution_target}")
+                    else:
+                        scope_denied = True
+                        store.save(mission)
+                        print("[系统] 网络目标范围未获批准，NetworkRecon 保持禁用")
+
+            # 首轮 Recon 后再判断知识缺口，保证 Query 使用最终分类与真实 Facts。
+            # 该 Context 是参考知识，不写入 Facts/Evidence。
+            brain_knowledge_context = await _ensure_knowledge_context(
+                "Brain",
+                "基于首轮 Recon 的最终分类与信息缺口制定下一步分析、验证和回退计划",
             )
-        mission.title = prefix_session_title(
-            mission.session_id,
-            build_mission_title(
+
+            # ── 7. Brain 战略规划（使用 Recon 后最终分类）──
+            # 把授权目标、任务目标与初始分类打包成提示词，交给 Brain 制定阶段计划。
+            # 设计要点：Brain 只能「建议」修正题型（proposed_category + reason），
+            # 最终修正需由 Orchestrator 审批，防止单一 Agent 越权篡改任务类型。
+            plan_prompt = (
+                f"授权目标：{mission.target}\n"
+                f"任务目标：{mission.goal}\n\n"
+                f"任务模式：{mission.mission_mode}\n"
+                f"声明范围：{json.dumps(mission.declared_scope, ensure_ascii=False)}\n"
+                f"有效范围：{json.dumps(mission.authorized_scope, ensure_ascii=False)}\n"
+                f"能力预检：{json.dumps(capability_preflight, ensure_ascii=False)}\n\n"
+                f"## 题型分析（系统最终分类）\n"
+                f"目标类型：{target_spec.kind}\n"
+                f"当前题型：{category_decision.primary}\n"
+                f"置信度：{category_decision.confidence:.0%}\n"
+                f"证据：{'; '.join(category_decision.evidence)}\n"
+                f"结构化 Facts：{'; '.join(item.content for item in mission.facts[-8:]) or '暂无'}\n"
+            )
+            if declared_network_targets:
+                plan_prompt += (
+                    "用户任务说明中明确声明并已自动授权的网络目标："
+                    f"{', '.join(declared_network_targets)}\n"
+                )
+            if category_decision.secondary:
+                plan_prompt += f"候选题型：{', '.join(category_decision.secondary)}\n"
+            if initial_context:
+                plan_prompt += (
+                    f"\n## 前次任务上下文（同一目标重跑，供参考以避开失败路径）\n"
+                    f"{initial_context}\n"
+                )
+            if brain_knowledge_context:
+                plan_prompt += (
+                    "\n## Knowledge Context（本地知识库参考，不是当前目标事实/证据）\n"
+                    f"{brain_knowledge_context}\n"
+                    "只能把以上内容作为候选方法和检查清单；所有判断仍需由当前任务的 "
+                    "Facts/Evidence 验证。\n"
+                )
+            # P0-C：Brain 规划前注入历史成功经验（仅参考，不写入 Facts/Evidence）。
+            # 长期记忆可能为空或文件损坏，安全降级为空字符串不阻断规划。
+            try:
+                experience_hint = get_experience_hint()
+            except Exception:
+                experience_hint = ""
+            if experience_hint:
+                plan_prompt += (
+                    "\n## 历史成功经验（仅参考，须以当前目标真实证据核验，"
+                    "不得直接当作已验证事实）\n"
+                    f"{experience_hint}\n"
+                )
+                mission.record("Brain", "experience_injected", source="agentic_memory")
+            plan_prompt += (
+                "\n你的任务：\n"
+                "基于上述事实制定可审计的阶段计划。\n"
+                "先用 SubmitPlan 工具一次性提交 4~8 条结构化计划，再输出计划正文。\n"
+                "若证据不足，请在计划中加入「重新分类检查点」。\n"
+                "若你认为题型需要修正，请输出结构化建议（proposed_category + reason）。\n"
+                "不得擅自修改正式题型，修正需由 Orchestrator 审批。"
+            )
+
+            # 流式调用 Brain，实时打印前缀 [Brain] 并转发事件。
+            # Brain 通过 SubmitPlan 原子登记 plan_items（一次持久化并推送前端）。
+            # 规划阶段同样允许操作员插话：不能因为此时尚未进入 Orchestrator
+            # 循环，就让新情报被取消事件吞掉。
+            plan_text = ""
+            while True:
+                try:
+                    plan_result = await run_interruptible_agent_reply(
+                        brain,
+                        UserMsg(name="user", content=plan_prompt),
+                        prefix="[Brain] ",
+                        on_event=event_callback,
+                    )
+                    plan_text = plan_result.get_text_content() or ""
+                    break
+                except AgentMaxIterationsError:
+                    if not mission.plan_items:
+                        raise
+                    # Qwen 在系统已登记降级计划后仍可能继续空调用。计划本身已
+                    # 持久化且不包含任何攻击动作，可以安全进入 Recon。
+                    plan_text = "模型未能输出计划正文，已使用系统登记的保守阶段计划。"
+                    mission.record(
+                        "system",
+                        "brain_max_iters_after_plan_fallback",
+                        provider=provider,
+                    )
+                    store.save(mission)
+                    break
+                except asyncio.CancelledError:
+                    if steering.get("cancel_requested"):
+                        raise
+                    new_intel = _next_steering_input()
+                    if not new_intel:
+                        raise
+                    plan_prompt += (
+                        "\n\n## 操作员中途补充的新情报\n"
+                        f"{new_intel}\n"
+                        "请立即基于此情报更新后续计划；已有计划条目无需重复登记。"
+                    )
+                    if event_callback is not None:
+                        event_callback(
+                            "message",
+                            content="已接收操作员新情报，正在据此更新战略计划。",
+                            agent=brain.name,
+                            event_type="agent_acknowledged",
+                        )
+            # 保存计划文本（无输出时回退到内置四阶段计划）
+            mission.plan = plan_text or "使用内置四阶段计划"
+            category_decision = _review_brain_category(mission, category_decision, mission.plan)
+            store.save(mission)
+            phase_experts, expert_section = build_expert_assignments(
                 category_decision.primary,
                 target_spec.kind,
-                mission.goal,
                 mission.plan,
-            ),
-        )
-        mission.record("Brain", "plan_created", plan_items_count=len(mission.plan_items))
-        mission.record("Brain", "session_title_created", title=mission.title)
-        if event_callback is not None:
-            event_callback("session_title", title=mission.title, agent="Brain")
-            event_callback("message", content=expert_section, agent=brain.name)
-            push_plan_update(mission, event_callback)
-        # Brain 完成作战计划后再启用专家名册；后续角色首次调用时加入专家团。
-        expert_roster_token = bind_expert_roster()
-        # 状态机保持合法迁移；首轮 Recon 已在规划前完成，因此随即进入 ANALYSIS，
-        # Orchestrator 只有在信息不足时才再次派遣 Recon。
-        mission.transition(Phase.RECON, "战略计划已制定")
-        if mission.findings:
-            mission.transition(Phase.ANALYSIS, "首轮 Recon 证据与二次分类已完成")
-        store.save(mission)  # 每步都持久化，保证崩溃可恢复
-        _push_target_info()   # 首次推送靶机信息
-        print(f"[Brain] 作战计划\n{mission.plan}\n")
+                recon.name,
+            )
+            mission.plan = f"{mission.plan.rstrip()}\n\n{expert_section}"
+            for item in mission.plan_items:
+                item["expert"] = phase_experts.get(
+                    str(item.get("phase") or ""),
+                    "Alex - 行动指挥专家",
+                )
+            mission.title = prefix_session_title(
+                mission.session_id,
+                build_mission_title(
+                    category_decision.primary,
+                    target_spec.kind,
+                    mission.goal,
+                    mission.plan,
+                ),
+            )
+            mission.record("Brain", "plan_created", plan_items_count=len(mission.plan_items))
+            mission.record("Brain", "session_title_created", title=mission.title)
+            if event_callback is not None:
+                event_callback("session_title", title=mission.title, agent="Brain")
+                event_callback("message", content=expert_section, agent=brain.name)
+                push_plan_update(mission, event_callback)
+            # Brain 完成作战计划后再启用专家名册；后续角色首次调用时加入专家团。
+            expert_roster_token = bind_expert_roster()
+            # 状态机保持合法迁移；首轮 Recon 已在规划前完成，因此随即进入 ANALYSIS，
+            # Orchestrator 只有在信息不足时才再次派遣 Recon。
+            mission.transition(Phase.RECON, "战略计划已制定")
+            if mission.findings:
+                mission.transition(Phase.ANALYSIS, "首轮 Recon 证据与二次分类已完成")
+            store.save(mission)  # 每步都持久化，保证崩溃可恢复
+            _push_target_info()   # 首次推送靶机信息
+            print(f"[Brain] 作战计划\n{mission.plan}\n")
 
         # ── 8. 专家按需加载 ──
         # Orchestrator 的 dispatch_* 接口保持不变；真实 Attack/Reserve/ScopeAuditor
@@ -3006,33 +3068,69 @@ async def run_mission(
             lambda: create_scope_auditor_agent(model),
         )
 
-        # ── 9. Orchestrator 主循环 ──
-        # 战术调度核心：持有 recon/attack/state/store 的唯一调度者，
-        # 负责推进阶段、调度侦察与攻击、处理重分类、最终调用 complete_mission 收尾。
-        orchestrator = create_orchestrator_agent(
-            model=_role_model("orchestrator"),
-            recon_agent=recon,
-            attack_agent=attack,
-            reserve_agent=reserve,
-            mission=mission,
-            store=store,
-            event_callback=event_callback,
-            approval_callback=approval_broker.request,
-            scope_registry=scope_registry,
-            scope_auditor=scope_auditor,
-            steering_state=steering,
-            nss_context=nss_context,
-            slab_context=slab_context,
-            knowledge_context_provider=_ensure_knowledge_context,
-            ensure_scope_approved=ensure_scope_approved,
-            max_iters=20 if complexity == "simple" else 30,
-            offloader=workspace,
-            context_config=_role_context("orchestrator"),
-            state=build_role_agent_state(mission_id, "orchestrator") if use_v2_workspace else None,
-            network_recon_agent=network_recon,
-            artifact_recon_agent=artifact_recon,
-            category_change_callback=_on_category_changed,
+        # ── 9. 主调度 Agent ──
+        # standard：Orchestrator（完整工作流的唯一调度者）。
+        # fast：快速模式指挥官（Captain）——单 Agent 持 spawn_expert 派工 +
+        # 只读 shell，专家子 Agent 报告即结论（与 Orchestrator 互斥创建）。
+        if run_mode == "fast":
+            orchestrator = None
+            main_agent = create_fast_captain_agent(
+                _role_model("orchestrator"),
+                experts={
+                    "attack": attack,
+                    "reverse": reserve,
+                    "triage": artifact_recon if artifact_recon is not None else recon,
+                    "recon": network_recon if network_recon is not None else recon,
+                    "analysis": analysis,
+                },
+                mission=mission,
+                store=store,
+                event_callback=event_callback,
+                target=execution_target,
+                workdir=str(command_workdir),
+                timeout=runtime.command_timeout,
+                scope_registry=scope_registry,
+                nss_context=nss_context,
+                slab_context=slab_context,
+                max_iters=15,
+                offloader=workspace,
+                context_config=_role_context("orchestrator"),
+                state=(
+                    build_role_agent_state(mission_id, "orchestrator")
+                    if use_v2_workspace else None
+                ),
+                artifact_root=ws_root,
+            )
+            main_agent_prefix = "[Captain] "
+            dispatch_hint = "spawn_expert 派出合适专家，或 fast_complete_mission 收尾"
+        else:
+            orchestrator = create_orchestrator_agent(
+                model=_role_model("orchestrator"),
+                recon_agent=recon,
+                attack_agent=attack,
+                reserve_agent=reserve,
+                mission=mission,
+                store=store,
+                event_callback=event_callback,
+                approval_callback=approval_broker.request,
+                scope_registry=scope_registry,
+                scope_auditor=scope_auditor,
+                steering_state=steering,
+                nss_context=nss_context,
+                slab_context=slab_context,
+                knowledge_context_provider=_ensure_knowledge_context,
+                ensure_scope_approved=ensure_scope_approved,
+                max_iters=20 if complexity == "simple" else 30,
+                offloader=workspace,
+                context_config=_role_context("orchestrator"),
+                state=build_role_agent_state(mission_id, "orchestrator") if use_v2_workspace else None,
+                network_recon_agent=network_recon,
+                artifact_recon_agent=artifact_recon,
+                category_change_callback=_on_category_changed,
         )
+            main_agent = orchestrator
+            main_agent_prefix = "[Orchestrator] "
+            dispatch_hint = "dispatch_recon / dispatch_attack 等工具"
         # 结构化计划清单文本（Orchestrator 需要知道条目 id 才能用 UpdatePlan 等工具维护）
         plan_items_text = "\n".join(
             f"  {item['id']} [{item['phase']}] {item['content']}"
@@ -3064,21 +3162,35 @@ async def run_mission(
             "authorized_pentest": "授权渗透模式：网络侦察前必须确认任务书声明范围；新增目标必须先通过独立范围审批，再调用 request_scope_expansion。",
             "hybrid_taskbook": "混合任务书模式：本地附件分析可先行；涉及任务书声明的网络目标须先通过独立范围审批，新增目标仍需再次审批。",
         }.get(mission.mission_mode, "按当前任务声明范围执行，任何新增网络目标均不得默认视为已授权。")
-        orch_content = (
-            f"执行以下已授权任务。\n任务模式：{mission.mission_mode}\n目标：{mission.target}\n目标要求：{mission.goal}\n"
-            f"模式约束：{mode_policy}\n"
-            f"声明范围：{json.dumps(mission.declared_scope, ensure_ascii=False)}\n"
-            f"有效范围：{json.dumps(mission.authorized_scope, ensure_ascii=False)}\n\n"
-            f"Brain 计划摘要：\n{mission.plan[:12000]}\n\n"
-            f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
-            f"分层决策上下文（Historical 仅含引用，需要时调用 view_mission_state）：\n"
-            f"{json.dumps(mission.context_layers(limit=8), ensure_ascii=False)}\n"
-            "首轮 Recon 与题型确认已经完成；只有存在明确证据缺口时才补充侦察，"
-            "否则直接基于 Facts/Evidence 推进。对待验证判断先登记 Hypothesis 并在"
-            "dispatch 时关联其 ID；遇到 Failed Path 按 resolution 执行 Retry/Fallback/停止路径。"
-            "结束时必须调用 complete_mission。"
-            f"{orch_context}"
-        )
+        if run_mode == "fast":
+            orch_content = (
+                f"快速模式执行以下已授权任务。\n任务模式：{mission.mission_mode}\n"
+                f"目标：{mission.target}\n目标要求：{mission.goal}\n"
+                f"模式约束：{mode_policy}\n"
+                f"初始题型：{category_decision.primary}"
+                f"（置信度 {category_decision.confidence:.0%}，仅供参考，可随时换专家）\n"
+                f"分层决策上下文：\n"
+                f"{json.dumps(mission.context_layers(limit=6), ensure_ascii=False)}\n"
+                "速度优先：立即 spawn_expert 派出对口专家解题；专家报告就是结论。"
+                "拿到 flag 立即 fast_complete_mission 收尾（绑定了平台时优先 submit_flag）。"
+                f"{orch_context}"
+            )
+        else:
+            orch_content = (
+                f"执行以下已授权任务。\n任务模式：{mission.mission_mode}\n目标：{mission.target}\n目标要求：{mission.goal}\n"
+                f"模式约束：{mode_policy}\n"
+                f"声明范围：{json.dumps(mission.declared_scope, ensure_ascii=False)}\n"
+                f"有效范围：{json.dumps(mission.authorized_scope, ensure_ascii=False)}\n\n"
+                f"Brain 计划摘要：\n{mission.plan[:12000]}\n\n"
+                f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
+                f"分层决策上下文（Historical 仅含引用，需要时调用 view_mission_state）：\n"
+                f"{json.dumps(mission.context_layers(limit=8), ensure_ascii=False)}\n"
+                "首轮 Recon 与题型确认已经完成；只有存在明确证据缺口时才补充侦察，"
+                "否则直接基于 Facts/Evidence 推进。对待验证判断先登记 Hypothesis 并在"
+                "dispatch 时关联其 ID；遇到 Failed Path 按 resolution 执行 Retry/Fallback/停止路径。"
+                "结束时必须调用 complete_mission。"
+                f"{orch_context}"
+            )
         # P5 熔断重试预算：Orchestrator 输出残缺 <tool_call>/空回答时重新注入
         malformed_retry_budget = 2
         stalled_nudge_budget = 2
@@ -3091,9 +3203,9 @@ async def run_mission(
         while True:
             try:
                 final_result = await run_interruptible_agent_reply(
-                    orchestrator,
+                    main_agent,
                     UserMsg(name="user", content=orch_content),
-                    prefix="[Orchestrator] ",
+                    prefix=main_agent_prefix,
                     on_event=event_callback,
                 )
                 # AgentScope 可能以 INTERRUPTED 正常返回（取消被并发工具路径
@@ -3119,8 +3231,8 @@ async def run_mission(
                     malformed_retry_budget -= 1
                     orch_content = (
                         "你上一条回复只输出了残缺的 <tool_call> 标签，未实际调用工具。"
-                        "请直接调用 dispatch_recon / dispatch_attack 等工具推进任务，"
-                        "或调用 complete_mission 如实收尾。"
+                        f"请直接调用工具推进任务（{dispatch_hint}），"
+                        "或立即收尾任务。"
                     )
                     continue
                 # Agent 正常结束时，若用户在回复末尾追加了情报，也无需等待
@@ -3133,6 +3245,12 @@ async def run_mission(
                         "无需重复已完成的侦察步骤。"
                     )
                     continue
+                # 快速模式：后台专家报告就绪 → 注入收取提示重开一轮。
+                if run_mode == "fast":
+                    report_hint = _fast_pending_report_hint(main_agent)
+                    if report_hint:
+                        orch_content = report_hint
+                        continue
                 # P5b：未到终态的纯文本收尾 → 若仍有可推进的工作
                 # （已批准攻击 / 存在 pending 或 in_progress 计划项），
                 # 注入一次推进提示而不是直接退出主循环。
@@ -3155,19 +3273,24 @@ async def run_mission(
                     )
                     store.save(mission)
                     approved_hint = (
-                        "人工批准已生效（exploitation_approved=True），"
-                        f"已选定方案：{(mission.approved_attack_plan or {}).get('selected', {}).get('title', '')}。"
-                        "请立即调用 dispatch_attack 执行该方案。"
+                        (
+                            "利用已获批准（exploitation_approved=True），"
+                            f"已选定方案：{(mission.approved_attack_plan or {}).get('selected', {}).get('title', '')}。"
+                            "请立即执行该方案。"
+                            if run_mode == "fast"
+                            else "人工批准已生效（exploitation_approved=True），"
+                            f"已选定方案：{(mission.approved_attack_plan or {}).get('selected', {}).get('title', '')}。"
+                            "请立即调用 dispatch_attack 执行该方案。"
+                        )
                         if mission.exploitation_approved
-                        else "当前仍存在未完成的计划项。"
+                        else "当前仍存在未完成的工作。"
                     )
                     orch_content = (
                         "[系统提醒] 你上一条回复以普通文本结束，但任务尚未完成、"
-                        "也没有调用 complete_mission。\n"
+                        "也没有收尾。\n"
                         f"{approved_hint}\n"
-                        "你现在必须调用工具继续推进：优先 dispatch_attack 执行已批准方案；"
-                        "若确有阻塞，先 dispatch_recon 补齐缺口；"
-                        "只有当任务确实无法继续时才允许调用 complete_mission 如实收尾。"
+                        f"你现在必须调用工具继续推进（{dispatch_hint}）；"
+                        "只有当任务确实无法继续时才允许如实收尾。"
                         "禁止再次以纯文本结束回合。"
                     )
                     continue
@@ -3213,15 +3336,14 @@ async def run_mission(
                         f"- 最近尝试：{'；'.join(recent_attempts) or '无'}\n"
                         f"- 已累计失败路径：{len(mission.failed_paths)} 条（方法性失败 {rejected} 条）\n"
                         "基于以上状态立即行动，二选一，禁止纯文本结束：\n"
-                        "1) 调用 dispatch_recon / dispatch_attack / dispatch_reverse 推进"
-                        "最优先的未决计划项（禁止重复已失败路径）；\n"
-                        "2) 任务确实无法继续时调用 complete_mission 如实收尾。\n"
+                        f"1) 调用工具推进最优先的工作（{dispatch_hint}，禁止重复已失败路径）；\n"
+                        "2) 任务确实无法继续时如实收尾。\n"
                         "本轮之后若仍未到终态，系统将强制把任务收敛为失败。"
                     )
                     continue
                 break
             except AgentMaxIterationsError as exc:
-                # P0-B 阶梯：Orchestrator 自身超迭代先补一轮全新迭代预算
+                # P0-B 阶梯：主调度 Agent 自身超迭代先补一轮全新迭代预算
                 # （只要求输出决策或收尾）；再超才确定性收敛 FAILED。
                 if (
                     max_iters_continuation_budget > 0
@@ -3237,9 +3359,9 @@ async def run_mission(
                     orch_content = (
                         f"[系统] 你已达到最大推理迭代次数（{exc}），本轮补发最后一批"
                         "推理轮次。禁止重复调用工具循环；立即基于已有证据二选一：\n"
-                        "1) 调用 complete_mission 如实收尾（成功/失败与总结）；\n"
-                        "2) 仅当存在明确的单一关键动作时调用一次 dispatch_*，"
-                        "随后必须调用 complete_mission。\n"
+                        "1) 立即如实收尾（成功/失败与总结）；\n"
+                        f"2) 仅当存在明确的单一关键动作时调用一次工具（{dispatch_hint}），"
+                        "随后必须收尾。\n"
                         "本轮之后若仍未到终态，系统将强制把任务收敛为失败。"
                     )
                     continue
@@ -3273,10 +3395,10 @@ async def run_mission(
                     )
                     continue
                 if steering.get("processed"):
-                    # 指令已被 dispatch 工具消费并注入，仅恢复 Orchestrator 执行。
+                    # 指令已被 dispatch 工具消费并注入，仅恢复主调度 Agent 执行。
                     orch_content = (
                         f"继续执行当前任务，基于已有证据推进，"
-                        f"结束前必须调用 complete_mission。"
+                        f"结束前必须收尾任务。"
                     )
                     continue
                 raise
@@ -3472,6 +3594,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Qwen 工具调用难度：simple=扁平兼容模式，standard=批量嵌套模式；默认读 QWEN_TOOL_CALL_MODE",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["standard", "fast"],
+        default="standard",
+        help="运行模式：standard=完整渗透工作流（默认）；fast=快速模式（单指挥官调度专家子 Agent，主打夺旗速度）",
+    )
     return parser
 
 
@@ -3487,6 +3615,7 @@ def main() -> None:
             run_mission(
                 args.target, args.goal, args.model, args.provider,
                 qwen_tool_call_mode=args.qwen_tool_mode,
+                run_mode=args.mode,
             ),
         )
     except (ValueError, RuntimeError) as exc:

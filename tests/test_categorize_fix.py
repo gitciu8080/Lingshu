@@ -72,17 +72,26 @@ class ClassifyRoutingTest(unittest.TestCase):
         decision = classify(spec, "分析 RSA 并解密", manifest)
         self.assertEqual(decision.primary, "crypto")
 
-    def test_elf_routes_to_pwn(self) -> None:
-        # 扩展名信号：.elf 文件 → pwn
+    def test_elf_without_remote_routes_to_reverse(self) -> None:
+        # ELF 条件归属：.elf 文件且无远程服务线索 → reverse（纯静态逆向）
         path = _zip_file("elf_challenge.zip")
         spec = normalize_target(str(path))
         manifest = {"file_count": 1, "total_bytes": 200,
                     "files": ["challenge.elf"]}
         decision = classify(spec, "分析程序", manifest)
+        self.assertEqual(decision.primary, "reverse")
+
+    def test_elf_with_remote_service_routes_to_pwn(self) -> None:
+        # ELF + nc 远程服务线索 → pwn（二进制利用）
+        path = _zip_file("pwn_challenge.zip")
+        spec = normalize_target(str(path))
+        manifest = {"file_count": 1, "total_bytes": 200,
+                    "files": ["challenge.elf"]}
+        decision = classify(spec, "分析程序并打通 nc 10.0.0.5 9999 远程服务", manifest)
         self.assertEqual(decision.primary, "pwn")
 
-    def test_elf_magic_after_recon_routes_to_pwn(self) -> None:
-        """无扩展名 ELF：初始 unknown，Recon 的 file 魔法输出后 reclassify 到 pwn。"""
+    def test_elf_magic_after_recon_routes_to_reverse(self) -> None:
+        """无扩展名 ELF：初始 unknown，Recon 的 file 魔法输出后 reclassify 到 reverse。"""
         path = _zip_file("elf_challenge.zip")
         spec = normalize_target(str(path))
         manifest = {"file_count": 1, "total_bytes": 200, "files": ["challenge"]}
@@ -92,6 +101,21 @@ class ClassifyRoutingTest(unittest.TestCase):
         decision = reclassify(
             initial,
             ["challenge: ELF 64-bit LSB executable, x86-64"],
+        )
+        self.assertEqual(decision.primary, "reverse")
+
+    def test_elf_magic_with_remote_after_recon_routes_to_pwn(self) -> None:
+        """ELF 魔法 + 报告中的远程服务地址 → reclassify 到 pwn。"""
+        path = _zip_file("pwn_challenge.zip")
+        spec = normalize_target(str(path))
+        manifest = {"file_count": 1, "total_bytes": 200, "files": ["challenge"]}
+        initial = classify(spec, "分析程序", manifest)
+        decision = reclassify(
+            initial,
+            [
+                "challenge: ELF 64-bit LSB executable, x86-64",
+                "题面提示：nc 192.168.1.10 8888 连接远程服务",
+            ],
         )
         self.assertEqual(decision.primary, "pwn")
 
