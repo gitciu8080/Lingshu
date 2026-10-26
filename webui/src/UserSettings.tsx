@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
-  Bot, BrainCircuit, KeyRound, LogOut, Plus, RotateCcw, Search, ShieldAlert, Trash2, UserCog,
+  Bot, BrainCircuit, Coins, KeyRound, LogOut, Plus, RotateCcw, Search, ShieldAlert, Trash2, UserCog,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -9,20 +9,109 @@ import {
   auth,
   ManagedProvider,
   ModelProviderOption,
+  PlatformUsageSummary,
   ProviderCatalogEntry,
+  UsageGroupRow,
   UserProfile,
+  UserUsageSummary,
 } from "./api";
 import { ProviderWizardDialog } from "./ProviderWizard";
 
 // 用户设置页（/settings）：个人版管理台，复用 superadmin 页面的视觉体系。
-// Tab1 大模型供应商（私有池）；Tab2 Agent 模型分工；Tab3 账号安全。
-type Tab = "providers" | "bindings" | "account";
+// Tab1 大模型供应商（私有池）；Tab2 Agent 模型分工；Tab3 用量统计；Tab4 账号安全。
+type Tab = "providers" | "bindings" | "usage" | "account";
 
 const TITLES: Record<Tab, [string, string]> = {
   providers: ["大模型供应商管理", "MY LLM PROVIDERS / 私有供应商、模型列表与凭据"],
   bindings: ["Agent 模型分工", "AGENT MODEL BINDINGS / 每个 Agent 角色使用的模型"],
+  usage: ["Token 用量统计", "TOKEN USAGE / 模型推理消耗的输入与输出 Token"],
   account: ["账号安全", "ACCOUNT SECURITY / 登录名、邮箱与密码"],
 };
+
+const DAY_OPTIONS = [
+  { value: 7, label: "近 7 天" },
+  { value: 30, label: "近 30 天" },
+  { value: 90, label: "近 90 天" },
+  { value: 0, label: "全部" },
+];
+
+export function formatTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}
+
+// ── 用量展示共享组件（用户页与超管页复用） ──
+export function UsageStatCards({ calls, inputTokens, outputTokens, totalTokens }: {
+  calls: number; inputTokens: number; outputTokens: number; totalTokens: number;
+}) {
+  return (
+    <section className="superadmin-stats">
+      <article><span>TOTAL_TOKENS</span><b>{formatTokens(totalTokens)}</b><i /></article>
+      <article><span>INPUT_TOKENS</span><b>{formatTokens(inputTokens)}</b><i /></article>
+      <article><span>OUTPUT_TOKENS</span><b>{formatTokens(outputTokens)}</b><i /></article>
+      <article className="danger"><span>MODEL_CALLS</span><b>{calls}</b><i /></article>
+    </section>
+  );
+}
+
+export function UsageGroupTable({ title, note, rows, keyHeader, totalTokens }: {
+  title: string;
+  note: string;
+  rows: UsageGroupRow[];
+  keyHeader: string;
+  totalTokens: number;
+}) {
+  return (
+    <section className="superadmin-database">
+      <header>
+        <div><h2>{title}</h2><em>{note}</em></div>
+      </header>
+      <div className="superadmin-table-wrap">
+        <table className="superadmin-table">
+          <thead>
+            <tr><th>{keyHeader}</th><th>调用次数</th><th>输入 TOKEN</th><th>输出 TOKEN</th><th>合计</th><th>占比</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const rowTotal = row.input_tokens + row.output_tokens;
+              const percent = totalTokens > 0 ? Math.round((rowTotal / totalTokens) * 100) : 0;
+              return (
+                <tr key={row.key}>
+                  <td><code>{row.key}</code></td>
+                  <td>{row.calls}</td>
+                  <td>{row.input_tokens.toLocaleString()}</td>
+                  <td>{row.output_tokens.toLocaleString()}</td>
+                  <td><b>{rowTotal.toLocaleString()}</b></td>
+                  <td style={{ minWidth: 110 }}>
+                    <span style={{ fontSize: 11 }}>{percent}%</span>
+                    <span style={{ display: "block", height: 3, background: "#242424", marginTop: 4 }}>
+                      <span style={{ display: "block", height: 3, width: `${percent}%`, background: "var(--sa-accent, var(--accent))" }} />
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {!rows.length && <p className="empty-note">该时间范围内暂无用量记录</p>}
+      </div>
+      <footer><span>LLM INFERENCE ONLY</span><span>ROWS {rows.length}</span></footer>
+    </section>
+  );
+}
+
+export function UsageDayPicker({ days, onChange }: { days: number; onChange: (days: number) => void }) {
+  return (
+    <div className="superadmin-toolbar">
+      <select value={days} onChange={(e) => onChange(Number(e.target.value))}>
+        {DAY_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
 
 export default function UserSettingsPage() {
   const [tab, setTab] = useState<Tab>("providers");
@@ -40,6 +129,10 @@ export default function UserSettingsPage() {
     Record<string, { provider: string; model: string; thinking_intensity: string }>
   >({});
   const [savingBindings, setSavingBindings] = useState(false);
+
+  // ── 用量统计 ──
+  const [usage, setUsage] = useState<UserUsageSummary | null>(null);
+  const [usageDays, setUsageDays] = useState(30);
 
   // ── 账号表单 ──
   const [draftProfile, setDraftProfile] = useState({ username: "", email: "" });
@@ -88,6 +181,15 @@ export default function UserSettingsPage() {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 用量 Tab 激活或时间窗变化时按需拉取
+  useEffect(() => {
+    if (tab !== "usage") return;
+    api.myTokenUsage(usageDays)
+      .then(setUsage)
+      .catch((error) => toast.error(String(error)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, usageDays]);
 
   const visibleProviders = useMemo(
     () => providers.filter((item) =>
@@ -179,6 +281,9 @@ export default function UserSettingsPage() {
         </button>
         <button className={tab === "bindings" ? "active" : ""} onClick={() => { setTab("bindings"); setSearch(""); }}>
           <Bot size={17} /><span>Agent 模型分工</span>
+        </button>
+        <button className={tab === "usage" ? "active" : ""} onClick={() => { setTab("usage"); }}>
+          <Coins size={17} /><span>用量统计</span>
         </button>
         <button className={tab === "account" ? "active" : ""} onClick={() => { setTab("account"); }}>
           <ShieldAlert size={17} /><span>账号安全</span>
@@ -345,6 +450,49 @@ export default function UserSettingsPage() {
               </div>
               <footer><span>BINDINGS: USER SCOPED</span><span>ROLES {roles.length}</span></footer>
             </section>
+          </>
+        )}
+
+        {tab === "usage" && (
+          <>
+            {usage ? (
+              <>
+                <UsageStatCards
+                  calls={usage.calls}
+                  inputTokens={usage.input_tokens}
+                  outputTokens={usage.output_tokens}
+                  totalTokens={usage.input_tokens + usage.output_tokens}
+                />
+                <div style={{ display: "flex", justifyContent: "flex-end", margin: "-12px 0 14px" }}>
+                  <UsageDayPicker days={usageDays} onChange={setUsageDays} />
+                </div>
+                <div style={{ display: "grid", gap: 16 }}>
+                  <UsageGroupTable
+                    title="BY_MODEL"
+                    note="按模型名分解的消耗"
+                    rows={usage.by_model}
+                    keyHeader="模型"
+                    totalTokens={usage.input_tokens + usage.output_tokens}
+                  />
+                  <UsageGroupTable
+                    title="BY_PROVIDER"
+                    note="按供应商配置分解的消耗"
+                    rows={usage.by_provider}
+                    keyHeader="供应商配置"
+                    totalTokens={usage.input_tokens + usage.output_tokens}
+                  />
+                  <UsageGroupTable
+                    title="BY_SESSION"
+                    note="消耗最高的会话（Top 10）"
+                    rows={usage.by_session}
+                    keyHeader="会话"
+                    totalTokens={usage.input_tokens + usage.output_tokens}
+                  />
+                </div>
+              </>
+            ) : (
+              <p className="empty-note">加载用量数据…</p>
+            )}
           </>
         )}
 

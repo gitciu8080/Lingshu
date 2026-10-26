@@ -2149,6 +2149,44 @@ async def get_my_agent_model_bindings(current_user: dict = Depends(get_current_u
     }
 
 
+# ══════════════════════════════════════════════════
+# Token 用量统计（用户自助 + 超管平台视图）
+# ══════════════════════════════════════════════════
+
+
+def _usage_days(days: int) -> int:
+    """时间窗口：0=全部，其余钳位 1~3650 天。"""
+    try:
+        return max(0, min(int(days), 3650))
+    except (TypeError, ValueError):
+        return 30
+
+
+@app.get("/api/my/token-usage")
+async def my_token_usage(
+    days: int = 30,
+    current_user: dict = Depends(get_current_user),
+):
+    """当前用户的模型 Token 用量汇总。"""
+    from core.token_usage import user_usage_summary
+
+    return await asyncio.to_thread(
+        user_usage_summary, int(current_user["id"]), _usage_days(days),
+    )
+
+
+@app.get("/api/superadmin/token-usage")
+async def superadmin_token_usage(
+    days: int = 30,
+    current_user: dict = Depends(get_current_user),
+):
+    """平台级模型 Token 用量汇总（按用户/配置/模型分解）。"""
+    _require_superadmin(current_user)
+    from core.token_usage import platform_usage_summary
+
+    return await asyncio.to_thread(platform_usage_summary, _usage_days(days))
+
+
 @app.put("/api/agent-model-bindings")
 async def put_my_agent_model_bindings(
     data: AgentModelBindingsPayload,

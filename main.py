@@ -46,6 +46,7 @@ from LLM.model import (  # 创建 LLM 模型实例（供应商目录驱动）
     create_model,
     create_vision_model,
     resolve_qwen_model,
+    set_usage_context,
 )
 from core.TaskState import MissionState, MissionStore, Phase  # 任务状态、持久化存储、阶段枚举
 from agent.Analysis import create_analysis_agent  # 漏洞研判专家（纯推理）
@@ -767,6 +768,7 @@ async def run_summary_report(
             web_search=False,
             config=runtime,
         )
+        set_usage_context(model, user_id, report_key, "summary")
         summary_agent = create_summary_agent(
             model,
             offloader=offloader,
@@ -2198,6 +2200,8 @@ async def run_mission(
             temperature=None,
             config=runtime,
         )
+        # Token 用量归属：主模型标注 main（各未分工角色共用此实例）。
+        set_usage_context(model, user_id, session_id or mission_id, "main")
         # ── 用户级 Agent 模型分工（Web 任务）──
         # 普通用户可为每个 Agent 角色单独指定模型；未绑定/绑定失效的角色
         # 沿用上面的共享主模型。summary 角色在收尾阶段（run_summary_report）
@@ -2244,8 +2248,16 @@ async def run_mission(
                 store.save(mission)
 
         def _role_model(role: str):
-            """角色绑定的模型实例；未绑定时回退共享主模型。"""
-            return role_models.get(role, model)
+            """角色绑定的模型实例；未绑定时回退共享主模型。
+
+            返回前更新用量归属标签：分工实例按当前角色标注（同组合被多
+            角色共享时标签取最后使用者，token 的用户归属不受影响）。
+            """
+            selected_model = role_models.get(role, model)
+            set_usage_context(
+                selected_model, user_id, session_id or mission_id, role,
+            )
+            return selected_model
 
         _user_is_superadmin = (
             user_id is not None and get_user_role(user_id) == "superadmin"
@@ -2273,6 +2285,9 @@ async def run_mission(
                     runtime,
                     owner_user_id=user_id,
                     owner_is_superadmin=_user_is_superadmin,
+                )
+                set_usage_context(
+                    vision_model, user_id, session_id or mission_id, "vision",
                 )
             except Exception as exc:  # noqa: BLE001 - 视觉失败不阻断任务
                 logger.warning("视觉模型初始化失败，本任务不挂载视觉工具: %s", exc)

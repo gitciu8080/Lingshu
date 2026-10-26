@@ -9,6 +9,7 @@ import {
   ChevronDown,
   CircleDot,
   ClipboardList,
+  Coins,
   Crosshair,
   Database,
   FlaskConical,
@@ -39,9 +40,9 @@ import {
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { accountStream, api, auth, Event, ManagedProvider, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, ProviderCatalogEntry, PythonEnvironmentStatus, Session, stream, SystemUser, ToolStatus } from "./api";
+import { accountStream, api, auth, Event, ManagedProvider, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, PlatformUsageSummary, ProviderCatalogEntry, PythonEnvironmentStatus, Session, stream, SystemUser, ToolStatus } from "./api";
 import { ProviderWizardDialog } from "./ProviderWizard";
-import UserSettingsPage from "./UserSettings";
+import UserSettingsPage, { UsageDayPicker, UsageGroupTable, UsageStatCards } from "./UserSettings";
 import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
 
@@ -2163,7 +2164,7 @@ function SuperAdminLogin({ onReady }: { onReady: () => void }) {
   </form></main>;
 }
 
-type SuperAdminTab = "users" | "llm" | "embedding";
+type SuperAdminTab = "users" | "llm" | "embedding" | "usage";
 type ModelDraft = ModelApiConfigInput & { clear_api_key?: boolean };
 
 function blankModelDraft(category: "llm" | "embedding"): ModelDraft {
@@ -2255,7 +2256,9 @@ function SuperAdminPage() {
       | { kind: "embedding"; config: ModelApiConfig | null }
       | null
     >(null),
-    [newPassword, setNewPassword] = useState(""), [search, setSearch] = useState("");
+    [newPassword, setNewPassword] = useState(""), [search, setSearch] = useState(""),
+    [platformUsage, setPlatformUsage] = useState<PlatformUsageSummary | null>(null),
+    [usageDays, setUsageDays] = useState(30);
   const loadData = async () => {
     setLoading(true);
     try {
@@ -2272,6 +2275,13 @@ function SuperAdminPage() {
     finally { setLoading(false); }
   };
   useEffect(() => { if (!ready) return; void api.me().then((me) => { if (me.role !== "superadmin") throw new Error("需要超级管理员权限"); }).then(loadData).catch((error) => { auth.clear(); setReady(false); toast.error(String(error)); }); }, [ready]);
+  // Token 用量 Tab 激活或时间窗变化时按需拉取
+  useEffect(() => {
+    if (!ready || tab !== "usage") return;
+    api.superadminTokenUsage(usageDays)
+      .then(setPlatformUsage)
+      .catch((error) => toast.error(String(error)));
+  }, [ready, tab, usageDays]);
   const resetPassword = async (event: FormEvent) => { event.preventDefault(); if (!target) return; try { await api.resetUserPassword(target.id, newPassword); toast.success(`已重置 ${target.username} 的密码，并使其旧登录失效`); setTarget(null); setNewPassword(""); void loadData(); } catch (error) { toast.error(String(error)); } };
   const removeUser = async (user: SystemUser) => { if (!window.confirm(`确定删除用户“${user.username}”？该操作不可恢复。`)) return; try { await api.deleteUser(user.id); toast.success("用户已删除"); void loadData(); } catch (error) { toast.error(String(error)); } };
   const removeProvider = async (provider: ManagedProvider) => {
@@ -2284,9 +2294,9 @@ function SuperAdminPage() {
   const visibleProviders = providers.filter((item) => `${item.name} ${item.provider} ${item.base_url} ${item.models.map((m) => m.name).join(" ")}`.toLowerCase().includes(search.toLowerCase()));
   const visibleEmbeddings = configs.filter((item) => `${item.name} ${item.provider} ${item.base_url}`.toLowerCase().includes(search.toLowerCase()));
   if (!ready) return <><LiquidGlassLayer /><SuperAdminLogin onReady={() => setReady(true)} /></>;
-  const titles = tab === "users" ? ["系统用户管理", "USER ACCESS CONTROL / 账户、密码与访问权限"] : tab === "llm" ? ["大模型供应商管理", "LLM PROVIDER REGISTRY / 供应商、模型列表、超参数与内置工具"] : ["嵌入模型 API 管理", "EMBEDDING REGISTRY / 向量模型与知识库连接"];
+  const titles = tab === "users" ? ["系统用户管理", "USER ACCESS CONTROL / 账户、密码与访问权限"] : tab === "llm" ? ["大模型供应商管理", "LLM PROVIDER REGISTRY / 供应商、模型列表、超参数与内置工具"] : tab === "usage" ? ["平台 Token 用量", "PLATFORM TOKEN USAGE / 全部用户的模型推理消耗"] : ["嵌入模型 API 管理", "EMBEDDING REGISTRY / 向量模型与知识库连接"];
   return <main className="superadmin-page"><LiquidGlassLayer />
-    <aside className="superadmin-sidebar"><div className="superadmin-logo"><span>LS</span><b>LINGSHU<br /><small>CONTROL</small></b></div><p>ADMIN PANEL</p><button className={tab === "users" ? "active" : ""} onClick={() => { setTab("users"); setSearch(""); }}><Database size={17} /><span>用户数据库</span></button><button className={tab === "llm" ? "active" : ""} onClick={() => { setTab("llm"); setSearch(""); }}><BrainCircuit size={17} /><span>大模型 API</span></button><button className={tab === "embedding" ? "active" : ""} onClick={() => { setTab("embedding"); setSearch(""); }}><Network size={17} /><span>嵌入模型 API</span></button><button onClick={() => void loadData()}><RotateCcw size={17} /><span>{loading ? "同步中" : "同步数据"}</span></button><div className="superadmin-sidebar-bottom"><button onClick={() => { auth.clear(); setReady(false); }}><LogOut size={17} /><span>安全退出</span></button></div></aside>
+    <aside className="superadmin-sidebar"><div className="superadmin-logo"><span>LS</span><b>LINGSHU<br /><small>CONTROL</small></b></div><p>ADMIN PANEL</p><button className={tab === "users" ? "active" : ""} onClick={() => { setTab("users"); setSearch(""); }}><Database size={17} /><span>用户数据库</span></button><button className={tab === "llm" ? "active" : ""} onClick={() => { setTab("llm"); setSearch(""); }}><BrainCircuit size={17} /><span>大模型 API</span></button><button className={tab === "embedding" ? "active" : ""} onClick={() => { setTab("embedding"); setSearch(""); }}><Network size={17} /><span>嵌入模型 API</span></button><button className={tab === "usage" ? "active" : ""} onClick={() => { setTab("usage"); setSearch(""); }}><Coins size={17} /><span>Token 用量</span></button><button onClick={() => void loadData()}><RotateCcw size={17} /><span>{loading ? "同步中" : "同步数据"}</span></button><div className="superadmin-sidebar-bottom"><button onClick={() => { auth.clear(); setReady(false); }}><LogOut size={17} /><span>安全退出</span></button></div></aside>
     <section className="superadmin-content"><header className="superadmin-header"><div><p className="kicker">LINGSHU · RESTRICTED AREA</p><h1>{titles[0]}</h1><small>{titles[1]}</small></div><span className="superadmin-live"><i /> SYSTEM ONLINE</span></header>
       {tab === "users" ? <><section className="superadmin-stats"><article><span>USERS_TOTAL</span><b>{users.length}</b><i /></article><article><span>SUPERADMIN</span><b>{users.filter((user) => user.role === "superadmin").length}</b><i /></article><article><span>LOGGED_IN</span><b>{users.filter((user) => user.last_login).length}</b><i /></article><article className="danger"><span>FILTERED_VIEW</span><b>{filteredUsers.length}</b><i /></article></section>
         <section className="superadmin-database"><header><div><h2>USER_DATABASE</h2><em>共 {users.length} 条账户记录</em></div><div className="superadmin-toolbar"><label><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索 UID / 用户名 / 邮箱…" /></label><button type="button" className="quiet-button" onClick={() => void loadData()} disabled={loading}>{loading ? "刷新中…" : "刷新"}</button></div></header><div className="superadmin-table-wrap"><table className="superadmin-table"><thead><tr><th>UID</th><th>用户 / USER</th><th>联系方式</th><th>角色权限</th><th>创建时间</th><th>最近登录</th><th>操作</th></tr></thead><tbody>{filteredUsers.map((user) => <tr key={user.id}><td><code>#{user.id}</code></td><td><div className="superadmin-user"><span>{user.username.slice(0, 1).toUpperCase()}</span><div><b>{user.username}</b><small>{user.role === "superadmin" ? "ROOT ACCESS" : "STANDARD ACCOUNT"}</small></div></div></td><td>{user.email || "--"}</td><td><span className={`role-badge ${user.role}`}>{user.role}</span></td><td>{user.created_at || "--"}</td><td><span className={user.last_login ? "login-state online" : "login-state"}><i />{user.last_login || "从未登录"}</span></td><td className="user-actions"><button type="button" className="quiet-button" onClick={() => { setTarget(user); setNewPassword(""); }}>重置密码</button>{user.role !== "superadmin" && <button type="button" className="danger-button compact" onClick={() => void removeUser(user)}><Trash2 size={13} /> 删除</button>}</td></tr>)}</tbody></table>{!loading && !filteredUsers.length && <p className="empty-note">未找到匹配的用户记录</p>}</div><footer><span>DATABASE STATUS: {loading ? "SYNCING" : "READY"}</span><span>DISPLAYING {filteredUsers.length} / {users.length}</span></footer></section></>
@@ -2294,8 +2304,17 @@ function SuperAdminPage() {
           <section className="superadmin-stats"><article><span>PROVIDERS</span><b>{providers.length}</b><i /></article><article><span>ENABLED</span><b>{providers.filter((item) => item.enabled).length}</b><i /></article><article><span>MODELS</span><b>{providers.reduce((sum, item) => sum + item.models.length, 0)}</b><i /></article><article className="danger"><span>WITH_TOOLS</span><b>{providers.filter((item) => item.enabled_tools.length).length}</b><i /></article></section>
           <section className="superadmin-database"><header><div><h2>LLM_PROVIDERS</h2><em>供应商 → 凭据 → 模型列表（每模型超参数）→ 内置工具</em></div><div className="superadmin-toolbar"><label><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索名称 / 供应商 / 模型…" /></label><button className="danger-button compact add-model" onClick={() => setEditor({ kind: "provider", provider: null })}><Plus size={14} /> 添加供应商</button></div></header><div className="superadmin-table-wrap"><table className="superadmin-table model-config-table"><thead><tr><th>状态</th><th>配置 / PROVIDER</th><th>API 地址</th><th>模型</th><th>原生工具</th><th>API Key</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{visibleProviders.map((item) => <tr key={item.id}><td><span className={item.enabled ? "endpoint-state enabled" : "endpoint-state"}><i />{item.enabled ? "启用" : "停用"}</span></td><td><div className="superadmin-user"><span>AI</span><div><b>{item.name}</b><small>{item.provider} · {item.api_style}</small></div></div></td><td><code className="endpoint-url">{item.base_url}</code></td><td><div className="model-chips">{item.models.map((m) => <span key={m.name} className={`model-chip ${m.enabled ? "" : "off"}`} title={m.enabled ? "" : "已停用"}>{m.name}{m.vision ? " · 多模态" : ""}</span>)}</div></td><td><small className="tool-stack">{item.enabled_tools.length ? item.enabled_tools.join("、") : "—"}</small></td><td>{item.api_key_status === "invalid" ? <code className="key-invalid" title="加密密钥已丢失或轮换，请修改该配置并重新填写 API Key">密钥失效</code> : <code>{item.api_key_masked}</code>}</td><td>{item.updated_at || "--"}</td><td className="user-actions"><button className="quiet-button" onClick={() => setEditor({ kind: "provider", provider: item })}>修改</button><button className="danger-button compact" onClick={() => void removeProvider(item)}><Trash2 size={13} /> 删除</button></td></tr>)}</tbody></table>{!loading && !visibleProviders.length && <p className="empty-note">尚无供应商配置，请点击“添加供应商”</p>}</div><footer><span>SECRETS: ENCRYPTED AT REST</span><span>DISPLAYING {visibleProviders.length} / {providers.length}</span></footer></section>
         </>
-        : <><section className="superadmin-stats"><article><span>EMBEDDING_TOTAL</span><b>{configs.length}</b><i /></article><article><span>ENABLED</span><b>{configs.filter((item) => item.enabled).length}</b><i /></article><article><span>WITH_API_KEY</span><b>{configs.filter((item) => item.has_api_key).length}</b><i /></article><article className="danger"><span>PROVIDERS</span><b>{new Set(configs.map((item) => item.provider)).size}</b><i /></article></section>
+        : tab === "embedding" ? <><section className="superadmin-stats"><article><span>EMBEDDING_TOTAL</span><b>{configs.length}</b><i /></article><article><span>ENABLED</span><b>{configs.filter((item) => item.enabled).length}</b><i /></article><article><span>WITH_API_KEY</span><b>{configs.filter((item) => item.has_api_key).length}</b><i /></article><article className="danger"><span>PROVIDERS</span><b>{new Set(configs.map((item) => item.provider)).size}</b><i /></article></section>
           <section className="superadmin-database"><header><div><h2>EMBEDDING_ENDPOINTS</h2><em>知识库向量模型；未配置时回退服务器 .env</em></div><div className="superadmin-toolbar"><label><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索名称 / 类型 / 地址…" /></label><button className="danger-button compact add-model" onClick={() => setEditor({ kind: "embedding", config: null })}><Plus size={14} /> 添加配置</button></div></header><div className="superadmin-table-wrap"><table className="superadmin-table model-config-table"><thead><tr><th>状态</th><th>配置 / PROVIDER</th><th>API 地址</th><th>模型</th><th>API Key</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{visibleEmbeddings.map((item) => <tr key={item.id}><td><span className={item.enabled ? "endpoint-state enabled" : "endpoint-state"}><i />{item.enabled ? "启用" : "停用"}</span></td><td><div className="superadmin-user"><span>E</span><div><b>{item.name}</b><small>{item.provider} · {item.api_style}</small></div></div></td><td><code className="endpoint-url">{item.base_url}</code></td><td><small className="model-stack">{item.model_name}<br />DIM {item.dimensions}</small></td><td>{item.api_key_status === "invalid" ? <code className="key-invalid" title="加密密钥已丢失或轮换，请修改该配置并重新填写 API Key">密钥失效</code> : <code>{item.api_key_masked}</code>}</td><td>{item.updated_at || "--"}</td><td className="user-actions"><button className="quiet-button" onClick={() => setEditor({ kind: "embedding", config: item })}>修改</button><button className="danger-button compact" onClick={() => void removeConfig(item)}><Trash2 size={13} /> 删除</button></td></tr>)}</tbody></table>{!loading && !visibleEmbeddings.length && <p className="empty-note">尚无嵌入模型配置，请点击“添加配置”</p>}</div><footer><span>SECRETS: ENCRYPTED AT REST</span><span>DISPLAYING {visibleEmbeddings.length} / {configs.length}</span></footer></section></>
+        : <>{platformUsage ? <>
+          <UsageStatCards calls={platformUsage.calls} inputTokens={platformUsage.input_tokens} outputTokens={platformUsage.output_tokens} totalTokens={platformUsage.input_tokens + platformUsage.output_tokens} />
+          <div style={{ display: "flex", justifyContent: "flex-end", margin: "-12px 0 14px" }}><UsageDayPicker days={usageDays} onChange={setUsageDays} /></div>
+          <div style={{ display: "grid", gap: 16 }}>
+            <UsageGroupTable title="BY_USER" note="按用户分解的消耗；无用户归属的记录（CLI 本地任务）计入「本地 CLI」" rows={platformUsage.by_user} keyHeader="用户" totalTokens={platformUsage.input_tokens + platformUsage.output_tokens} />
+            <UsageGroupTable title="BY_PROVIDER" note="按供应商配置分解的消耗" rows={platformUsage.by_provider} keyHeader="供应商配置" totalTokens={platformUsage.input_tokens + platformUsage.output_tokens} />
+            <UsageGroupTable title="BY_MODEL" note="按模型名分解的消耗" rows={platformUsage.by_model} keyHeader="模型" totalTokens={platformUsage.input_tokens + platformUsage.output_tokens} />
+          </div>
+        </> : <p className="empty-note">加载平台用量数据…</p>}</>
       }
     </section>
     <Dialog.Root open={!!target} onOpenChange={(open) => !open && setTarget(null)}><Dialog.Portal><Dialog.Overlay className="overlay superadmin-reset-overlay" /><Dialog.Content className="modal superadmin-reset-modal"><Dialog.Title>重置用户密码</Dialog.Title><Dialog.Description>将立即使该用户当前所有登录状态失效。</Dialog.Description><form onSubmit={resetPassword}><label>用户<input value={target?.username || ""} disabled /></label><label>新密码（至少 8 位）<input value={newPassword} type="password" minLength={8} onChange={(e) => setNewPassword(e.target.value)} required autoFocus /></label><div className="modal-actions"><button type="button" className="quiet-button" onClick={() => setTarget(null)}>取消</button><button type="submit" className="danger-button">确认重置</button></div></form></Dialog.Content></Dialog.Portal></Dialog.Root>

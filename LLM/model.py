@@ -15,7 +15,11 @@
 
 具体模型由注册表条目的 ``models`` 列表决定（Low/Min/Max 层级已废弃），
 思考强度 off/low/medium/high 按供应商收敛。
+
+所有出厂实例默认启用 Token 用量统计（见文末 enable_usage_tracking）：
+调用完成后把 ChatResponse.usage 写入 users.db 的 model_token_usage 表。
 """
+import asyncio
 import logging
 from typing import Any, AsyncGenerator, Literal
 from urllib.parse import urlsplit
@@ -894,8 +898,13 @@ def create_model(
         or _VER_TO_INTENSITY.get(str(Ver or "").strip(), "medium")
     )
     selected = str(model or model_name or "").strip() or None
-    return _build_model_from_entry(
+    instance = _build_model_from_entry(
         entry, selected, intensity, temperature, web_search, vision, runtime,
+    )
+    label = str(entry.get("name") or entry.get("provider") or provider)
+    return enable_usage_tracking(
+        instance, label,
+        str(getattr(instance, "model", "") or selected or ""),
     )
 
 
@@ -932,11 +941,135 @@ def create_vision_model(
             entry = runtime.resolve_llm_entry(item["runtime_key"])
             if entry is None:
                 continue
-            return _build_model_from_entry(
+            instance = _build_model_from_entry(
                 entry, vision_models[0], "medium", None, False, True, runtime,
+            )
+            return enable_usage_tracking(
+                instance, str(item.get("name") or item.get("provider") or "vision"),
+                str(vision_models[0]),
             )
     except Exception as exc:  # noqa: BLE001 - 注册表故障不阻断任务启动
         logger.warning("从注册表解析视觉模型失败: %s", exc)
     # 无任何登记多模态模型的启用配置：本部署即为纯文本大模型，
     # 不支持视觉（返回 None，调用方不挂载视觉工具）。
     return None
+
+
+# ────────────────────────────────────────────────────────────────
+# Token 用量统计钩子
+#
+# dunder __call__ 按 CPython 特殊方法查找规则走类型而非实例字典，
+# 因此用"动态子类 + 替换实例 __class__"实现单实例挂钩：子类继承原类，
+# isinstance 兼容、属性布局不变。所有驱动（含 Vision 直调）的唯一
+# 调用出口 ChatModelBase.__call__ 被包装——非流式读返回 ChatResponse
+# 的 usage；流式转发 chunk 并取最后上报的 usage（覆盖语义=终值精确）。
+# ────────────────────────────────────────────────────────────────
+
+_TRACKED_SUBCLASSES: dict[type, type] = {}
+_USAGE_WRITE_FAILED = {"warned": False}
+
+
+async def _tracked_model_call(self, *args, **kwargs):  # noqa: ANN001
+    base_call = self._lingshu_base.__call__
+    result = await base_call(self, *args, **kwargs)
+    if isinstance(result, ChatResponse):
+        _report_model_usage(self, result.usage)
+        return result
+    # 流式：__call__ 返回 AsyncGenerator；转发 chunk 并取最后上报的
+    # usage（AgentScope _StreamAccumulator 为覆盖语义，终值即精确值）。
+    async def _stream_with_usage():
+        final_usage = None
+        async for chunk in result:
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                final_usage = usage
+            yield chunk
+        _report_model_usage(self, final_usage)
+    return _stream_with_usage()
+
+
+def _tracked_subclass(base: type) -> type:
+    subclass = _TRACKED_SUBCLASSES.get(base)
+    if subclass is None:
+        subclass = type(
+            f"_UsageTracked{base.__name__}",
+            (base,),
+            {"_lingshu_base": base},
+        )
+        subclass.__call__ = _tracked_model_call
+        _TRACKED_SUBCLASSES[base] = subclass
+    return subclass
+
+
+def enable_usage_tracking(instance: Any, provider_label: str, model_name: str) -> Any:
+    """给工厂产出的模型实例挂 Token 用量记录钩子（失败不影响使用）。"""
+    try:
+        if getattr(instance, "_lingshu_tracked", False):
+            return instance
+        instance.__class__ = _tracked_subclass(type(instance))
+        instance._lingshu_tracked = True
+        instance._lingshu_usage_meta = {
+            "provider": str(provider_label or ""),
+            "model_name": str(model_name or ""),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("启用 Token 用量统计失败（模型仍正常可用）: %s", exc)
+    return instance
+
+
+def set_usage_context(
+    instance: Any,
+    user_id: int | None,
+    session_id: str,
+    role: str,
+) -> None:
+    """设置用量归属（user_id 为 None 表示 CLI；未设置的实例不记录）。"""
+    if instance is None:
+        return
+    instance._lingshu_usage_ctx = {
+        "user_id": user_id,
+        "session_id": str(session_id or ""),
+        "role": str(role or ""),
+    }
+
+
+def _write_usage(
+    user_id: int | None, session_id: str, role: str,
+    provider: str, model_name: str,
+    input_tokens: int, output_tokens: int,
+) -> None:
+    try:
+        from core.token_usage import record_token_usage  # 延迟导入防环
+
+        record_token_usage(
+            user_id=user_id, session_id=session_id, role=role,
+            provider=provider, model_name=model_name,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if not _USAGE_WRITE_FAILED["warned"]:
+            _USAGE_WRITE_FAILED["warned"] = True
+            logger.warning("Token 用量落库失败（后续仅静默跳过）: %s", exc)
+
+
+def _report_model_usage(instance: Any, usage: Any) -> None:
+    ctx = getattr(instance, "_lingshu_usage_ctx", None)
+    if not isinstance(ctx, dict) or usage is None:
+        # 未设置归属上下文（测试/探针）或网关未上报 usage：不记录。
+        return
+    meta = getattr(instance, "_lingshu_usage_meta", None) or {}
+    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+    if input_tokens <= 0 and output_tokens <= 0:
+        return
+    args = (
+        ctx.get("user_id"), ctx.get("session_id") or "", ctx.get("role") or "",
+        meta.get("provider", ""), meta.get("model_name", ""),
+        input_tokens, output_tokens,
+    )
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _write_usage(*args)
+        return
+    loop.run_in_executor(None, _write_usage, *args)

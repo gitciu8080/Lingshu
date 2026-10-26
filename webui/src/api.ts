@@ -176,6 +176,31 @@ export type UserProfile = {
   created_at?: string;
   last_login?: string;
 };
+export type UsageGroupRow = {
+  key: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+};
+export type UserUsageSummary = {
+  user_id: number;
+  days: number;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  by_provider: UsageGroupRow[];
+  by_model: UsageGroupRow[];
+  by_session: UsageGroupRow[];
+};
+export type PlatformUsageSummary = {
+  days: number;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  by_user: (UsageGroupRow & { user_id: number })[];
+  by_provider: UsageGroupRow[];
+  by_model: UsageGroupRow[];
+};
 export type ToolStatus = {
   id: string;
   category?: string;
@@ -406,6 +431,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
+  // ── Token 用量统计 ──
+  myTokenUsage: (days = 30) =>
+    request<UserUsageSummary>(`/api/my/token-usage?days=${encodeURIComponent(String(days))}`),
+  superadminTokenUsage: (days = 30) =>
+    request<PlatformUsageSummary>(`/api/superadmin/token-usage?days=${encodeURIComponent(String(days))}`),
   sessions: async (offset = 0, limit = 30) => {
     const data = await request<{ sessions?: unknown; has_more?: unknown; next_offset?: unknown }>(
       `/api/sessions?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,

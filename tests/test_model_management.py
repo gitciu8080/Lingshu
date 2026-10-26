@@ -358,7 +358,13 @@ class FactoryDispatchTest(RegistryIsolationMixin, unittest.TestCase):
             create_model(provider="deepseek", config=runtime), DeepSeekResponsesModel,
         )
         model = create_model(provider="anthropic", config=runtime)
-        self.assertEqual(type(model).__name__, "AnthropicChatModel")
+        # 出厂实例默认带 Token 用量统计钩子（LLM/model.py 动态子类），
+        # 驱动类型用基类断言而非类名字符串。
+        self.assertEqual(
+            type(model).__name__.removeprefix("_UsageTracked"),
+            "AnthropicChatModel",
+        )
+        self.assertTrue(hasattr(model, "_lingshu_usage_meta"))
 
     def test_chat_gateway_with_zhipu_thinking(self) -> None:
         registry.create_llm_provider(_provider_payload(
