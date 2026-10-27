@@ -1277,7 +1277,7 @@ class MissionStartRequest(BaseModel):
         default=None,
         description="已上传附件的服务器路径；与 target 同时提供时，target 作为网络授权目标",
     )
-    goal: str = Field(default="获取 Flag", description="任务目标描述")
+    goal: str = Field(default="", description="任务目标描述；为空时按任务模式自动推导（standard 渗透=评估目标，ctf/fast=获取 Flag）")
     provider: str = Field(default="deepseek", pattern="^[a-z][a-z0-9_-]{1,31}(::[0-9]+)?$", description="运行时 key：provider 或 provider::配置ID（同一供应商多条启用）")
     model: str = Field(default="", max_length=300, description="具体模型名；为空时使用该配置的默认模型")
     thinking_intensity: str = Field(default="medium", pattern="^(off|low|medium|high)$", description="思考强度: off | low | medium | high")

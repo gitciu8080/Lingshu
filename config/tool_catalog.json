@@ -358,6 +358,28 @@
    ]
   },
   {
+   "id": "chromium-headless",
+   "category": "web",
+   "command_candidates": [
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "google-chrome-stable"
+   ],
+   "version_args": [
+    "--version"
+   ],
+   "roles": [
+    "recon",
+    "attack"
+   ],
+   "risk": "active_scan",
+   "approval_required": false,
+   "description": "Headless 浏览器页面截图（webshot 证据）",
+   "usage_hint": "由 webshot 工具调用，仅对授权 URL 截图。",
+   "alternatives": []
+  },
+  {
    "id": "whatweb",
    "category": "web",
    "command_candidates": [

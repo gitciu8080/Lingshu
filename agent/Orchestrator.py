@@ -46,6 +46,15 @@ from agent.categorize import (
 
 ORCHESTRATOR_SYS_PROMPT = load_prompt("ORCHESTRATOR")
 
+# 攻击/利用类动作关键词：objective 命中即视为进入攻击阶段，
+# 未获人工批准时被 dispatch_attack 兜底闸门拦截（含后渗透/横向类动作）。
+_EXPLOITATION_KEYWORDS = (
+    "exploit", "验证", "利用", "访问", "shell", "flag", "提权",
+    "后渗透", "横向",
+)
+# 后渗透阶段触发词：objective 命中且当前处于 EXPLOITATION 时迁入 POST_EXPLOITATION。
+_POST_EXPLOITATION_TRIGGERS = ("flag", "post", "提权", "后渗透", "横向")
+
 
 def create_orchestrator_agent(
     model,
@@ -454,7 +463,7 @@ def create_orchestrator_agent(
         lower = objective.lower()
         exploitation = any(
             word in lower or word in objective
-            for word in ("exploit", "验证", "利用", "访问", "shell", "flag", "提权")
+            for word in _EXPLOITATION_KEYWORDS
         )
         # 兜底拦截：攻击类动作必须先获得人工批准，
         # 即使 LLM 跳过 request_exploitation_approval 也无法直接进入攻击阶段
@@ -477,7 +486,7 @@ def create_orchestrator_agent(
         )
         if exploitation and mission.phase == Phase.ANALYSIS:
             mission.transition(Phase.EXPLOITATION, f"开始执行: {objective}")
-        if any(word in lower or word in objective for word in ("flag", "post", "提权")):
+        if any(word in lower or word in objective for word in _POST_EXPLOITATION_TRIGGERS):
             if mission.phase == Phase.EXPLOITATION:
                 mission.transition(Phase.POST_EXPLOITATION, f"开始执行: {objective}")
         mission.record("Orchestrator", "dispatch_attack", objective=objective)
@@ -575,7 +584,7 @@ def create_orchestrator_agent(
         flag_match = re.search(r"(?:[A-Za-z0-9_]+)?flag\{[^{}\r\n]+\}|[A-Za-z0-9_]+\{[^{}\r\n]+\}", report, re.IGNORECASE)
         if flag_match:
             mission.add_fact(
-                f"Attack 报告中发现待验证 Flag 候选：{flag_match.group(0)}",
+                f"Attack 报告中发现待验证 Flag/关键凭据候选：{flag_match.group(0)}",
                 attack_agent.name,
                 [evidence.id],
                 category=str((mission.category_decision or {}).get("primary") or ""),
@@ -781,7 +790,7 @@ def create_orchestrator_agent(
                 "title": "目标导向验证",
                 "risk": "中高",
                 "summary": f"围绕任务目标“{mission.goal}”优先验证最可能形成完整攻击链的路径。",
-                "steps": ["优先处理最高置信度攻击路径", *base_steps[:2], "达到任务目标或边界条件后调用 complete_mission 或 continue 推进"],
+                "steps": ["优先处理最高置信度攻击路径", *base_steps[:2], "达成任务目标或触及边界条件后，先评估攻击链完整性与影响面，再调用 complete_mission 或 continue 推进"],
             },
         ]
 
@@ -1087,9 +1096,13 @@ def create_orchestrator_agent(
         """结束任务并保存长期经验。
 
         Args:
-            success: 是否已用证据确认达成用户目标。
+            success: 是否已用证据确认达成任务目标。渗透模式
+                （authorized_pentest/hybrid_taskbook）下判据是已验证漏洞与
+                评估结论（含后渗透评估与攻击链闭环）是否支撑目标达成，
+                不以获取 Flag 为唯一标准。
             summary: 包含证据、攻击链、失败尝试和结论的任务总结。
-            flag: 已确认的 Flag；未发现时必须留空。
+            flag: 可选达成证据：CTF 模式的 Flag 值，或渗透模式下发现的
+                关键凭据/数据可达性证明；未发现时必须留空。
         """
         if mission.phase in {Phase.COMPLETED, Phase.FAILED}:
             return "[拒绝] 任务已经结束"
@@ -1126,7 +1139,10 @@ def create_orchestrator_agent(
             flag=mission.flag,
             lessons=lessons,
         )
-        return f"[任务已结束] success={mission.success}, flag={mission.flag or '未发现'}"
+        outcome = f"success={mission.success}"
+        if mission.flag:
+            outcome += f", flag={mission.flag}"
+        return f"[任务已结束] {outcome}"
     
     async def submit_nss_flag(flag: str) -> str:
         """向 NSSCTF Agent Arena 提交 Flag 并获取判定结果。

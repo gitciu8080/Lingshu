@@ -207,6 +207,7 @@ def build_mission_title(
         }.get(target_kind, "安全测试")
 
     intent_signals = (
+        (("渗透", "渗透测试", "安全评估"), "渗透测试评估"),
         (("web shell", "webshell", "命令执行"), "权限获取"),
         (("提权", "权限提升"), "权限提升"),
         (("源码审计", "代码审计"), "代码审计"),
@@ -1312,6 +1313,19 @@ def _mission_mode(target_spec: TargetSpec, goal: str, taskbook_text: str = "") -
     return "ctf" if target_spec.kind != "network" else "authorized_pentest"
 
 
+def _default_goal_for(run_mode: str, mission_mode: str) -> str:
+    """空目标时按 运行模式×任务模式 推导默认任务目标。
+
+    fast 与 standard+ctf 维持历史默认"获取 Flag"（夺旗语义不变）；
+    standard 的渗透/应急模式给出 PTES 主线评估目标。
+    """
+    if run_mode == "fast" or mission_mode == "ctf":
+        return "获取 Flag"
+    if mission_mode == "incident_response":
+        return "完成应急响应分析：定位攻击路径与影响面，固定证据，输出处置建议"
+    return "对授权目标完成渗透测试评估：识别并验证安全漏洞，评估风险等级，输出测试报告"
+
+
 def _split_authorization_sources(
     declared_network_targets: list[str],
     authorized_target: str | None,
@@ -1436,7 +1450,8 @@ async def run_mission(
 
     Args:
         target: 授权目标，支持 IP / IP:端口 / 主机名 / 文件路径等
-        goal: 任务目标描述（默认“获取 Flag”）
+        goal: 任务目标描述；为空时按 运行模式×任务模式 自动推导
+            （standard 渗透/应急=评估目标，ctf/fast=获取 Flag）
         model_ver: 模型思考级别；未指定时 Zhipu 默认 Max，其它 Provider 默认 Min
         provider: 模型提供商标识；支持 deepseek、qwen 与 Web 注册的自定义 Provider
         qwen_tool_call_mode: Qwen 工具调用模式，simple（扁平低难度）或
@@ -1465,11 +1480,19 @@ async def run_mission(
     # 返回: 规范化目标字符串、工作目录路径、归档清单（非归档为 None）
     target_str, workdir, manifest = _prepare_workspace(target_spec)
 
-    # ── 3. 初始题型分类 ──
+    # ── 3. 任务模式判定、默认目标推导与初始分类 ──
+    # 任务书文本先行读取：既参与任务模式判定，也参与授权范围提取。
+    taskbook_text = ""
+    if target_spec.original_path is not None and target_spec.kind == "single_file":
+        taskbook_text = _read_taskbook_text(target_spec.original_path)
+    # 先用原始目标文本（可为空）判定任务模式——网络目标不看目标文本即判
+    # authorized_pentest，无循环依赖；再按 运行模式×任务模式 推导默认目标：
+    # fast/ctf 维持「获取 Flag」，standard 渗透/应急给出评估目标。
+    mission_mode = _mission_mode(target_spec, goal.strip(), taskbook_text)
+    goal_text = goal.strip() or _default_goal_for(run_mode, mission_mode)
     # classify 基于目标类型 + 目标描述 + 归档清单做启发式判断，
     # 输出 primary 题型、候选题型、置信度、证据与所属阶段，
     # 供后续 Brain 规划与 Attack 技能加载使用。
-    goal_text = goal.strip() or "获取 Flag"  # 空目标时兜底默认
     category_decision = classify(target_spec, goal_text, manifest)
     # 用户在任务说明中明确声明的服务器 IP / 域名也属于初始授权输入。
     # 典型场景：上传的应急响应任务书列出 SSH 目标与端口。对纯文本附件
@@ -1478,19 +1501,15 @@ async def run_mission(
     if authorized_target:
         # 结构化参数只参与授权范围提取，不污染用户在界面填写的任务目标正文。
         declared_authorization_text += f"\n目标地址：{authorized_target}"
-    taskbook_text = ""
-    if target_spec.original_path is not None and target_spec.kind == "single_file":
-        taskbook_text = _read_taskbook_text(target_spec.original_path)
-        declared_authorization_text += "\n" + taskbook_text
+    declared_authorization_text += "\n" + taskbook_text
     declared_network_targets = _extract_declared_network_targets(declared_authorization_text)
     # ── 授权来源分级（5e19dc2a 复盘）──
-    # 用户在界面"网络授权目标"显式输入的地址 = 直接授权输入，与纯网络任务的
+    # 用户在界面“网络授权目标”显式输入的地址 = 直接授权输入，与纯网络任务的
     # target_spec.host 同级信任：启动即注册进 ScopeRegistry，不弹范围审批。
     # 只有任务书/描述文本里提取到、且用户没有亲手填过的目标才需要独立审批。
     user_authorized_host, taskbook_pending_targets = _split_authorization_sources(
         declared_network_targets, authorized_target,
     )
-    mission_mode = _mission_mode(target_spec, goal_text, taskbook_text)
     execution_target = (
         declared_network_targets[0]
         if declared_network_targets
@@ -3159,8 +3178,8 @@ async def run_mission(
         mode_policy = {
             "ctf": "CTF 模式：题目附件/目标即固定授权范围，不得调用 request_scope_expansion，也不等待范围审批。",
             "incident_response": "应急响应模式：以本地证据、日志和镜像分析为主，不进行远程范围扩展。",
-            "authorized_pentest": "授权渗透模式：网络侦察前必须确认任务书声明范围；新增目标必须先通过独立范围审批，再调用 request_scope_expansion。",
-            "hybrid_taskbook": "混合任务书模式：本地附件分析可先行；涉及任务书声明的网络目标须先通过独立范围审批，新增目标仍需再次审批。",
+            "authorized_pentest": "授权渗透模式：按信息收集→漏洞分析→审批后最小化验证→后渗透评估（当前权限确认/提权路径验证/横向与数据可达性证明，仅证明可达不外带数据）→定级与修复建议的主线推进；网络侦察前必须确认任务书声明范围，新增目标必须先通过独立范围审批再调用 request_scope_expansion；收尾 success 判据=已验证漏洞与评估结论，不以获取 Flag 为唯一标准。",
+            "hybrid_taskbook": "混合任务书模式：本地附件分析可先行；涉及任务书声明的网络目标须先通过独立范围审批，新增目标仍需再次审批；网络主线同样按渗透评估流程推进，收尾判据同授权渗透模式。",
         }.get(mission.mission_mode, "按当前任务声明范围执行，任何新增网络目标均不得默认视为已授权。")
         if run_mode == "fast":
             orch_content = (
@@ -3188,7 +3207,7 @@ async def run_mission(
                 "首轮 Recon 与题型确认已经完成；只有存在明确证据缺口时才补充侦察，"
                 "否则直接基于 Facts/Evidence 推进。对待验证判断先登记 Hypothesis 并在"
                 "dispatch 时关联其 ID；遇到 Failed Path 按 resolution 执行 Retry/Fallback/停止路径。"
-                "结束时必须调用 complete_mission。"
+                "结束时必须调用 complete_mission（渗透模式：完成漏洞验证、后渗透评估与证据固化后，按已验证结论判定 success，不以获取 Flag 为唯一判据）。"
                 f"{orch_context}"
             )
         # P5 熔断重试预算：Orchestrator 输出残缺 <tool_call>/空回答时重新注入
@@ -3564,7 +3583,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     支持参数:
       --target / -t   授权目标（必填）: IP / IP:端口 / 主机名 / 文件路径
-      --goal / -g     任务目标描述，默认"获取 Flag"
+      --goal / -g     任务目标描述；缺省时按任务模式自动推导
+                      （standard 渗透=评估目标，ctf/fast=获取 Flag）
       --provider / -p 模型提供商标识，支持 Superadmin 注册的 Provider
       --model / -m    思考级别；Zhipu 默认 Max，其它 Provider 默认 Min
       --qwen-tool-mode Qwen 工具协议: simple(兼容) 或 standard(批量嵌套)
@@ -3576,7 +3596,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--target", "-t", required=True,
         help="单个授权 IP / IP:端口 / 主机名 / 文件路径(.zip/.tar.gz/.pcapng等)",
     )
-    parser.add_argument("--goal", "-g", default="获取 Flag", help="任务目标")
+    parser.add_argument(
+        "--goal", "-g", default="",
+        help="任务目标（缺省时按任务模式自动推导：standard 渗透=评估目标，ctf/fast=获取 Flag）",
+    )
     parser.add_argument(
         "--provider", "-p",
         default="deepseek",

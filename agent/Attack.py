@@ -36,6 +36,7 @@ from Tools.tooling import (
     run_expert_reply_with_continuation,
 )
 from Tools.tool_catalog import append_capability_summary, create_tool_catalog_tools
+from Tools.WebShot import create_web_screenshot_tool, resolve_headless_browser
 from agent.experts import attack_expert_name
 
 logger = logging.getLogger(__name__)
@@ -395,6 +396,15 @@ async def create_attack_agent(
         ]
     if target_kind == "network" or categories.intersection({"web", "malware", "unknown"}):
         tools.append(AllowedFunctionTool(cve_search, is_read_only=True))
+    # Web 页面截图：网络/Web 类任务的漏洞证明证据（浏览器缺失时自动降级不挂载）
+    if (
+        resolve_headless_browser() is not None
+        and (target_kind == "network" or categories.intersection({"web", "unknown"}))
+    ):
+        tools.append(create_web_screenshot_tool(
+            scope_registry, workspace_root=artifact_root, workdir=command_cwd,
+            timeout=min(timeout, 90), role="attack",
+        ))
     if categories.intersection({"crypto", "misc"}):
         tools.append(AllowedFunctionTool(execute_sagemath, is_read_only=True))
     if categories.intersection({"forensics", "malware", "misc", "osint", "ai-ml"}):

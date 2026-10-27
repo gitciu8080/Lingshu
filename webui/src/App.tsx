@@ -1140,7 +1140,7 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
     [target, setTarget] = useState(""),
     [files, setFiles] = useState<File[]>([]),
     [submitting, setSubmitting] = useState(false),
-    [goal, setGoal] = useState("获取 Flag / 执行任务书内容 / 测试目标"),
+    [goal, setGoal] = useState(""),
     [provider, setProvider] = useState(""),
     [model, setModel] = useState(""),
     [intensity, setIntensity] = useState("medium"),
@@ -1258,7 +1258,7 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
                 value={goal}
                 onChange={(e) => setGoal(e.target.value)}
                 rows={3}
-                placeholder="描述授权测试目标；可拖动右下角调整文本框高度"
+                placeholder="获取 Flag / 对授权目标完成渗透测试评估…（留空按任务模式自动推导）"
               />
             </label>
             <label>
@@ -1328,7 +1328,7 @@ function RerunMission({
   const providers = useModelProviders();
   const { runMode, toggleRunMode } = useRunMode();
   const [target, setTarget] = useState(""),
-    [goal, setGoal] = useState("获取 Flag / 执行任务书内容 / 测试目标"),
+    [goal, setGoal] = useState(""),
     [provider, setProvider] = useState("deepseek"),
     [model, setModel] = useState(""),
     [intensity, setIntensity] = useState("medium"),
@@ -1342,7 +1342,7 @@ function RerunMission({
   useEffect(() => {
     if (!open || !source) return;
     setTarget(String(source.target || ""));
-    setGoal(String(source.goal || "获取 Flag / 执行任务书内容 / 测试目标 / 执行任务书内容 / 测试目标"));
+    setGoal(String(source.goal || ""));
     setProvider(String(source.provider || "deepseek"));
     setModel(String(source.model || ""));
     setWithContext(true);
@@ -1401,7 +1401,7 @@ function RerunMission({
     try {
       const result = await api.create({
         target: target.trim(),
-        goal: goal.trim() || "获取 Flag / 执行任务书内容 / 测试目标 / 执行任务书内容 / 测试目标",
+        goal: goal.trim(),
         provider,
         model,
         thinking_intensity: intensity,
@@ -1463,6 +1463,7 @@ function RerunMission({
               <input
                 value={goal}
                 onChange={(event) => setGoal(event.target.value)}
+                placeholder="留空时按任务模式自动推导"
               />
             </label>
             <label>

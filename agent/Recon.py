@@ -22,6 +22,7 @@ from Tools.tooling import (
     create_parallel_scoped_shell_tool,
     create_scoped_shell_tool,
 )
+from Tools.WebShot import create_web_screenshot_tool, resolve_headless_browser
 from Tools.tool_catalog import append_capability_summary, create_tool_catalog_tools
 from agent.Attack import _build_skill_list
 from agent.experts import ARTIFACT_TRIAGE_EXPERT, NETWORK_RECON_EXPERT
@@ -56,6 +57,12 @@ def create_network_recon_agent(
         create_parallel_scoped_shell_tool(target, workdir, timeout, registry=scope_registry, role="recon", artifact_root=artifact_root),
         *create_tool_catalog_tools("recon", categories={"recon", "web"}),
     ]
+    # 授权页面截图（chromium headless）：浏览器缺失时自动降级不挂载
+    if resolve_headless_browser() is not None:
+        tools.append(create_web_screenshot_tool(
+            scope_registry, workspace_root=artifact_root, workdir=workdir,
+            timeout=min(timeout, 90), role="recon",
+        ))
     if include_cve_search:
         tools.append(create_cve_search_tool())
     if vision_model is not None and vision_roots:
