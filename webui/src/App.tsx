@@ -1323,7 +1323,10 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
                 checked={fastSummary}
                 onChange={(e) => setFastSummary(e.target.checked)}
               />
-              收尾生成总结报告（默认关闭省 token）
+              <span>
+                <b>收尾生成总结报告</b>
+                <small>默认关闭省 token；需要验证报告生成链路时勾选。</small>
+              </span>
             </label>}
             </fieldset>
             <div className="modal-actions">
@@ -1539,7 +1542,10 @@ function RerunMission({
                 checked={fastSummary}
                 onChange={(event) => setFastSummary(event.target.checked)}
               />
-              收尾生成总结报告（默认关闭省 token）
+              <span>
+                <b>收尾生成总结报告</b>
+                <small>默认关闭省 token；需要验证报告生成链路时勾选。</small>
+              </span>
             </label>}
             <label className="rerun-context">
               <input
@@ -2491,6 +2497,8 @@ function ConsoleApp() {
       unknown
     > | null>(null),
     [outgoingQueue, setOutgoingQueue] = useState<OutgoingMessage[]>([]);
+  // 终态追问（QA）：每受理一次追问递增对应会话的计数，触发事件流重连
+  const [qaTick, setQaTick] = useState<Record<string, number>>({});
   const [onboarding, setOnboarding] = useState(false),
     [newMissionSignal, setNewMissionSignal] = useState(0);
   const feedRef = useRef<HTMLElement>(null);
@@ -2879,7 +2887,7 @@ function ConsoleApp() {
       }
     })();
     return () => controller.abort();
-  }, [active]);
+  }, [active, active ? qaTick[active] ?? 0 : 0]);
   useEffect(() => {
     const feed = feedRef.current;
     if (!feed || !autoScrollEnabled || !autoScroll.current) return;
@@ -2975,7 +2983,17 @@ function ConsoleApp() {
       while (outgoingQueueRef.current.length) {
         const item = outgoingQueueRef.current[0];
         try {
-          await api.send(item.sessionId, item.content);
+          const res = (await api.send(item.sessionId, item.content)) as {
+            status?: string;
+          } | null;
+          if (res?.status === "qa_accepted") {
+            // 终态追问已被受理：重连该会话的事件流以实时接收问答回复
+            // （服务端对终态会话保留轻量上下文，SSE 可重新建立）。
+            setQaTick((m) => ({
+              ...m,
+              [item.sessionId]: (m[item.sessionId] ?? 0) + 1,
+            }));
+          }
           if (activeSessionRef.current === item.sessionId) {
             setEventStore((currentEvents) =>
               currentEvents.sessionId === item.sessionId
@@ -3434,7 +3452,11 @@ function ConsoleApp() {
                     send();
                   }
                 }}
-                placeholder="输入任务指令或审批答复…"
+                placeholder={
+                  isLive
+                    ? "输入任务指令或审批答复…"
+                    : "追问模式：可继续询问本任务的执行细节（Flag 由来/攻击路径/失败原因）…"
+                }
                 rows={1}
               />
               <button type="button" onClick={send} aria-label="发送消息">

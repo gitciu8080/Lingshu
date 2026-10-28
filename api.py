@@ -52,6 +52,17 @@ from core.auth import (
 from main import run_mission
 from core.config import RuntimeConfig
 from core.workspace_service import get_workspace_service, WorkspaceCapacityError
+from core.TaskState import MissionStore, infer_exploitation_approval_status
+from LLM.model import create_model, set_usage_context
+from agentscope.message import UserMsg
+from agentscope.state import AgentState
+from agent.Orchestrator import create_orchestrator_agent
+from agent.Captain import create_fast_captain_agent
+from Tools.tooling import (
+    interrupt_agent_tasks,
+    run_interruptible_agent_reply,
+)
+from types import SimpleNamespace
 from core.api_workspace import (
     list_artifacts as _list_workspace_artifacts,
     resolve_artifact_path as _resolve_artifact_path,
@@ -143,9 +154,15 @@ class SessionContext:
     sse_resyncs: int = 0
     # 上一条已处理的用户消息内容（P4：忽略前端双击等产生的连续重复指令）
     last_user_content: str = ""
+    # 终态后追问（QA）任务：会话结束后仍可继续对话，任务期间拒绝并发追问
+    qa_task: asyncio.Task | None = None
 
 # 活跃会话注册表：session_id → SessionContext
 _active_sessions: dict[str, SessionContext] = {}
+# 终态会话轻量上下文：SSE 订阅心跳与复盘问答（QA）共用；任务资源已在
+# _run_and_cleanup 全部回收，ctx 仅承载事件订阅与问答输出。上限淘汰最早。
+_terminal_contexts: dict[str, SessionContext] = {}
+_TERMINAL_CTX_LIMIT = 300
 _sessions_dir = _PROJECT_ROOT / ".TaskMemory" / "sessions"
 _sessions_dir.mkdir(parents=True, exist_ok=True)
 
@@ -904,9 +921,16 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             )
         except Exception:
             pass
-        # 终态事件已经广播且写入持久化队列，无需为 SSE 人为保留整套 Agent
-        # 上下文；前端断线后直接从历史投影恢复。
+        # 终态会话保留轻量上下文：SSE 订阅心跳与终态后追问（QA）共用。
+        # Agent/进程/工作区对象已在上方全部回收，ctx 只承载事件订阅。
         _active_sessions.pop(session_id, None)
+        ctx.task = None
+        ctx.agent_tasks.clear()
+        ctx.pending_approval_request = None
+        ctx.approval_decision_submitted = False
+        while len(_terminal_contexts) >= _TERMINAL_CTX_LIMIT:
+            _terminal_contexts.pop(next(iter(_terminal_contexts)), None)
+        _terminal_contexts[session_id] = ctx
 
 
 @asynccontextmanager
@@ -2616,7 +2640,7 @@ async def session_stream(
 ):
     """会话 SSE 事件流。"""
     await _verify_session_owner(session_id, current_user["id"])
-    ctx = _active_sessions.get(session_id)
+    ctx = _active_sessions.get(session_id) or _terminal_contexts.get(session_id)
     if ctx is None:
         raise HTTPException(status_code=404, detail="会话不存在或已结束")
     return StreamingResponse(
@@ -2626,15 +2650,226 @@ async def session_stream(
     )
 
 
+async def _is_terminal_session(session_id: str) -> bool:
+    """会话是否已处于终态（completed/failed/cancelled）。"""
+    try:
+        session = await asyncio.to_thread(session_store.get_session, session_id)
+    except Exception:
+        return False
+    return bool(session) and session.get("status") in {
+        "completed", "failed", "cancelled",
+    }
+
+
+def _build_qa_brief(mission: Any) -> str:
+    """无对话状态快照时的素材简报：从权威 MissionState 拼复盘上下文。"""
+    lines = [
+        "（本任务早于问答快照功能，以下为任务结构化状态简报，请据此回答提问）",
+        f"目标：{mission.target}",
+        f"任务：{mission.goal}",
+        f"模式：{mission.mission_mode}；结果：success={mission.success}，"
+        f"flag={mission.flag or '未获取'}",
+    ]
+    if mission.plan_items:
+        lines.append("计划项：")
+        for item in mission.plan_items[-10:]:
+            lines.append(
+                f"- {item.get('id')} [{item.get('status')}] "
+                f"{str(item.get('content') or '')[:120]}"
+            )
+    facts = mission.facts or []
+    if facts:
+        lines.append("关键事实（最近 10 条）：")
+        for fact in facts[-10:]:
+            lines.append(f"- {str(getattr(fact, 'content', fact))[:300]}")
+    evidences = mission.evidence_records or []
+    if evidences:
+        lines.append(f"证据原文（共 {len(evidences)} 条，最近 8 条）：")
+        for r in evidences[-8:]:
+            lines.append(
+                f"- [{getattr(r, 'source', '?')}/{getattr(r, 'kind', '?')}] "
+                f"{str(getattr(r, 'summary', '') or '')[:1500]}"
+            )
+    chain = mission.attack_chain or []
+    if chain:
+        lines.append("攻击步骤（最近 6 步）：")
+        for step in chain[-6:]:
+            lines.append(
+                f"- {str(getattr(step, 'objective', '') or step)[:150]}："
+                f"{str(getattr(step, 'report', '') or '')[:600]}"
+            )
+    return "\n".join(lines)
+
+
+async def _run_post_mission_qa(session_id: str, question: str, user_id: int) -> None:
+    """终态会话的只读复盘问答：恢复调度者上下文，单轮回答并落库。
+
+    模型为新建实例（任务收尾已清零 token 累计，QA 计量从零起算）；对话
+    状态优先从 ``mission/agent_state-{role}.json`` 快照恢复（run_mission
+    收尾保存），无快照时用素材简报兜底。工作区问答期间 pin 防回收。
+    """
+    ctx = _terminal_contexts.get(session_id)
+    if ctx is None:
+        ctx = SessionContext(
+            session_id=session_id, user_id=user_id, input_queue=asyncio.Queue(),
+        )
+        _terminal_contexts[session_id] = ctx
+    callback = _make_session_callback(session_id, ctx)
+    ws_service = get_workspace_service()
+    workspace = None
+    try:
+        session_row = await asyncio.to_thread(session_store.get_session, session_id)
+        raw_info = (session_row or {}).get("target_info")
+        if isinstance(raw_info, str):
+            try:
+                raw_info = json.loads(raw_info)
+            except (json.JSONDecodeError, TypeError):
+                raw_info = {}
+        run_mode = str((raw_info or {}).get("run_mode") or "standard")
+        role = "captain" if run_mode == "fast" else "orchestrator"
+        store = MissionStore.for_session(session_id, base_dir=_sessions_dir)
+        mission = await asyncio.to_thread(store.load)
+        if mission is None:
+            await callback("error", message="任务状态文件缺失，无法进行复盘问答。")
+            return
+
+        provider = str((session_row or {}).get("provider") or "deepseek")
+        model_name = str((session_row or {}).get("model") or "")
+        thinking = str((session_row or {}).get("thinking_intensity") or "medium")
+        runtime = RuntimeConfig.from_env(user_id=user_id)
+        model = create_model(
+            provider=provider,
+            model=model_name,
+            thinking_intensity=thinking,
+            temperature=None,
+            config=runtime,
+        )
+        set_usage_context(model, user_id, session_id, role)
+
+        # 恢复对话状态快照（无快照走素材简报兜底）
+        agent_state: AgentState | None = None
+        state_path = ws_service.mission_dir(user_id, session_id) / f"agent_state-{role}.json"
+        if state_path.is_file():
+            try:
+                raw = await asyncio.to_thread(
+                    state_path.read_text, encoding="utf-8",
+                )
+                agent_state = AgentState.model_validate_json(raw)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "问答状态快照恢复失败（%s），走素材简报兜底: %s", state_path, exc,
+                )
+                agent_state = None
+
+        try:
+            workspace = await ws_service.get(user_id, session_id)
+            await ws_service.pin(user_id, session_id)
+        except Exception as exc:  # noqa: BLE001 - 工作区不可用不阻断纯记忆问答
+            logger.warning("问答工作区获取失败（继续无 offloader 问答）: %s", exc)
+            workspace = None
+
+        question_text = question
+        if agent_state is None:
+            brief = await asyncio.to_thread(_build_qa_brief, mission)
+            question_text = f"{brief}\n\n操作员提问：{question}"
+        inputs = UserMsg(name="user", content=question_text)
+
+        if role == "captain":
+            agent = create_fast_captain_agent(
+                model=model, experts={}, mission=mission, store=store,
+                event_callback=callback, target=mission.target,
+                workdir=str(ws_service.workspace_dir(user_id, session_id)),
+                timeout=60, max_iters=6, qa_readonly=True,
+                offloader=workspace, state=agent_state,
+            )
+        else:
+            agent = create_orchestrator_agent(
+                model=model,
+                recon_agent=SimpleNamespace(name="Ethan - 网络侦察专家"),
+                attack_agent=SimpleNamespace(name="Mike - Web 渗透专家"),
+                reserve_agent=SimpleNamespace(name="Ryan - 逆向程序专家"),
+                mission=mission,
+                store=store,
+                event_callback=callback,
+                max_iters=6,
+                qa_readonly=True,
+                offloader=workspace,
+                state=agent_state,
+            )
+        result = await run_interruptible_agent_reply(
+            agent,
+            inputs,
+            prefix=f"[{str(agent.name).split(' ')[0]}] ",
+            on_event=callback,
+        )
+        getter = getattr(result, "get_text_content", None)
+        text = ""
+        if callable(getter):
+            try:
+                text = (getter() or "").strip()
+            except Exception:  # noqa: BLE001
+                text = ""
+        if text:
+            await callback("message", content=text, agent=agent.name)
+        else:
+            await callback("error", message="追问未获得回答，请调整问题后重试。")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 问答失败不影响会话与其余功能
+        logger.exception("终态追问处理失败: %s", exc)
+        try:
+            await callback("error", message=f"追问处理失败：{exc}")
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        if workspace is not None:
+            try:
+                await ws_service.unpin(user_id, session_id)
+                await ws_service.close_one(user_id, session_id)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+async def _start_post_mission_qa(
+    session_id: str, content: str, current_user: dict,
+) -> dict:
+    """终态会话的复盘问答入口：落库提问并启动只读问答任务。"""
+    prior = _terminal_contexts.get(session_id)
+    if prior is not None and prior.qa_task is not None and not prior.qa_task.done():
+        raise HTTPException(status_code=409, detail="上一条追问还在回答中，请稍候")
+    user_id = current_user["id"]
+    seq = await _write_session_message(
+        session_id, "user", content, "user_message", "user",
+    )
+    event = {
+        "type": "user_message", "session_id": session_id,
+        "content": content, "agent": "user", "seq": seq,
+    }
+    if prior is not None:
+        _publish_session_event(prior, event)
+    ctx = prior or SessionContext(
+        session_id=session_id, user_id=user_id, input_queue=asyncio.Queue(),
+    )
+    _terminal_contexts[session_id] = ctx
+    ctx.last_user_content = content
+    ctx.qa_task = asyncio.create_task(
+        _run_post_mission_qa(session_id, content, user_id),
+        name=f"qa:{session_id}",
+    )
+    return {"status": "qa_accepted"}
+
+
 @app.post("/api/session/{session_id}/message")
 async def send_message(session_id: str, msg: ChatMessage, current_user: dict = Depends(get_current_user)):
-    """向指定会话发送用户消息——支持审批决策和运行时追加指令（steering）。"""
+    """向指定会话发送用户消息——支持审批决策、运行时追加指令（steering）与终态后追问。"""
     await _verify_session_owner(session_id, current_user["id"])
     ctx = _active_sessions.get(session_id)
-    if ctx is None:
-        raise HTTPException(status_code=404, detail="会话不存在或已结束")
-
     content = msg.content.strip()
+    if ctx is None:
+        # 终态会话：进入复盘问答（QA）通道——只读追问，不复活任务。
+        if await _is_terminal_session(session_id):
+            return await _start_post_mission_qa(session_id, content, current_user)
+        raise HTTPException(status_code=404, detail="会话不存在或已结束")
 
     # ── 审批决策 ──
     if content in {"批准", "补充侦察", "拒绝"}:
@@ -3171,6 +3406,16 @@ async def delete_session(session_id: str, current_user: dict = Depends(get_curre
             await ctx.task
         except (asyncio.CancelledError, Exception):
             pass
+    # 终态上下文（含进行中的问答任务）一并清理
+    term_ctx = _terminal_contexts.pop(session_id, None)
+    if term_ctx is not None:
+        term_ctx.deleting = True
+        if term_ctx.qa_task is not None and not term_ctx.qa_task.done():
+            term_ctx.qa_task.cancel()
+            try:
+                await term_ctx.qa_task
+            except (asyncio.CancelledError, Exception):
+                pass
     # v0.3.0：关闭并原子移动 Workspace 到 trash（MCP 随 close 释放）
     svc = get_workspace_service()
     trash_path: Path | None = None

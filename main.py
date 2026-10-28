@@ -1404,6 +1404,41 @@ _EFFORT_TO_POSITION = {
 }
 
 
+def _save_agent_state_snapshot(ws_root, role: str, agent) -> None:
+    """任务收尾时保存主调度智能体的对话状态快照，供终态后追问（QA）恢复。
+
+    AgentScope 的 AgentState（完整对话上下文+压缩摘要）只存在于内存，
+    offloader 仅写出不读回；任务结束后上下文随进程消失。此处把它序列化到
+    工作区 ``mission/agent_state-{role}.json``，问答时反序列化即可"接上"
+    原有上下文。失败仅提示（问答走素材简报兜底），绝不阻断收尾。
+    """
+    if not ws_root or agent is None:
+        return
+    state = getattr(agent, "state", None)
+    if state is None or not hasattr(state, "model_dump_json"):
+        return
+    try:
+        target = Path(ws_root) / "mission" / f"agent_state-{role}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = state.model_dump_json()
+        fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, target)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        print(f"[系统] 追问（QA）上下文快照已保存: agent_state-{role}.json")
+    except Exception as exc:  # noqa: BLE001 - 快照失败不阻断收尾
+        print(f"[系统] 追问（QA）上下文快照保存失败，将走素材简报兜底: {exc}")
+
+
 def _downgrade_thinking_intensity(models: list) -> list[str]:
     """Token 软预算超限：把会话全部共享模型实例的思考强度降一档。
 
@@ -3685,6 +3720,16 @@ async def run_mission(
         raise
 
     finally:
+        # 终态后追问（QA）：保存主调度智能体的对话状态快照，供复盘问答
+        # 恢复上下文；失败走素材简报兜底，不阻断收尾。
+        try:
+            _save_agent_state_snapshot(
+                ws_root,
+                "captain" if run_mode == "fast" else "orchestrator",
+                main_agent,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         # AgentScope 官方方式：取消直接承载 reply_stream 的 task。
         await cancel_agent_tasks(active_agent_tasks)
         await close_attack_agent(attack)

@@ -33,9 +33,9 @@ html body,html body *,html body *::before,html body *::after{font-family:"PingFa
 .rerun-summary code,.rerun-summary small{display:block;margin-top:7px;overflow-wrap:anywhere}
 .rerun-summary code{color:var(--orchestrator);font-size:12px}
 .rerun-summary small{max-height:72px;overflow:auto;color:var(--dim);font-size:11px;line-height:1.55;white-space:pre-wrap}
-.rerun-context{display:flex!important;align-items:flex-start;gap:9px;margin:12px 0!important;padding:10px 11px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);cursor:pointer}
-.rerun-context input{width:15px!important;height:15px;margin:2px 0 0!important;accent-color:var(--accent);flex:0 0 auto}
-.rerun-context span{min-width:0}
+.rerun-context,.fast-summary-toggle{display:flex!important;align-items:flex-start;gap:9px;margin:12px 0!important;padding:10px 11px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);cursor:pointer}
+.rerun-context input,.fast-summary-toggle input{width:15px!important;height:15px;margin:2px 0 0!important;accent-color:var(--accent);flex:0 0 auto}
+.rerun-context span,.fast-summary-toggle span{min-width:0}
 .rerun-context b,.rerun-context small{display:block}
 .rerun-context b{color:var(--text);font-size:12px}
 .rerun-context small{margin-top:3px;color:var(--dim);font-size:10px;line-height:1.45}

@@ -98,6 +98,7 @@ def create_orchestrator_agent(
     category_change_callback: Callable[[str, str, str], Awaitable[None]] | None = None,
     brain_agent: Agent | None = None,
     verification_runner: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+    qa_readonly: bool = False,
 ) -> Agent:
     steering = steering_state if steering_state is not None else {"pending": None, "processed": False, "queue": []}
     steering.setdefault("queue", [])
@@ -1643,6 +1644,81 @@ def create_orchestrator_agent(
             f"请分析失败原因，重新尝试或调用 complete_mission 如实收尾。"
         )
 
+
+    async def view_evidence(keyword: str = "", limit: int = 12) -> str:
+        """浏览任务证据原文（复盘问答模式专用只读工具）。
+
+        Args:
+            keyword: 过滤关键词（不区分大小写，匹配证据来源/类型/内容），留空返回最近证据。
+            limit: 最多返回条数（1~20，默认 12）。
+        """
+        try:
+            limit_n = max(1, min(int(limit), 20))
+        except (TypeError, ValueError):
+            limit_n = 12
+        needle = str(keyword or "").strip().lower()
+        records = list(mission.evidence_records or [])
+        total = len(records)
+        if needle:
+            records = [
+                r for r in records
+                if needle in str(getattr(r, "summary", "") or "").lower()
+                or needle in str(getattr(r, "source", "") or "").lower()
+                or needle in str(getattr(r, "kind", "") or "").lower()
+            ]
+        chosen = records[-limit_n:]
+        if not chosen:
+            return f"[证据] 无匹配证据（任务共 {total} 条证据记录）。"
+        parts = [f"任务共 {total} 条证据，当前展示 {len(chosen)} 条："]
+        for r in chosen:
+            verification = getattr(r, "verification", None)
+            verify_note = (
+                f"；验证结果={str(verification)[:300]}" if verification else ""
+            )
+            parts.append(
+                f"\n===== 证据 {getattr(r, 'id', '?')}（来源 {getattr(r, 'source', '?')}"
+                f" / 类型 {getattr(r, 'kind', '?')}）=====\n"
+                f"{str(getattr(r, 'summary', '') or '')[:4000]}{verify_note}"
+            )
+        chain = mission.attack_chain or []
+        if chain:
+            parts.append("\n===== 最近攻击步骤 =====")
+            for step in chain[-3:]:
+                parts.append(f"- {str(getattr(step, 'objective', '') or step)[:200]}")
+        return "\n".join(parts)
+
+    if qa_readonly:
+        # 复盘问答模式（任务终态后追问）：仅保留只读工具，派遣/审批/计划
+        # 维护/收尾全部不注册；系统提示切换为问答约束。终态下 transition()
+        # 硬闸（TaskState）兜底任何漏网的状态变更尝试。
+        qa_tools = [
+            AllowedFunctionTool(view_mission_state, is_read_only=True),
+            create_list_plan_tool(mission),
+            create_query_memory_tool(),
+            AllowedFunctionTool(view_evidence, is_read_only=True),
+        ]
+        qa_agent = Agent(
+            name=ORCHESTRATOR_EXPERT,
+            system_prompt=(
+                ORCHESTRATOR_SYS_PROMPT
+                + "\n\n（复盘问答模式）任务已进入终态：你现在是复盘问答助手，"
+                "基于你记忆中的完整执行过程回答操作员提问（侦察发现、攻击路径、"
+                "Flag/关键凭据的由来、失败尝试与原因等）。只能使用只读工具"
+                "（任务状态/证据原文/计划/长期记忆）核实细节；派遣、审批、计划"
+                "维护与收尾工具已全部移除，不得尝试变更任务状态或执行写操作。"
+                "直接回答，语言精炼，引用证据编号佐证。"
+            ),
+            model=model,
+            toolkit=StrictJSONToolkit(tools=qa_tools),
+            react_config=ReActConfig(
+                max_iters=max_iters, interruption_raise_cancelled_error=True,
+            ),
+            offloader=offloader,
+            context_config=context_config,
+            state=state,
+        )
+        qa_agent._lingshu_bg = {"ready": [], "running": {}, "busy_roles": set()}
+        return qa_agent
 
     tools = [
         AllowedFunctionTool(dispatch_recon, is_concurrency_safe=False),

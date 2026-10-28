@@ -73,6 +73,7 @@ def create_fast_captain_agent(
     context_config: Any = None,
     state: Any = None,
     artifact_root: Any = None,
+    qa_readonly: bool = False,
 ) -> Agent:
     """装配快速模式指挥官。
 
@@ -330,6 +331,30 @@ def create_fast_captain_agent(
         )
         store.save(mission)
         return "平台判定错误：flag 不正确。请继续解题，不要重复提交该值。"
+
+    if qa_readonly:
+        # 复盘问答模式（任务终态后追问）：指挥官的全部工具（派工/收取/
+        # 收尾/提交/只读 shell）都不注册，纯凭记忆中的完整执行过程回答。
+        qa_agent = Agent(
+            name=FAST_CAPTAIN_EXPERT,
+            system_prompt=(
+                load_prompt("FAST_CAPTAIN")
+                + "\n\n（复盘问答模式）任务已进入终态：你现在是复盘问答助手，"
+                "基于你记忆中的完整解题过程回答操作员提问（专家报告结论、"
+                "Flag 的由来、关键步骤与失败尝试等）。所有工具已移除，"
+                "直接根据记忆回答，不要声称要去执行任何操作。"
+            ),
+            model=model,
+            toolkit=StrictJSONToolkit(tools=[]),
+            react_config=ReActConfig(
+                max_iters=max_iters, interruption_raise_cancelled_error=True,
+            ),
+            offloader=offloader,
+            context_config=context_config,
+            state=state,
+        )
+        qa_agent._lingshu_bg = bg_state
+        return qa_agent
 
     tools: list[AllowedFunctionTool] = [
         AllowedFunctionTool(
