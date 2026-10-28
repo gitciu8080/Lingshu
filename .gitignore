@@ -35,7 +35,9 @@ docs/
 docs/*
 *.bak
 .zcode/*
-data/users.db.example.ntyx2po5-shm
+data/users.db.example.*
+data/users.db.example.*-wal
+data/users.db.example.*-shm
 .gitignore
 data/model_api_configs.v1-20260830T173326Z.bak.json
 serveo2.log
