@@ -736,7 +736,9 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                            nss_context: dict | None = None, slab_context: dict | None = None, resume: bool = False,
                            qwen_tool_call_mode: str | None = None,
                            authorized_target: str | None = None,
-                           run_mode: str = "standard"):
+                           run_mode: str = "standard",
+                           fast_summary: bool = True,
+                           token_soft_budget: int = 0):
     """运行任务并处理清理逻辑。"""
     status_val = "failed"
     phase = "initializing"
@@ -765,6 +767,8 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             user_id=ctx.user_id,
             authorized_target=authorized_target,
             run_mode=run_mode,
+            fast_summary=fast_summary,
+            token_soft_budget=token_soft_budget,
         )
         # 如果 Orchestrator 已经确定完成并取得 Flag，迟到的前端取消请求不得覆盖成功终态。
         mission_completed = bool(
@@ -1289,6 +1293,14 @@ class MissionStartRequest(BaseModel):
     mode: str | None = Field(
         default=None, pattern="^(standard|fast)$",
         description="运行模式：standard=完整渗透工作流（默认）| fast=快速模式（单指挥官调度，主打夺旗速度）",
+    )
+    fast_summary: bool = Field(
+        default=True,
+        description="fast 模式收尾是否生成 Summary 报告（关=省一次总结 LLM 调用与 PDF 渲染，挂机批跑推荐关闭）",
+    )
+    token_soft_budget: int = Field(
+        default=0, ge=0,
+        description="Token 软预算：会话累计超过即自动降思考档继续执行（0=不限，默认读平台配置）",
     )
     nss_context: dict | None = Field(default=None, description="NSSCTF Arena 上下文（attempt_id/token/api_base），供在线提交 Flag")
     slab_context: dict | None = Field(default=None, description="slab-match 平台上下文（exercise_id/access_key/api_base），供在线提交 Flag")
@@ -2546,6 +2558,8 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
                 "authorized_target": authorized_target,
                 "attachment_target": attachment_target or "",
                 "run_mode": run_mode,
+                "fast_summary": bool(req.fast_summary),
+                "token_soft_budget": int(req.token_soft_budget or 0),
             }),
             session_update_operation(
                 session_id, workspace_id=workspace_id, workspace_version=2,
@@ -2585,7 +2599,9 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
                          thinking_intensity=thinking_intensity,
                          qwen_tool_call_mode=req.qwen_tool_call_mode,
                          authorized_target=(authorized_target if attachment_target else None),
-                         run_mode=run_mode)
+                         run_mode=run_mode,
+                         fast_summary=bool(req.fast_summary),
+                         token_soft_budget=int(req.token_soft_budget or 0))
     )
     ctx.task = task
 
@@ -3305,7 +3321,10 @@ async def resume_session(
         _run_and_cleanup(session_id, ctx, execution_target, goal, model, provider, callback,
                          resume=True,
                          thinking_intensity=str(session.get("thinking_intensity") or "medium"),
-                         authorized_target=(authorized_target if attachment_target else None)),
+                         authorized_target=(authorized_target if attachment_target else None),
+                         run_mode=str(target_info.get("run_mode") or "standard").strip().lower() or "standard",
+                         fast_summary=bool(target_info.get("fast_summary", True)),
+                         token_soft_budget=int(target_info.get("token_soft_budget") or 0)),
     )
     ctx.task = task
     return {"session_id": session_id, "status": "resumed"}

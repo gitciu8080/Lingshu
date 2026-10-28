@@ -96,6 +96,7 @@ class Config:
     provider: str = os.environ.get("CTF2_LLM_PROVIDER", "deepseek")
     model: str = os.environ.get("CTF2_MODEL_LEVEL", "Min")
     mode: str = os.environ.get("CTF2_MODE", "fast")
+    fast_summary: str = os.environ.get("CTF2_FAST_SUMMARY", "0")
     nssctf_token: str = os.environ.get("NSSCTF_AGENT_TOKEN", "")
 
     @classmethod
@@ -107,7 +108,7 @@ class Config:
                 data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
                 for key in ("ctf2_token", "lingshu_url", "lingshu_user",
                             "lingshu_pass", "provider", "model", "mode",
-                            "nssctf_token"):
+                            "fast_summary", "nssctf_token"):
                     value = str(data.get(key) or "").strip()
                     if value:
                         setattr(cfg, key, value)
@@ -119,7 +120,7 @@ class Config:
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         payload = {k: getattr(self, k) for k in (
             "ctf2_token", "lingshu_url", "lingshu_user", "lingshu_pass",
-            "provider", "model", "mode", "nssctf_token")}
+            "provider", "model", "mode", "fast_summary", "nssctf_token")}
         tmp = CONFIG_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                        encoding="utf-8")
@@ -227,6 +228,7 @@ def args_like(cfg: Config, challenge_id: str, *, no_submit: bool = False):
         environment_polls=24, environment_poll_interval=5,
         practice_id="", source="all", no_submit=no_submit,
         keep_env=False, challenge_id=challenge_id,
+        fast_summary=str(getattr(cfg, "fast_summary", "0")) == "1",
     )
 
 
@@ -398,6 +400,7 @@ class ConfigIn(BaseModel):
     provider: str | None = None
     model: str | None = None
     mode: str | None = None
+    fast_summary: str | None = None
     nssctf_token: str | None = None
 
 
@@ -497,7 +500,8 @@ async def api_state():
         "configured": bool(cfg.ctf2_token),
         "agent": agent,
         "config": {"lingshu_url": cfg.lingshu_url, "provider": cfg.provider,
-                   "model": cfg.model, "mode": cfg.mode},
+                   "model": cfg.model, "mode": cfg.mode,
+                   "fast_summary": getattr(cfg, "fast_summary", "0") == "1"},
         "providers": providers,
         "jobs": jobs[:50],
         "auto": STATE["auto"].snapshot(),
@@ -546,6 +550,8 @@ async def api_config(data: ConfigIn):
         STATE["agent_cache"] = {"data": None, "at": 0.0}
     if data.nssctf_token is not None and data.nssctf_token.strip():
         cfg.nssctf_token = data.nssctf_token.strip()
+    if data.fast_summary is not None:
+        cfg.fast_summary = "1" if data.fast_summary.strip().lower() in ("1", "true", "yes", "on") else "0"
     for field_name in ("lingshu_url", "lingshu_user", "lingshu_pass",
                        "provider", "model", "mode"):
         value = getattr(data, field_name)
@@ -1544,6 +1550,9 @@ border-radius:10px;padding:20px}
       <label>默认级别<select id="c-model"><option>Min</option><option>Max</option><option>Low</option></select></label>
       <label>默认模式<select id="c-mode2"><option value="fast">fast</option><option value="standard">standard</option></select></label>
     </div>
+    <label class="mini" style="display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="c-fastsummary"> FAST 模式收尾生成总结报告（默认关闭省 token；需验证报告链路时勾选）
+    </label>
     <div class="errtext" id="cfg-err"></div>
     <div class="row">
       <button class="btn" onclick="closeConfig()">取消</button>
@@ -1763,6 +1772,7 @@ function openConfig(){
   fetch("/api/state").then(r => r.json()).then(st => {
     $("c-url").value = st.config.lingshu_url || "http://localhost:8080";
     $("c-user").value = st.config.provider ? $("c-user").value : "";
+    $("c-fastsummary").checked = !!st.config.fast_summary;
   });
 }
 function closeConfig(){ $("cfg-modal").style.display = "none"; }
@@ -1776,6 +1786,7 @@ async function saveConfig(){
     provider: $("c-provider").value || null,
     model: $("c-model").value || null,
     mode: $("c-mode2").value || null,
+    fast_summary: $("c-fastsummary").checked ? "1" : "0",
   };
   const r = await fetch("/api/config", {method: "POST",
     headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});

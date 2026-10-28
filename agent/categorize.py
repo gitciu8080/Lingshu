@@ -594,3 +594,65 @@ def evaluate_reclassification(
         signals=signals,
         evidence_fingerprint=fingerprint,
     )
+
+
+# ────────────────────────────────────────────────────────────────
+# 验证闭环：Attack 报告中的结构化 PoC 块提取
+# ────────────────────────────────────────────────────────────────
+
+_VERIFY_BLOCK_RE = re.compile(r"```verify\s*\n(.*?)```", re.DOTALL)
+
+
+def extract_verify_block(report: str) -> dict | None:
+    """从 Attack 报告提取 ```verify``` 块，返回验证闭环所需的结构。
+
+    块格式（ATTACK.md 报告规范约定）::
+
+        ```verify
+        command: curl -s http://target/?id=1' --max-time 10
+        expected: SQL syntax
+        expected: mysql
+        ```
+
+    返回 {replay_command, expected_lines, expected_fingerprint}；无块或
+    缺 command 返回 None。expected_fingerprint 为归一化期望行的
+    sha256 前 16 位（报告/审计用）；实际匹配采用子串包含判定
+    （时变输出下严格哈希不可行）。
+    """
+    if not isinstance(report, str):
+        return None
+    match = _VERIFY_BLOCK_RE.search(report)
+    if not match:
+        return None
+    command_lines: list[str] = []
+    expected_lines: list[str] = []
+    for raw in match.group(1).splitlines():
+        line = raw.strip()
+        low = line.lower()
+        if low.startswith("command:"):
+            command_lines.append(line[len("command:"):].strip())
+        elif low.startswith("expected:"):
+            expected_lines.append(line[len("expected:"):].strip())
+    command = "\n".join(part for part in command_lines if part)
+    if not command:
+        return None
+    expected_lines = [line for line in expected_lines if len(line) >= 4]
+    normalized = "\n".join(expected_lines)
+    fingerprint = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return {
+        "status": "unverified",
+        "replay_command": command,
+        "expected_lines": expected_lines,
+        "expected_fingerprint": fingerprint,
+    }
+
+
+def verify_output_matches(stdout: str, expected_lines: list[str]) -> bool:
+    """判定重放输出是否覆盖全部期望关键行（子串包含，大小写不敏感）。
+
+    无期望行时仅要求命令成功执行（由调用方结合 returncode 判定）。
+    """
+    if not expected_lines:
+        return True
+    haystack = (stdout or "").lower()
+    return all(line.lower() in haystack for line in expected_lines)

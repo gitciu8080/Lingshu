@@ -354,7 +354,7 @@ class LingshuClient:
                 if str(item.get("id") or "").strip()]
 
     async def start_session(self, *, target: str, goal: str, provider: str,
-                            model: str, mode: str) -> str:
+                            model: str, mode: str, fast_summary: bool = False) -> str:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{self.api_url}/api/session/start",
@@ -362,6 +362,9 @@ class LingshuClient:
                 json={
                     "target": target, "goal": goal, "provider": provider,
                     "model": model, "mode": mode,
+                    # 竞技场挂机默认关闭 fast 收尾总结（Summary 是独立 LLM 调用，
+                    # prompt 可达 ~17 万字符）；需要验证报告链路时打开
+                    "fast_summary": bool(fast_summary),
                 },
             )
             response.raise_for_status()
@@ -604,6 +607,8 @@ async def run_lingshu(
     session_id = await lingshu.start_session(
         target=target or access_url, goal=goal, provider=provider,
         model=args.model, mode=mode,
+        fast_summary=bool(getattr(args, "fast_summary", False)
+                          or getattr(args, "with_summary", False)),
     )
     say(f"[lingshu] 会话 {session_id} 已启动（mode={mode}, provider={provider}, model={args.model}）")
     if on_event:
@@ -1182,6 +1187,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exclude", default="", help="auto 跳过的题目 ID（逗号分隔）")
     parser.add_argument("--no-submit", action="store_true", help="只解题不提交")
     parser.add_argument("--keep-env", action="store_true", help="结束后保留远程环境")
+    parser.add_argument("--with-summary", action="store_true",
+                        help="fast 模式收尾生成 Summary 报告（默认关闭省 token；需验证报告链路时打开）")
     parser.add_argument("--watch", help="实时观察指定灵枢会话")
     parser.add_argument("--list", action="store_true", help="列出可解题目后退出")
     parser.add_argument("--status", action="store_true", help="打印 Agent 状态后退出")

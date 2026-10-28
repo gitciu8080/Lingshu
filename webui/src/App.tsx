@@ -1160,6 +1160,7 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
     [model, setModel] = useState(""),
     [intensity, setIntensity] = useState("medium"),
     [qwenToolMode, setQwenToolMode] = useState("simple");
+  const [fastSummary, setFastSummary] = useState(false);
   // 单任务模式（默认跟随全局，对话框内可改）
   const [mode, setMode] = useState<RunMode>("standard");
   useEffect(() => { if (open) setMode(runMode); }, [open, runMode]);
@@ -1205,7 +1206,7 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
         provider,
         model,
         thinking_intensity: intensity,
-        ...(mode === "fast" ? { mode: "fast" } : {}),
+        ...(mode === "fast" ? { mode: "fast", fast_summary: fastSummary } : {}),
         ...(provider === "qwen" || provider.startsWith("qwen::")
           ? { qwen_tool_call_mode: qwenToolMode } : {}),
       });
@@ -1316,6 +1317,14 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
                 <option value="standard">标准（批量嵌套参数）</option>
               </select>
             </label>}
+            {mode === "fast" && <label className="fast-summary-toggle">
+              <input
+                type="checkbox"
+                checked={fastSummary}
+                onChange={(e) => setFastSummary(e.target.checked)}
+              />
+              收尾生成总结报告（默认关闭省 token）
+            </label>}
             </fieldset>
             <div className="modal-actions">
               <Dialog.Close className="quiet-button" disabled={submitting}>取消</Dialog.Close>
@@ -1350,6 +1359,7 @@ function RerunMission({
     [model, setModel] = useState(""),
     [intensity, setIntensity] = useState("medium"),
     [qwenToolMode, setQwenToolMode] = useState("simple"),
+    [fastSummary, setFastSummary] = useState(false),
     [withContext, setWithContext] = useState(true),
     [submitting, setSubmitting] = useState(false),
     [mode, setMode] = useState<RunMode>("standard");
@@ -1422,7 +1432,7 @@ function RerunMission({
         provider,
         model,
         thinking_intensity: intensity,
-        ...(mode === "fast" ? { mode: "fast" } : {}),
+        ...(mode === "fast" ? { mode: "fast", fast_summary: fastSummary } : {}),
         ...(provider === "qwen" || provider.startsWith("qwen::")
           ? { qwen_tool_call_mode: qwenToolMode } : {}),
         ...(withContext ? { source_session_id: source.id } : {}),
@@ -1522,6 +1532,14 @@ function RerunMission({
                 <option value="simple">简单（兼容 AgentWorld）</option>
                 <option value="standard">标准（批量嵌套参数）</option>
               </select>
+            </label>}
+            {mode === "fast" && <label className="fast-summary-toggle">
+              <input
+                type="checkbox"
+                checked={fastSummary}
+                onChange={(event) => setFastSummary(event.target.checked)}
+              />
+              收尾生成总结报告（默认关闭省 token）
             </label>}
             <label className="rerun-context">
               <input

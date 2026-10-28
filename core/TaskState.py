@@ -148,6 +148,10 @@ class EvidenceRecord:
     confidence: float = 0.0
     fingerprint: str = ""
     created_at: str = field(default_factory=_now)
+    # 独立验证闭环：{status: unverified|verified|failed, replay_command,
+    # expected_fingerprint, verified_at, detail}。旧任务 JSON 无此键，
+    # 加载时缺省 None（视为未验证）。
+    verification: dict | None = None
 
 
 @dataclass

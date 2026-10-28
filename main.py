@@ -43,8 +43,10 @@ from core.model_bindings import (  # 用户级 Agent 模型分工（角色 → �
 )
 from LLM.model import (  # 创建 LLM 模型实例（供应商目录驱动）
     QwenModelUnavailableError,
+    clear_session_token_total,
     create_model,
     create_vision_model,
+    get_session_token_total,
     resolve_qwen_model,
     set_usage_context,
 )
@@ -111,6 +113,7 @@ from Tools.tooling import (  # 流式获取 Agent 回复并转发事件
     reset_tool_json_failure_handler,
     run_interruptible_agent_reply,
     run_expert_reply_with_continuation,
+    run_verification_command,
     stream_agent_reply,
 )
 from Tools.fingerprint import (
@@ -868,6 +871,7 @@ async def _finalize_summary_report(
     agent_tasks: set[asyncio.Task[Any]] | None = None,
     store: MissionStore | None = None,
     user_id: int | None = None,
+    fast_summary: bool = True,
 ) -> None:
     """兜底 Summary 收尾：无论任务成败都尽力生成报告，且不改变任务终态。
 
@@ -879,6 +883,23 @@ async def _finalize_summary_report(
         同 run_summary_report；messages 为空时直接跳过。
     """
     if not messages:
+        return
+    if not fast_summary:
+        # fast 模式关闭总结：不调 Summary LLM、不渲染 PDF、不发 report_ready；
+        # 用结构化兜底文案填充 mission.summary，保证报告端点与重放可读。
+        if not (mission.summary or "").strip():
+            mission.summary = (
+                f"# 任务速览（fast 模式总结已关闭）\n\n"
+                f"- 结果：{'成功' if mission.success else '失败'}\n"
+                f"- Flag：{mission.flag or '未获取'}\n"
+                f"- 攻击链步骤：{len(mission.attack_chain)}；"
+                f"证据：{len(mission.evidence_records)}；事实：{len(mission.facts)}\n"
+                f"- 失败路径：{len(mission.failed_paths)}\n\n"
+                "详细过程请查看会话事件流与审计链（.TaskMemory/sessions/）。"
+            )
+        mission.record("system", "fast_summary_skipped")
+        if store is not None:
+            store.save(mission)
         return
     try:
         await run_summary_report(
@@ -1374,6 +1395,60 @@ def _is_session_lifecycle_tool(tool_name: str) -> bool:
     return any(token in lowered for token in _SESSION_LIFECYCLE_TOOL_TOKENS)
 
 
+# 思考强度阶梯（Web 语义 off/low/medium/high；effort 值按邻近档归位）
+_THINKING_LADDER = ["off", "low", "medium", "high"]
+
+_EFFORT_TO_POSITION = {
+    "none": 0, "minimal": 1, "low": 1, "medium": 2,
+    "high": 3, "xhigh": 3, "max": 3,
+}
+
+
+def _downgrade_thinking_intensity(models: list) -> list[str]:
+    """Token 软预算超限：把会话全部共享模型实例的思考强度降一档。
+
+    软限制——只降档不硬停，任务继续执行。降档结果写回 model.parameters
+    （驱动层每次调用现读，无需重建实例）。zhipu（thinking.type 开关，
+    无中间档）降为关闭；不发送思考参数的供应商（qwen 等）跳过。
+    返回降档描述列表（空列表=无可降实例）。
+    """
+    from core.providers import get_provider_spec, resolve_provider_thinking
+
+    downgraded: list[str] = []
+    seen: set[int] = set()
+    for model in models:
+        if model is None or id(model) in seen:
+            continue
+        seen.add(id(model))
+        parameters = getattr(model, "parameters", None)
+        if parameters is None:
+            continue
+        meta = getattr(model, "_lingshu_usage_meta", None) or {}
+        provider = str(meta.get("provider") or "?")
+        spec = get_provider_spec(provider) or {}
+        style = str(spec.get("thinking_style") or "effort")
+        if not getattr(parameters, "thinking_enable", True):
+            continue        # 已是关闭状态
+        if style == "none":
+            continue        # 供应商不发送思考参数（qwen/llama.cpp 等）
+        if style == "zhipu":
+            # zhipu 只有开/关两档：降档即关闭思考
+            parameters.thinking_enable = False
+            downgraded.append(f"{provider}→off（仅开关两档）")
+            continue
+        effort = str(getattr(parameters, "reasoning_effort", "") or "")
+        position = _EFFORT_TO_POSITION.get(effort, 2)
+        if position <= 0:
+            continue
+        target = _THINKING_LADDER[position - 1]
+        enable, new_effort = resolve_provider_thinking(spec, target)
+        parameters.thinking_enable = enable
+        parameters.reasoning_effort = new_effort
+        downgraded.append(
+            f"{provider}→{target}" + (f"（effort={new_effort}）" if new_effort else ""))
+    return downgraded
+
+
 def _fast_pending_report_hint(main_agent: Any) -> str | None:
     """快速模式：后台专家报告就绪时的下一轮注入提示（无就绪报告返回 None）。"""
     bg = getattr(main_agent, "_lingshu_bg", None)
@@ -1427,6 +1502,8 @@ async def run_mission(
     model_name: str | None = None,
     thinking_intensity: str = "medium",
     run_mode: str = "standard",
+    fast_summary: bool = True,
+    token_soft_budget: int = 0,
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
@@ -1530,6 +1607,9 @@ async def run_mission(
     # RuntimeConfig 从环境变量读取（API Key、命令超时等）；Web 任务按
     # user_id 划定的模型池加载注册表覆盖（普通用户=自己的私有池）。
     runtime = RuntimeConfig.from_env(user_id=user_id)
+    # Token 软预算未显式指定时沿用平台配置（LINGSHU_TOKEN_SOFT_BUDGET）
+    if token_soft_budget <= 0:
+        token_soft_budget = runtime.token_soft_budget
     if qwen_tool_call_mode is not None:
         selected_mode = qwen_tool_call_mode.strip().lower()
         if selected_mode not in {"simple", "standard"}:
@@ -3151,6 +3231,10 @@ async def run_mission(
                 artifact_recon_agent=artifact_recon,
                 category_change_callback=_on_category_changed,
                 brain_agent=brain,
+                verification_runner=(
+                    lambda command: run_verification_command(
+                        command, mission.target, registry=scope_registry, timeout=45)
+                ),
         )
             main_agent = orchestrator
             main_agent_prefix = "[Orchestrator] "
@@ -3186,7 +3270,12 @@ async def run_mission(
             "authorized_pentest": "授权渗透模式：按信息收集→漏洞分析→审批后最小化验证→后渗透评估（当前权限确认/提权路径验证/横向与数据可达性证明，仅证明可达不外带数据）→定级与修复建议的主线推进；网络侦察前必须确认任务书声明范围，新增目标必须先通过独立范围审批再调用 request_scope_expansion；收尾 success 判据=已验证漏洞与评估结论，不以获取 Flag 为唯一标准。",
             "hybrid_taskbook": "混合任务书模式：本地附件分析可先行；涉及任务书声明的网络目标须先通过独立范围审批，新增目标仍需再次审批；网络主线同样按渗透评估流程推进，收尾判据同授权渗透模式。",
         }.get(mission.mission_mode, "按当前任务声明范围执行，任何新增网络目标均不得默认视为已授权。")
+        # 经验注入（记忆闭环）：fast 模式不走 Brain，此前完全无历史经验
+        # 可参考；这里把脱敏经验提示并入首条指令（standard 由 Brain 注入）
+        experience_hint = get_experience_hint()
         if run_mode == "fast":
+            if experience_hint:
+                experience_hint = f"\n\n{experience_hint}\n（以上为脱敏历史经验，仅供方向参考，须以当前证据验证）"
             orch_content = (
                 f"快速模式执行以下已授权任务。\n任务模式：{mission.mission_mode}\n"
                 f"目标：{mission.target}\n目标要求：{mission.goal}\n"
@@ -3197,7 +3286,7 @@ async def run_mission(
                 f"{json.dumps(mission.context_layers(limit=6), ensure_ascii=False)}\n"
                 "速度优先：立即 spawn_expert 派出对口专家解题；专家报告就是结论。"
                 "拿到 flag 立即 fast_complete_mission 收尾（绑定了平台时优先 submit_flag）。"
-                f"{orch_context}"
+                f"{experience_hint}{orch_context}"
             )
         else:
             orch_content = (
@@ -3218,6 +3307,7 @@ async def run_mission(
         # P5 熔断重试预算：Orchestrator 输出残缺 <tool_call>/空回答时重新注入
         malformed_retry_budget = 2
         stalled_nudge_budget = 2
+        budget_downgraded = False   # Token 软预算降档只执行一次
         # P0-B 升级阶梯第二级：nudge 耗尽后的终局续跑轮（固定 1 次）。
         # 注入结构化任务状态摘要，给 Orchestrator 一轮全新迭代预算收口；
         # 再不收敛则由循环外的 finalize_as_failed 确定性兜底。
@@ -3232,6 +3322,35 @@ async def run_mission(
                     prefix=main_agent_prefix,
                     on_event=event_callback,
                 )
+                # Token 软预算：超限自动降思考档（一次性，软限制不硬停）
+                if (
+                    token_soft_budget > 0 and not budget_downgraded
+                    and get_session_token_total(session_id or mission_id)
+                    >= token_soft_budget
+                ):
+                    _changed = _downgrade_thinking_intensity(
+                        [model, *role_models.values()])
+                    if _changed:
+                        budget_downgraded = True
+                        _total = get_session_token_total(session_id or mission_id)
+                        mission.record("system", "thinking_intensity_downgraded", {
+                            "budget": token_soft_budget,
+                            "total_tokens": _total,
+                            "changes": _changed,
+                        })
+                        store.save(mission)
+                        print(
+                            f"[系统] ⚠ Token 软预算 {token_soft_budget} 已达上限"
+                            f"（累计 {_total}），思考强度降档继续："
+                            + "；".join(_changed), flush=True,
+                        )
+                        if event_callback:
+                            event_callback("message", {
+                                "agent": "system",
+                                "content": (
+                                    f"Token 软预算 {token_soft_budget} 已达上限"
+                                    f"（累计 {_total}），思考强度已自动降档继续执行"),
+                            })
                 # AgentScope 可能以 INTERRUPTED 正常返回（取消被并发工具路径
                 # 吞掉时），还原为 CancelledError 走统一清理与 cancelled 终态。
                 if (
@@ -3473,6 +3592,14 @@ async def run_mission(
             if mission.flag and event_callback:
                 event_callback("flag_found", flag=mission.flag)
         _push_target_info()
+        # ── 记忆闭环：任务归档卡片即时回流 RAG（best-effort，不阻塞收尾）──
+        # 归档目录只在服务启动/手动 API 时 sync，任务结束的教训卡片此前要等
+        # 下一次任务启动才被索引；这里补上即时索引。
+        try:
+            if rag_service.available:
+                await rag_service.sync()
+        except Exception as sync_exc:  # noqa: BLE001
+            print(f"[RAG] 任务后同步失败（忽略）: {sync_exc}", flush=True)
         # ── 11. Summary Agent 总结与 PDF 报告（终态固化后、返回前）──
         # 报告阶段刻意放在任务终态固化之后：总结 Agent 失败/中断不得改变
         # 主任务结论（成功/失败已由 Orchestrator 确定并持久化）。失败路径
@@ -3490,7 +3617,9 @@ async def run_mission(
             agent_tasks=active_agent_tasks,
             store=store,
             user_id=user_id,
+            fast_summary=bool(fast_summary or run_mode != "fast"),
         )
+        clear_session_token_total(session_id or mission_id)
         return mission
 
     except (ToolJSONValidationError, QwenModelUnavailableError) as exc:
@@ -3525,6 +3654,7 @@ async def run_mission(
             agent_tasks=active_agent_tasks,
             store=store,
             user_id=user_id,
+            fast_summary=bool(fast_summary or run_mode != "fast"),
         )
         if event_callback is not None:
             event_callback("task_error", error=str(exc), agent="system")
@@ -3548,6 +3678,7 @@ async def run_mission(
                 agent_tasks=active_agent_tasks,
                 store=store,
                 user_id=user_id,
+                fast_summary=bool(fast_summary or run_mode != "fast"),
             )
         except Exception as summary_exc:  # noqa: BLE001 - 兜底报告绝不允许掩盖原异常
             logger.exception("失败路径 summary 兜底调用异常: %s", summary_exc)
@@ -3629,6 +3760,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="standard",
         help="运行模式：standard=完整渗透工作流（默认）；fast=快速模式（单指挥官调度专家子 Agent，主打夺旗速度）",
     )
+    parser.add_argument(
+        "--no-fast-summary",
+        action="store_true",
+        help="fast 模式收尾跳过 Summary 报告生成（省 token，挂机批跑推荐）",
+    )
+    parser.add_argument(
+        "--token-budget",
+        type=int,
+        default=0,
+        help="Token 软预算：会话累计超过即自动降思考档继续执行（0=不限，默认读 LINGSHU_TOKEN_SOFT_BUDGET）",
+    )
     return parser
 
 
@@ -3645,6 +3787,8 @@ def main() -> None:
                 args.target, args.goal, args.model, args.provider,
                 qwen_tool_call_mode=args.qwen_tool_mode,
                 run_mode=args.mode,
+                fast_summary=not args.no_fast_summary,
+                token_soft_budget=args.token_budget,
             ),
         )
     except (ValueError, RuntimeError) as exc:

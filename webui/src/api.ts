@@ -513,7 +513,7 @@ export const api = {
       newestSeq: Number(data?.newest_seq || 0),
     };
   },
-  create: (data: Record<string, string>) =>
+  create: (data: Record<string, string | boolean>) =>
     request<{ session_id: string }>("/api/session/start", {
       method: "POST",
       body: JSON.stringify(data),

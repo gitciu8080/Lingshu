@@ -1569,3 +1569,53 @@ def _append_manifest(artifacts_root: Path, entry: dict[str, Any]) -> None:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError:
         pass  # manifest 写入失败不阻断工具执行
+
+
+# ────────────────────────────────────────────────────────────────
+# 独立验证执行器（验证闭环）
+# ────────────────────────────────────────────────────────────────
+
+async def run_verification_command(
+    command: str,
+    target: str,
+    *,
+    registry: ScopeRegistry | None = None,
+    timeout: int = 45,
+    workdir: str | None = None,
+) -> dict[str, Any]:
+    """独立重放验证命令：复用 scoped_shell 全部命令闸门，返回结构化结果。
+
+    与专家 shell 的差异：不产生 artifacts/文本包装，供 verify_findings
+    做指纹比对。命令来自已审批攻击阶段的 PoC，走同一 IP 白名单与
+    破坏性命令拦截（授权边界不因验证而放宽）。
+    """
+    result: dict[str, Any] = {
+        "command": command, "returncode": None, "stdout": "",
+        "stderr": "", "timed_out": False, "error": "",
+    }
+    try:
+        _validate_scoped_command(command, target, registry)
+    except (ValueError, PermissionError) as exc:
+        result["error"] = f"命令未通过范围校验: {exc}"
+        return result
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=workdir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            os.killpg(proc.pid, signal.SIGKILL)
+            await proc.wait()
+            result["timed_out"] = True
+            return result
+        result["returncode"] = proc.returncode
+        result["stdout"] = stdout.decode("utf-8", errors="replace")[-20000:]
+        result["stderr"] = stderr.decode("utf-8", errors="replace")[-6000:]
+    except OSError as exc:
+        result["error"] = str(exc)
+    return result

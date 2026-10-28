@@ -165,13 +165,22 @@ def _archive_cold_mission(mission: dict) -> Path:
 
 
 def _load():
-    """加载经验记忆。"""
+    """加载经验记忆。损坏时隔离原文件并告警，不再静默清零历史。"""
     if not os.path.exists(_MEMORY_FILE):
         return {"missions": [], "techniques": {}}
     try:
         with open(_MEMORY_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        corrupt = f"{_MEMORY_FILE}.corrupt.{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        try:
+            os.replace(_MEMORY_FILE, corrupt)
+        except OSError:
+            corrupt = "(隔离失败)"
+        print(
+            f"[memory] ⚠ 长期记忆文件损坏（{exc}），已隔离为 {corrupt}；"
+            "历史经验从空开始重建。", flush=True,
+        )
         return {"missions": [], "techniques": {}}
 
 
@@ -209,16 +218,26 @@ def save_mission(target, goal, plan, attack_chain, success, summary, flag=None, 
     }
     data["missions"].append(mission)
 
-    # 如果成功，记录技术映射
+    # 记录技术映射：步骤含 service/cve/technique/category 任一即写入。
+    # （旧逻辑要求 service 与 cve 同时命中，实测 techniques 几乎恒空。）
     if success and attack_chain:
         for step in attack_chain:
-            if isinstance(step, dict) and "service" in step and "cve" in step:
-                key = step["service"]
-                data["techniques"].setdefault(key, []).append({
-                    "cve": step["cve"],
-                    "timestamp": datetime.now().isoformat(),
-                    "success": True,
-                })
+            if not isinstance(step, dict):
+                continue
+            service = str(step.get("service") or step.get("technique")
+                          or step.get("category") or "").strip()
+            cve = str(step.get("cve") or "").strip()
+            if not service and not cve:
+                continue
+            key = _redact(service or cve)[:80]
+            if not key:
+                continue
+            data["techniques"].setdefault(key, []).append({
+                "cve": cve or "未记录 CVE",
+                "objective": _redact(step.get("objective"))[:120],
+                "timestamp": datetime.now().isoformat(),
+                "success": True,
+            })
 
     # 热记忆只保留最近任务；较早记录先压缩成脱敏 Markdown 卡片，供 `.RAG`
     # 在下次同步时索引。归档失败不能阻断任务收尾，原记录仍会留在热记忆中。
@@ -238,6 +257,14 @@ def save_mission(target, goal, plan, attack_chain, success, summary, flag=None, 
     _save(data)
 
 
+def _tokenize(text: object) -> set[str]:
+    """轻量分词：中英文/数字混合（小写），过滤单字符噪音。"""
+    return {
+        token for token in re.split(r"[^\w\u4e00-\u9fff\-]+", str(text or "").lower())
+        if len(token) >= 2
+    }
+
+
 def query_experience(service=None, limit=5):
     """查询历史经验。
 
@@ -252,24 +279,32 @@ def query_experience(service=None, limit=5):
 
     if service:
         # 大小写不敏感的包含匹配：查询词与 techniques 键任一方包含另一方即命中。
-        # 精确匹配是包含匹配的特例，原有行为不变；新增能力是让
-        # QueryMemory("UPX") 命中键 "UPX 加壳/脱壳" 这类带修饰词的经验条目。
         lowered = service.lower()
         techniques = []
         for key, entries in data["techniques"].items():
             key_l = str(key).lower()
             if key_l == lowered or lowered in key_l or key_l in lowered:
                 techniques.extend(entries)
-        related_missions = []
+        # 相关任务：分词加权打分（goal/plan/summary 与查询词的词元交集），
+        # 替代旧的 plan 单字段包含匹配——措辞不同但同技术的任务也能命中
+        query_tokens = _tokenize(service)
+        scored: list[tuple[float, dict]] = []
         for m in data["missions"]:
-            plan_str = str(m.get("plan", ""))
-            if service.lower() in plan_str.lower():
-                related_missions.append(m)
+            if str(service).lower() in str(m.get("plan", "")).lower():
+                scored.append((10.0, m))
+                continue
+            mission_tokens = _tokenize(
+                f"{m.get('goal', '')} {m.get('plan', '')} {m.get('summary', '')}")
+            overlap = len(query_tokens & mission_tokens)
+            if overlap >= 2:
+                scored.append((float(overlap), m))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        related_missions = [m for _score, m in scored[:3]]
 
         return {
             "service": service,
             "known_exploits": techniques[-limit:],
-            "related_missions": related_missions[-3:],
+            "related_missions": related_missions,
         }
 
     return {
@@ -279,30 +314,66 @@ def query_experience(service=None, limit=5):
 
 
 def get_experience_hint():
-    """生成给 Brain 的经验提示文本。"""
-    data = _load()
-    if not data["techniques"]:
-        return ""
+    """生成规划期经验提示文本（Brain 注入 + fast 模式 Captain 首条输入）。
 
-    hints = ["## 历史成功经验"]
-    for service, entries in list(data["techniques"].items())[-5:]:
-        cves = list(set(e["cve"] for e in entries[-3:]))
-        # service 可能含目标域名/IP，注入 Brain 提示词前统一脱敏
-        hints.append(f"- {_redact(service)}: 可利用 {', '.join(cves)}")
-    return "\n".join(hints)
+    内容三段（各自为空则跳过）：历史成功技术、最近失败教训（lessons
+    此前无任何消费路径，这里补上闭环）、近期任务概览。全部脱敏。
+    """
+    data = _load()
+    missions = data.get("missions") or []
+    techniques = data.get("techniques") or {}
+    hints: list[str] = []
+
+    if techniques:
+        block = ["## 历史成功经验"]
+        for service, entries in list(techniques.items())[-5:]:
+            cves = list({str(e.get("cve") or "?") for e in entries[-3:]})
+            block.append(f"- {_redact(service)}: 可利用 {', '.join(cves)}")
+        hints.append("\n".join(block))
+
+    lessons: list[str] = []
+    seen: set[str] = set()
+    for mission in reversed(missions[-10:]):
+        for line in mission.get("lessons") or []:
+            cleaned = _redact(line)
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                lessons.append(cleaned)
+    if lessons:
+        block = ["## 历史失败教训（同类任务避免重蹈）"]
+        lessons.sort()   # 时间倒序收集，按内容稳定排序保证提示确定性
+        for line in lessons[-6:]:
+            block.append(f"- {line}")
+        hints.append("\n".join(block))
+
+    if missions:
+        block = [f"## 近期任务概览（共 {len(missions)} 条，最近 3 条）"]
+        for mission in missions[-3:]:
+            mark = "成功" if mission.get("success") else "失败"
+            block.append(
+                f"- [{mark}] {_redact(mission.get('goal'))[:80]}"
+                f"（{str(mission.get('timestamp') or '?')[:10]}）"
+            )
+        hints.append("\n".join(block))
+
+    return "\n\n".join(hints)
 
 
 def _format_experience(result: dict, service: str) -> str:
-    """把 query_experience 结果格式化为给 LLM 的 markdown 文本。"""
+    """把 query_experience 结果格式化为给 LLM 的 markdown 文本（全量脱敏）。
+
+    跨任务提示一律不回传原始 target/URL/flag——上一任务的 flag 进入后续
+    任务上下文既泄漏也无决策价值。
+    """
     if service:
         exploits = result.get("known_exploits", [])
         missions = result.get("related_missions", [])
         if not exploits and not missions:
             return (
-                f"未找到服务「{service}」相关的历史攻击经验，"
+                f"未找到服务「{_redact(service)}」相关的历史攻击经验，"
                 "请依靠当前侦察证据制定方案，不要臆测 CVE。"
             )
-        lines = [f"## 历史经验：{service}"]
+        lines = [f"## 历史经验：{_redact(service)}"]
         if exploits:
             lines.append("已知可利用 CVE：")
             for e in exploits:
@@ -312,8 +383,8 @@ def _format_experience(result: dict, service: str) -> str:
             for m in missions:
                 mark = "成功" if m.get("success") else "失败"
                 lines.append(
-                    f"- [{mark}] 目标 {m.get('target', '?')}，目标 {m.get('goal', '?')}"
-                    f" → {str(m.get('summary', ''))[:200]}",
+                    f"- [{mark}] 目标类型 {_redact(m.get('goal'))[:80]}"
+                    f" → {_redact(m.get('summary'))[:160]}"
                 )
         return "\n".join(lines)
 
@@ -324,9 +395,8 @@ def _format_experience(result: dict, service: str) -> str:
     lines = [f"## 近期历史任务（共 {total} 条，最近 {len(recent)} 条）"]
     for m in recent:
         mark = "成功" if m.get("success") else "失败"
-        flag = f"，flag={m.get('flag')}" if m.get("flag") else ""
         lines.append(
-            f"- [{mark}] {m.get('target', '?')} · {m.get('goal', '?')} · {m.get('timestamp', '?')}{flag}",
+            f"- [{mark}] {_redact(m.get('goal'))[:80]} · {m.get('timestamp', '?')}",
         )
     return "\n".join(lines)
 

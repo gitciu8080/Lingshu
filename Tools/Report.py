@@ -569,6 +569,23 @@ def _generate_reportlab_pdf(
                 values = mission.get(key) or []
                 if values:
                     story.append(Paragraph(section_name, heading))
+                    if key == "findings":
+                        # 验证闭环：已验证/失败/未验证证据统计（确定性，不依赖 Summary 转述）
+                        verifications = [
+                            (item.get("verification") or {}).get("status")
+                            for item in (mission.get("evidence_records") or [])
+                            if isinstance(item, dict)
+                        ]
+                        counted = [v for v in verifications if v]
+                        if counted:
+                            story.extend(markdown_flowables(
+                                "**PoC 独立重放验证**：✅ 已验证 {v} 项 · ❌ 复现失败 {f} 项"
+                                "（confidence 已降级，结论需人工复核） · ⏭ 未提供 PoC {s} 项。"
+                                "未列出者均为未验证发现。".format(
+                                    v=counted.count("verified"),
+                                    f=counted.count("failed"),
+                                    s=counted.count("skipped") + counted.count("unverified"),
+                                )))
                     for index, value in enumerate(values, 1):
                         if isinstance(value, dict):
                             if key == "plan_items":

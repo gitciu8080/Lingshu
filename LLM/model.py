@@ -1052,6 +1052,19 @@ def _write_usage(
             logger.warning("Token 用量落库失败（后续仅静默跳过）: %s", exc)
 
 
+_SESSION_TOKEN_TOTALS: dict[str, int] = {}
+
+
+def get_session_token_total(session_key: str) -> int:
+    """读取会话累计 token（未登记过的 key 返回 0）。"""
+    return _SESSION_TOKEN_TOTALS.get(str(session_key or "")) or 0
+
+
+def clear_session_token_total(session_key: str) -> None:
+    """任务收尾清理累计器，防进程内累积泄漏。"""
+    _SESSION_TOKEN_TOTALS.pop(str(session_key or ""), None)
+
+
 def _report_model_usage(instance: Any, usage: Any) -> None:
     ctx = getattr(instance, "_lingshu_usage_ctx", None)
     if not isinstance(ctx, dict) or usage is None:
@@ -1062,6 +1075,12 @@ def _report_model_usage(instance: Any, usage: Any) -> None:
     output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
     if input_tokens <= 0 and output_tokens <= 0:
         return
+    # 会话级软预算累计器（进程内）：供主循环在超限时降思考档。
+    # key 与 usage 记录一致（session_id 或 report_key）；任务收尾时清理。
+    session_key = str(ctx.get("session_id") or ctx.get("report_key") or "")
+    if session_key:
+        _SESSION_TOKEN_TOTALS[session_key] = (
+            _SESSION_TOKEN_TOTALS.get(session_key, 0) + input_tokens + output_tokens)
     args = (
         ctx.get("user_id"), ctx.get("session_id") or "", ctx.get("role") or "",
         meta.get("provider", ""), meta.get("model_name", ""),

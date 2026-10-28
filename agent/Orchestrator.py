@@ -41,6 +41,8 @@ from agent.categorize import (
     CategoryDecision,
     evaluate_reclassification,
     extract_recon_signals,
+    extract_verify_block,
+    verify_output_matches,
 )
 
 
@@ -95,6 +97,7 @@ def create_orchestrator_agent(
     artifact_recon_agent: Agent | None = None,
     category_change_callback: Callable[[str, str, str], Awaitable[None]] | None = None,
     brain_agent: Agent | None = None,
+    verification_runner: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
 ) -> Agent:
     steering = steering_state if steering_state is not None else {"pending": None, "processed": False, "queue": []}
     steering.setdefault("queue", [])
@@ -611,6 +614,14 @@ def create_orchestrator_agent(
             category=str((mission.category_decision or {}).get("primary") or ""),
             confidence=0.8,
         )
+        # 验证闭环：报告携带 ```verify``` PoC 块时登记待重放验证
+        verify_block = extract_verify_block(report)
+        if verify_block is not None and evidence.verification is None:
+            evidence.verification = verify_block
+            mission.record("Orchestrator", "finding_poc_registered", {
+                "evidence_id": evidence.id,
+                "expected_fingerprint": verify_block["expected_fingerprint"],
+            })
         fact_ids_before = len(mission.facts)
         flag_match = re.search(r"(?:[A-Za-z0-9_]+)?flag\{[^{}\r\n]+\}|[A-Za-z0-9_]+\{[^{}\r\n]+\}", report, re.IGNORECASE)
         if flag_match:
@@ -1331,7 +1342,71 @@ def create_orchestrator_agent(
             },
         }
 
-    def complete_mission(success: bool, summary: str, flag: str = "") -> str:
+    async def _verify_findings() -> str:
+        """终态前独立验证 pass：重放已登记 PoC，标注 verified/failed。
+
+        只处理 confidence≥0.8 且带 replay_command 的攻击报告证据；
+        无 runner（未注入，如 fast 模式）时全部标注 skipped 并返回说明。
+        验证失败不阻断收尾——仅降 confidence 并在审计链留痕。
+        """
+        stats = {"verified": 0, "failed": 0, "skipped": 0, "unverified": 0}
+        for evidence in mission.evidence_records:
+            if evidence.kind != "attack_report" or evidence.confidence < 0.8:
+                continue
+            verification = evidence.verification
+            if verification is None:
+                evidence.verification = {"status": "unverified"}
+                stats["unverified"] += 1
+                continue
+            if verification.get("status") != "unverified":
+                stats[verification.get("status", "skipped")] = stats.get(
+                    verification.get("status", "skipped"), 0) + 1
+                continue
+            command = str(verification.get("replay_command") or "")
+            if not command or verification_runner is None:
+                verification["status"] = "skipped"
+                stats["skipped"] += 1
+                continue
+            outcome = await verification_runner(command)
+            expected_lines = verification.get("expected_lines") or []
+            passed = (
+                not outcome.get("error")
+                and not outcome.get("timed_out")
+                and outcome.get("returncode") == 0
+                and verify_output_matches(outcome.get("stdout") or "", expected_lines)
+            )
+            verification["status"] = "verified" if passed else "failed"
+            verification["verified_at"] = datetime.now().isoformat(timespec="seconds")
+            verification["detail"] = (
+                f"rc={outcome.get('returncode')} "
+                f"stdout_tail={str(outcome.get('stdout') or '')[-200:]!r}"
+            )[:400]
+            if passed:
+                stats["verified"] += 1
+                mission.record("Orchestrator", "finding_verification_passed", {
+                    "evidence_id": evidence.id,
+                    "expected_fingerprint": verification.get("expected_fingerprint"),
+                })
+            else:
+                stats["failed"] += 1
+                evidence.confidence = min(evidence.confidence, 0.5)
+                mission.record("Orchestrator", "finding_verification_failed", {
+                    "evidence_id": evidence.id,
+                    "reason": outcome.get("error") or (
+                        "timeout" if outcome.get("timed_out")
+                        else f"rc={outcome.get('returncode')} 或期望输出未复现"),
+                })
+        if stats["verified"] + stats["failed"] == 0:
+            return ""
+        total = stats["verified"] + stats["failed"]
+        return (
+            f"\n\n[验证器] 独立重放 PoC：✅verified={stats['verified']} "
+            f"❌failed={stats['failed']}（skipped={stats['skipped']}，"
+            f"无 PoC unverified={stats['unverified']}）。"
+            f"验证失败的发现 confidence 已降至 ≤0.5，报告中标注待复核。"
+        ) if total else ""
+
+    async def complete_mission(success: bool, summary: str, flag: str = "") -> str:
         """结束任务并保存长期经验。
 
         Args:
@@ -1345,6 +1420,12 @@ def create_orchestrator_agent(
         """
         if mission.phase in {Phase.COMPLETED, Phase.FAILED}:
             return "[拒绝] 任务已经结束"
+        # 验证闭环：终态迁移前独立重放已登记 PoC（不阻断收尾）
+        try:
+            verification_note = await _verify_findings()
+            summary = summary + verification_note if verification_note else summary
+        except Exception:  # noqa: BLE001 — 验证器异常不阻断收尾
+            mission.record("Orchestrator", "finding_verification_error")
         mission.flag = flag.strip() or None
         mission.success = bool(success)
         mission.summary = summary

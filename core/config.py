@@ -126,6 +126,9 @@ class RuntimeConfig:
     embedding_model_settings: dict[str, object] = field(default_factory=dict)
 
     command_timeout: int = 300
+    # Token 软预算（会话累计 total_tokens 超过即自动降思考档；0=不限）。
+    # 软限制：只降档不硬停，任务仍可继续。
+    token_soft_budget: int = 0
 
     # ── Workspace v2 模式（v0.3.0）──
     # local: 新会话默认使用按 (user_id, session_id) 隔离的 LocalWorkspace；
@@ -215,6 +218,7 @@ class RuntimeConfig:
             ).strip().lower(),
             # 通用
             command_timeout=max(10, min(int(os.getenv("LINGSHU_COMMAND_TIMEOUT", "300")), 600)),
+            token_soft_budget=max(0, int(os.getenv("LINGSHU_TOKEN_SOFT_BUDGET", "0"))),
             # Workspace 模式：默认 local；legacy 仅用于打开旧会话
             workspace_mode=workspace_mode,
         )
