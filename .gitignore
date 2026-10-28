@@ -52,3 +52,8 @@ webui/src/styles.css.new
 docs/session_stats.csv
 lunwen/
 lunwen/*
+
+# ── 工作台凭据与运行时数据（不入库）──
+data/ctf2_workbench_config.json
+data/ctf2_workbench_envs.json
+Tools/AntSword-Loader-v4.0.3-linux-x64/

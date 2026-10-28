@@ -1097,6 +1097,21 @@ function useModelProviders() {
 // ── 运行模式（standard=完整渗透工作流 / fast=快速夺旗）：全局默认 + 单任务可改 ──
 export type RunMode = "standard" | "fast";
 
+// 防御性读取会话 target_info：历史列表接口可能返回 JSON 字符串形态
+function targetInfoOf(
+  session: { target_info?: unknown } | null | undefined,
+): { run_mode?: string } & Record<string, unknown> {
+  const raw = session?.target_info;
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw) as { run_mode?: string } & Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  return (raw as Record<string, unknown>) || {};
+}
+
 function useRunMode() {
   const [runMode, setRunMode] = useState<RunMode>(() =>
     localStorage.getItem("lingshu_run_mode") === "fast" ? "fast" : "standard");
@@ -1194,6 +1209,8 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
         ...(provider === "qwen" || provider.startsWith("qwen::")
           ? { qwen_tool_call_mode: qwenToolMode } : {}),
       });
+      // 顶栏切换开关已移除：把本次选择的模式持久化为新建任务的默认值
+      toggleRunMode(mode);
       setOpen(false);
       setFiles([]);
       setTarget("");
@@ -1348,7 +1365,7 @@ function RerunMission({
     setWithContext(true);
     // 默认沿用全局模式；来源会话自身是快速模式时跟随它
     setMode(
-      (source as { target_info?: { run_mode?: string } }).target_info?.run_mode === "fast"
+      targetInfoOf(source).run_mode === "fast"
         ? "fast"
         : runMode,
     );
@@ -1410,6 +1427,8 @@ function RerunMission({
           ? { qwen_tool_call_mode: qwenToolMode } : {}),
         ...(withContext ? { source_session_id: source.id } : {}),
       });
+      // 顶栏切换开关已移除：把本次选择的模式持久化为新建任务的默认值
+      toggleRunMode(mode);
       onOpenChange(false);
       onCreated(result.session_id);
     } catch (err) {
@@ -2416,9 +2435,6 @@ const SessionRow = memo(function SessionRow({
         <small>
           {phaseLabel(session.phase)} · {session.target || "等待任务信息"}
         </small>
-        {session.target_info?.run_mode === "fast" && (
-          <small className="fast-badge">⚡ FAST</small>
-        )}
       </div>
     </button>
   );
@@ -2447,6 +2463,7 @@ function ConsoleApp() {
     [tooling, setTooling] = useState(false),
     [mobileIntel, setMobileIntel] = useState(false),
     [missionContextOpen, setMissionContextOpen] = useState(false),
+    [downloadOpen, setDownloadOpen] = useState(false),
     [rerunOpen, setRerunOpen] = useState(false),
     [rerunSource, setRerunSource] = useState<
       (Session & Record<string, unknown>) | null
@@ -2456,7 +2473,6 @@ function ConsoleApp() {
       unknown
     > | null>(null),
     [outgoingQueue, setOutgoingQueue] = useState<OutgoingMessage[]>([]);
-  const { runMode, toggleRunMode } = useRunMode();
   const [onboarding, setOnboarding] = useState(false),
     [newMissionSignal, setNewMissionSignal] = useState(0);
   const feedRef = useRef<HTMLElement>(null);
@@ -2517,6 +2533,9 @@ function ConsoleApp() {
     ? "默认模型"
     : `${modelName} · ${intensityLabel}`;
   const isLive = current?.is_live === true;
+  // 当前查看会话的运行模式（创建时固化；顶栏仅展示，不再作为全局切换开关）
+  const sessionRunMode: RunMode =
+    targetInfoOf(current).run_mode === "fast" ? "fast" : "standard";
   activeSessionRef.current = active;
   sessionsRef.current = sessions;
   eventsRef.current = events;
@@ -3076,8 +3095,10 @@ function ConsoleApp() {
                   <b>灵枢</b>
                   <small>Lingshu Console</small>
                 </div>
+              </div>
+              <div className="sidebar-utilities">
                 <button
-                  className={`theme-switch ${theme}`}
+                  className={`icon-button theme-switch ${theme}`}
                   onClick={() =>
                     setTheme((currentTheme) =>
                       currentTheme === "light"
@@ -3103,6 +3124,30 @@ function ConsoleApp() {
                   ) : (
                     <Sun size={15} />
                   )}
+                </button>
+                <button
+                  className="icon-button"
+                  onClick={() => setKnowledge(true)}
+                  title="查看本地知识库"
+                  aria-label="查看本地知识库"
+                >
+                  <Database size={17} />
+                </button>
+                <button
+                  className="icon-button"
+                  onClick={() => setTooling(true)}
+                  title="查看系统工具状态"
+                  aria-label="查看系统工具状态"
+                >
+                  <Wrench size={16} />
+                </button>
+                <button
+                  className="icon-button"
+                  onClick={() => { window.location.href = "/settings"; }}
+                  title="用户设置：我的模型供应商、Agent 模型分工与账号安全"
+                  aria-label="用户设置"
+                >
+                  <UserCog size={17} />
                 </button>
               </div>
               <NewMission
@@ -3161,10 +3206,19 @@ function ConsoleApp() {
         <main className="mission-main">
           <header className="mission-header">
             <div className="mission-ident">
-              <small>
-                当前任务 · 模式：{String(detail.mission_mode || "unknown")}
-                · 题型：{String(detail.category_decision?.primary || "unknown")}
-              </small>
+              {active && (
+                <span
+                  className={`mode-badge ${sessionRunMode === "fast" ? "fast" : ""}`}
+                  title={
+                    sessionRunMode === "fast"
+                      ? "当前会话运行模式：快速模式（单指挥官调度，创建时固化）"
+                      : "当前会话运行模式：标准模式（完整渗透工作流，创建时固化）"
+                  }
+                >
+                  <Zap size={13} className={sessionRunMode === "fast" ? "" : "off"} />
+                  {sessionRunMode === "fast" ? "FAST" : "STANDARD"}
+                </span>
+              )}
               <b>
                 {current?.title ||
                   (detail.title as string) ||
@@ -3198,27 +3252,19 @@ function ConsoleApp() {
                 className={`auto-scroll-toggle ${autoScrollEnabled ? "enabled" : ""}`}
                 onClick={() => setAutoScrollEnabled((enabled) => !enabled)}
                 title={autoScrollEnabled ? "自动滚动：开启" : "自动滚动：关闭"}
+                aria-label="自动滚动开关"
                 aria-pressed={autoScrollEnabled}
               >
                 <ArrowDown size={14} />
-                自动滚动
               </button>
-              {active && detail.report_available && (
-                <button className="report-download" onClick={() => void downloadReport()}>
-                  <FileDown size={14} />
-                  下载报告
-                </button>
-              )}
-              {active && detail.markdown_available && (
-                <button className="report-download" onClick={() => void downloadReportMarkdown()} title="下载 Markdown 格式的 Summary 报告">
-                  <FileText size={14} />
-                  下载 Markdown
-                </button>
-              )}
               {active && (
-                <button className="report-download" onClick={() => void downloadJsonl()} title="导出完整原始会话 JSONL">
+                <button
+                  className="report-download"
+                  onClick={() => setDownloadOpen(true)}
+                  title="下载任务产物：PDF / Markdown / 完整会话 JSONL"
+                >
                   <FileDown size={14} />
-                  导出 JSONL
+                  下载
                 </button>
               )}
               {active && isLive && (
@@ -3259,42 +3305,6 @@ function ConsoleApp() {
                   再次攻击
                 </button>
               )}
-              <button
-                className="icon-button"
-                onClick={() => setKnowledge(true)}
-                title="查看本地知识库"
-                aria-label="查看本地知识库"
-              >
-                <Database size={17} />
-              </button>
-              <button
-                className={`mode-toggle ${runMode === "fast" ? "fast" : ""}`}
-                onClick={() => toggleRunMode()}
-                title={
-                  runMode === "fast"
-                    ? "当前默认：快速模式（点击切回标准模式）——单指挥官调度，跳过规划与人工审批"
-                    : "当前默认：标准模式（点击切换快速模式）——完整渗透工作流"
-                }
-              >
-                <Zap size={13} className={runMode === "fast" ? "" : "off"} />
-                {runMode === "fast" ? "FAST" : "STANDARD"}
-              </button>
-              <button
-                className="icon-button"
-                onClick={() => setTooling(true)}
-                title="查看系统工具状态"
-                aria-label="查看系统工具状态"
-              >
-                <Wrench size={16} />
-              </button>
-              <button
-                className="icon-button"
-                onClick={() => { window.location.href = "/settings"; }}
-                title="用户设置：我的模型供应商、Agent 模型分工与账号安全"
-                aria-label="用户设置"
-              >
-                <UserCog size={17} />
-              </button>
               {active && (
                 <button
                   className="icon-button danger"
@@ -3523,6 +3533,41 @@ function ConsoleApp() {
         target={fullTarget}
         goal={fullGoal}
       />
+      <Dialog.Root open={downloadOpen} onOpenChange={setDownloadOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="overlay" />
+          <Dialog.Content className="modal">
+            <Dialog.Title>
+              <FileDown size={18} /> 下载任务产物
+            </Dialog.Title>
+            <Dialog.Description>
+              选择要下载的产物格式；PDF 与 Markdown 报告在任务产出 Summary 后可用。
+            </Dialog.Description>
+            <div className="download-options">
+              <button
+                className="danger-button full"
+                disabled={!detail.report_available}
+                onClick={() => { setDownloadOpen(false); void downloadReport(); }}
+              >
+                <FileDown size={14} /> PDF 报告
+              </button>
+              <button
+                className="danger-button full"
+                disabled={!detail.markdown_available}
+                onClick={() => { setDownloadOpen(false); void downloadReportMarkdown(); }}
+              >
+                <FileText size={14} /> Markdown 报告
+              </button>
+              <button
+                className="danger-button full"
+                onClick={() => { setDownloadOpen(false); void downloadJsonl(); }}
+              >
+                <FileDown size={14} /> 完整会话记录 JSONL
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       <RerunMission
         open={rerunOpen}
         source={rerunSource}

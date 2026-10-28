@@ -2993,6 +2993,8 @@ async def run_mission(
                 capability_context=current_capability_context,
                 enable_framework=framework_allowed,
                 command_workdir=command_workdir,
+                mission=mission,
+                store=store,
             )
 
         attack = LazyAgent(
@@ -3079,6 +3081,8 @@ async def run_mission(
                 vision_roots=vision_roots,
                 enable_gdb=dynamic_debug_needed,
                 command_workdir=command_workdir,
+                mission=mission,
+                store=store,
             )
 
         reserve = LazyAgent(REVERSE_EXPERT, _load_reverse_agent)
@@ -3146,6 +3150,7 @@ async def run_mission(
                 network_recon_agent=network_recon,
                 artifact_recon_agent=artifact_recon,
                 category_change_callback=_on_category_changed,
+                brain_agent=brain,
         )
             main_agent = orchestrator
             main_agent_prefix = "[Orchestrator] "
@@ -3264,12 +3269,13 @@ async def run_mission(
                         "无需重复已完成的侦察步骤。"
                     )
                     continue
-                # 快速模式：后台专家报告就绪 → 注入收取提示重开一轮。
-                if run_mode == "fast":
-                    report_hint = _fast_pending_report_hint(main_agent)
-                    if report_hint:
-                        orch_content = report_hint
-                        continue
+                # 后台专家报告就绪 → 注入收取提示重开一轮。
+                # fast（Captain）与 standard（Orchestrator P5 后台派遣）共用：
+                # _fast_pending_report_hint 经 agent._lingshu_bg 属性通用读取。
+                report_hint = _fast_pending_report_hint(main_agent)
+                if report_hint:
+                    orch_content = report_hint
+                    continue
                 # P5b：未到终态的纯文本收尾 → 若仍有可推进的工作
                 # （已批准攻击 / 存在 pending 或 in_progress 计划项），
                 # 注入一次推进提示而不是直接退出主循环。

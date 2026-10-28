@@ -25,7 +25,7 @@ from Tools.tooling import (
     run_expert_reply_with_continuation,
 )
 
-FAST_CAPTAIN_EXPERT = "Blade - 快速夺旗指挥官"
+FAST_CAPTAIN_EXPERT = "Blade - 快速行动指挥官"
 
 # spawn_expert 允许的角色（与 main.py fast 分支装配的专家一一对应）
 SPAWN_ROLES: tuple[str, ...] = ("attack", "reverse", "triage", "recon", "analysis")

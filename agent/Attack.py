@@ -285,6 +285,8 @@ async def create_attack_agent(
     capability_context: str = "",
     enable_framework: bool = False,
     command_workdir: str | Path | None = None,
+    mission=None,
+    store=None,
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -297,6 +299,9 @@ async def create_attack_agent(
         timeout: 命令超时秒数。
         category_decision: 题型分类决策（v0.2.0 新增）。为 None 时仅加载 writeup。
         max_iters: ReAct 最大推理迭代次数，由调用方按任务复杂度分配。
+        mission: 共享任务状态（可选）。提供时 Analysis 委托研判会登记
+            Evidence，Attack 失败后 Orchestrator 仍可复用研判结论。
+        store: MissionStore（可选），配合 mission 使用。
     """
     async def analysis(service_info: str) -> str:
         """请求 Analysis 专家研判真实服务证据。
@@ -314,10 +319,23 @@ async def create_attack_agent(
             )
         except AgentMaxIterationsError:
             return "[Analysis] 超迭代，本轮无研判输出；请基于现有证据自行推进。"
-        return text or (
+        result = text or (
             "[Analysis] 未返回文本结果（含补轮）。"
             "可再次调用本工具重试；若再次为空请基于现有证据自行研判推进。"
         )
+        # 研判入库：专家间委托的结论也进入证据链，避免 Attack 失败后
+        # Orchestrator 看不到研判而重派重复分析；入库失败不阻断返回。
+        if mission is not None and text:
+            try:
+                mission.add_evidence(
+                    analysis_agent.name, "analysis_report", text,
+                    confidence=0.7,
+                )
+                if store is not None:
+                    store.save(mission)
+            except Exception:  # noqa: BLE001 - 入库仅为可观测性增强
+                pass
+        return result
 
 
 

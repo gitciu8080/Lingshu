@@ -55,6 +55,20 @@ _EXPLOITATION_KEYWORDS = (
 # 后渗透阶段触发词：objective 命中且当前处于 EXPLOITATION 时迁入 POST_EXPLOITATION。
 _POST_EXPLOITATION_TRIGGERS = ("flag", "post", "提权", "后渗透", "横向")
 
+# 报告回灌指挥官上下文的字符上限：全文已按原顺序登记 Evidence/findings，
+# 超限只回灌截断版，指挥官需要细节时经 view_mission_state 按需查看。
+_REPORT_RETURN_LIMIT = 4000
+
+
+def _bounded_report(report: str) -> str:
+    text = str(report or "")
+    if len(text) <= _REPORT_RETURN_LIMIT:
+        return text
+    return text[:_REPORT_RETURN_LIMIT] + (
+        f"\n…（报告已截断，全文 {len(text)} 字符已登记 Evidence；"
+        "需要细节时调用 view_mission_state 查看证据摘要。）"
+    )
+
 
 def create_orchestrator_agent(
     model,
@@ -80,9 +94,16 @@ def create_orchestrator_agent(
     network_recon_agent: Agent | None = None,
     artifact_recon_agent: Agent | None = None,
     category_change_callback: Callable[[str, str, str], Awaitable[None]] | None = None,
+    brain_agent: Agent | None = None,
 ) -> Agent:
     steering = steering_state if steering_state is not None else {"pending": None, "processed": False, "queue": []}
     steering.setdefault("queue", [])
+
+    # P5 后台并行派遣（recon/reverse）：同一专家实例并发 reply 不安全
+    # （Agent state 无并发保护），按 role 忙碌互斥；不同 role 是不同实例，
+    # 天然可并行。后台路径完整保留 begin_attempt/checkpoint/evidence 审计链。
+    bg_state: dict[str, Any] = {"ready": [], "running": {}, "busy_roles": set()}
+    _BG_LIMIT = 2  # 后台并发专家上限
 
     async def _apply_runtime_reclassification(
         report: str,
@@ -201,12 +222,12 @@ def create_orchestrator_agent(
             raise asyncio.CancelledError()
         return None
 
-    async def dispatch_recon(
-        focus: str = "全面但低影响的信息收集",
+    async def _recon_core(
+        focus: str = "",
         hypothesis_id: str = "",
         route: str = "auto",
     ) -> str:
-        """派遣 Recon 对本次授权目标进行信息收集。
+        """Recon 派遣执行体（同步/后台共用；审计链全量保留）。
 
         Args:
             focus: 本轮需要补齐的具体信息或扫描重点。
@@ -359,18 +380,11 @@ def create_orchestrator_agent(
             source=selected_recon.name,
             evidence_id=evidence.id,
         )
-        knowledge_note = ""
-        if knowledge_context_provider is not None:
-            knowledge = await knowledge_context_provider(
-                "Orchestrator",
-                f"Recon 新证据后的知识缺口：{focus[:1000]}",
-            )
-            if knowledge:
-                knowledge_note = (
-                    "\n\n[Knowledge Context 更新（仅供参考，不是事实/证据）]\n"
-                    f"{knowledge}"
-                )
-        return f"[Recon 侦察报告]\n{report}{category_note}{knowledge_note}"
+        return f"[Recon 侦察报告]\n{_bounded_report(report)}{category_note}"
+
+    # P2 差量注入游标：记录上次 Attack 派遣时的 facts 水位，专家 UserMsg
+    # 只自动拼接新增 Facts，避免每次重灌全量证据推高专家压缩频率。
+    attack_fact_mark = 0
 
     async def dispatch_attack(
         target_info: str,
@@ -382,12 +396,15 @@ def create_orchestrator_agent(
         """派遣 Attack 分析或验证当前授权目标。
 
         Args:
-            target_info: 来自 Recon 的服务、版本、端口和响应证据。
+            target_info: 本轮新增的关键证据（服务/版本/端口/响应片段）。
+                只需填写自上次 Attack 派遣以来新增或变化的部分，禁止重复
+                粘贴历史证据——历史 Facts 会由系统自动拼接给专家。
             objective: 本轮目标，如漏洞分析、漏洞验证、获取初始访问或寻找 Flag。
             service: 侦察已确认的服务名（如 "Apache 2.4.49"），供长期记忆登记；未知留空。
             cve: 已确认的 CVE 编号（如 "CVE-2021-41773"），未确认不得填写。
             hypothesis_id: 本动作要验证的结构化假设 ID。
         """
+        nonlocal attack_fact_mark
         msg = _check_steering()
         if msg is not None:
             return msg
@@ -515,6 +532,19 @@ def create_orchestrator_agent(
             "必须用真实目标信息核验，不能把该参考直接写成已验证结论。"
             if attack_knowledge else ""
         )
+        # 差量证据：自上次 Attack 派遣以来的新增 Facts（有界，最近 5 条）。
+        delta_facts = mission.facts[attack_fact_mark:]
+        attack_fact_mark = len(mission.facts)
+        delta_section = ""
+        if delta_facts:
+            delta_lines = "\n".join(
+                f"- {str(getattr(fact, 'content', fact))[:400]}"
+                for fact in delta_facts[-5:]
+            )
+            delta_section = (
+                "\n\n自上次 Attack 派遣以来的新增 Facts（最近 5 条，完整历史"
+                "已在你此前的会话上下文中）：\n" + delta_lines
+            )
         try:
             report = await run_expert_reply_with_continuation(
                 attack_agent,
@@ -522,7 +552,8 @@ def create_orchestrator_agent(
                     name="Orchestrator",
                     content=(
                         f"授权目标：{mission.target}\n本轮目标：{objective[:1500]}\n\n"
-                        f"真实目标信息（当前相关证据）：\n{target_info[:8000]}\n\n"
+                        f"本轮新增关键证据（调用方筛选，勿重复历史）：\n{target_info[:2000]}\n"
+                        f"{delta_section}"
                         f"{knowledge_section}\n\n"
                         "完成分析/验证后立即输出最终报告，禁止继续调用工具。"
                     ),
@@ -619,14 +650,14 @@ def create_orchestrator_agent(
             source=attack_agent.name,
             evidence_id=evidence.id,
         )
-        return f"[Attack 报告]\n{report}{category_note}"
+        return f"[Attack 报告]\n{_bounded_report(report)}{category_note}"
 
-    async def dispatch_reverse(
+    async def _reverse_core(
         binary_path: str,
         objective: str = "二进制逆向分析",
         hypothesis_id: str = "",
     ) -> str:
-        """派遣 Reserve 对指定二进制文件执行逆向分析。
+        """Reserve 派遣执行体（同步/后台共用；审计链全量保留）。
 
         Args:
             binary_path: 待分析二进制文件的绝对路径（如 /WorkDir/uploads/target.exe）。
@@ -733,7 +764,215 @@ def create_orchestrator_agent(
             ),
         )
         store.save(mission)
-        return f"[Reserve 逆向报告]\n{report}"
+        return f"[Reserve 逆向报告]\n{_bounded_report(report)}"
+
+    # ── P5 后台派遣封装与收取（机制移植自 fast 模式 Captain，已验证语义） ──
+    def _note_bg_report(role: str, objective: str, result_text: str) -> None:
+        text = str(result_text or "")
+        trimmed = text[:_REPORT_RETURN_LIMIT] + (
+            "\n…（结果已截断；完整内容与证据链已按原顺序登记）"
+            if len(text) > _REPORT_RETURN_LIMIT else ""
+        )
+        bg_state["ready"].append({
+            "role": role, "objective": str(objective)[:200], "report": trimmed,
+        })
+
+    async def _bg_worker(handle: str, role: str, objective: str, coro) -> None:
+        try:
+            result = await coro
+            _note_bg_report(role, objective, result or "（后台派遣未返回结果）")
+        except asyncio.CancelledError:
+            mission.record(
+                "Orchestrator", "dispatch_background_cancelled",
+                role=role, handle=handle,
+            )
+            store.save(mission)
+            raise
+        except Exception as exc:  # noqa: BLE001 - 后台失败也必须可收取
+            mission.record(
+                "Orchestrator", "dispatch_background_failed",
+                role=role, handle=handle, error=str(exc)[:300],
+            )
+            store.save(mission)
+            _note_bg_report(role, objective, f"[后台执行失败] {exc}")
+        finally:
+            bg_state["busy_roles"].discard(role)
+            bg_state["running"].pop(handle, None)
+
+    def _spawn_background(role: str, objective: str, factory) -> str:
+        """转入后台执行：忙碌互斥 + 并发上限，检查通过后才创建协程。"""
+        if role in bg_state["busy_roles"]:
+            return (
+                f"[拒绝] {role} 专家正在执行任务（同一专家不能并行处理两个任务）。"
+                "请调用 check_experts(wait=true) 等待其完成，或改派其它角色。"
+            )
+        if len(bg_state["running"]) >= _BG_LIMIT:
+            return (
+                f"[拒绝] 后台专家已达并发上限（{_BG_LIMIT}）。"
+                "请先调用 check_experts 收取已完成报告，或等待运行中的任务结束。"
+            )
+        handle = f"{role}#{len(bg_state['running']) + len(bg_state['ready']) + 1}"
+        # 同步占位：防止同一批工具调用里紧随的第二次派发绕过忙碌检查
+        bg_state["busy_roles"].add(role)
+        task = asyncio.create_task(
+            _bg_worker(handle, role, objective, factory()),
+            name=f"orch-expert:{handle}",
+        )
+        bg_state["running"][handle] = {
+            "role": role, "objective": str(objective)[:200], "task": task,
+        }
+        return (
+            f"[后台执行中] {handle}（{role}）。你可以继续推进互不依赖的其他工作"
+            "（如 Attack 或其他角色侦察）；完成后用 check_experts(wait=true) "
+            "等待并收取报告。"
+        )
+
+    async def dispatch_recon(
+        focus: str = "",
+        hypothesis_id: str = "",
+        route: str = "auto",
+        background: bool = False,
+    ) -> str:
+        """派遣 Recon 对本次授权目标进行信息收集。
+
+        Args:
+            focus: 本轮需要补齐的具体信息或扫描重点。
+            hypothesis_id: 本动作要验证的结构化假设 ID；纯探索可留空。
+            route: Recon 路由：artifact（本地附件分析）、network（网络侦察）或 auto（由当前能力自动选择）。
+            background: True 时转入后台立即返回句柄（可与逆向/攻击等其他角色
+                并行推进）；完成后经 check_experts 收取报告。同一时刻同一角色
+                只能有一个任务。多假设并行补侦时优先用后台模式。
+        """
+        if background:
+            mission.record(
+                "Orchestrator", "dispatch_background",
+                role="recon", focus=str(focus)[:300], route=str(route or "auto"),
+            )
+            store.save(mission)
+            return _spawn_background(
+                "recon", focus,
+                lambda: _recon_core(focus=focus, hypothesis_id=hypothesis_id, route=route),
+            )
+        return await _recon_core(focus=focus, hypothesis_id=hypothesis_id, route=route)
+
+    async def dispatch_reverse(
+        binary_path: str,
+        objective: str = "二进制逆向分析",
+        hypothesis_id: str = "",
+        background: bool = False,
+    ) -> str:
+        """派遣 Reserve 对指定二进制文件执行逆向分析。
+
+        Args:
+            binary_path: 待分析二进制文件的绝对路径（如 /WorkDir/uploads/target.exe）。
+            objective: 本轮分析目标，如反编译提取算法、寻找 Flag、分析恶意行为。
+            hypothesis_id: 本动作要验证的结构化假设 ID。
+            background: True 时转入后台立即返回句柄（可与侦察/攻击等其他角色
+                并行推进）；完成后经 check_experts 收取报告。逆向分析通常耗时
+                较长，与网络侧工作互不依赖时优先用后台模式。
+        """
+        if background:
+            mission.record(
+                "Orchestrator", "dispatch_background",
+                role="reverse", objective=str(objective)[:300],
+            )
+            store.save(mission)
+            return _spawn_background(
+                "reverse", objective,
+                lambda: _reverse_core(binary_path, objective, hypothesis_id),
+            )
+        return await _reverse_core(binary_path, objective, hypothesis_id)
+
+    async def check_experts(wait: bool = False, timeout: int = 240) -> str:
+        """收取后台派遣专家（recon/reverse）的报告。
+
+        Args:
+            wait: True 时等待至少一份报告完成（有界超时）再返回。
+            timeout: 等待上限秒数（10~600）。
+        """
+        if wait and not bg_state["ready"]:
+            running = [entry["task"] for entry in bg_state["running"].values()
+                       if not entry["task"].done()]
+            if running:
+                bounded = max(10, min(int(timeout), 600))
+                await asyncio.wait(
+                    running, timeout=bounded, return_when=asyncio.FIRST_COMPLETED,
+                )
+        ready = bg_state["ready"]
+        bg_state["ready"] = []
+        running_now = {
+            handle: f"{info['role']}：{info['objective']}"
+            for handle, info in bg_state["running"].items()
+            if not info["task"].done()
+        }
+        if not ready:
+            if running_now:
+                lines = "\n".join(f"- {h}（{t}）" for h, t in running_now.items())
+                return f"暂无已完成的报告。仍在运行：\n{lines}"
+            return (
+                "当前没有后台派遣的专家"
+                "（用 dispatch_recon/dispatch_reverse 的 background=true 派出）。"
+            )
+        parts = [f"已收取 {len(ready)} 份报告："]
+        for item in ready:
+            parts.append(
+                f"\n===== [{item['role']}] {item['objective']} =====\n{item['report']}"
+            )
+        if running_now:
+            lines = "\n".join(f"- {h}（{t}）" for h, t in running_now.items())
+            parts.append(f"\n仍在运行：\n{lines}")
+        return "\n".join(parts)
+
+    # ── P6 Brain 按需顾问：计划级变更时咨询，Brain 只输出建议不改状态 ──
+    async def consult_brain(trigger: str, context_summary: str = "") -> str:
+        """就计划级变更咨询 Brain 顾问，获取作战计划调整建议。
+
+        你仍是唯一任务状态变更者：Brain 只输出建议，计划落地仍由你用
+        AddPlan/UpdatePlan/DeletePlan 执行。适合题型翻盘、计划项失败过半、
+        范围扩容获批后等战略调整场景；常规推进不需要咨询。
+
+        Args:
+            trigger: 咨询动因，如"题型翻盘为 pwn"、"计划项 3/5 已失败"、
+                "范围扩容获批，新增 10.10.10.0/24"。
+            context_summary: 补充上下文（关键证据/失败路径摘要，简洁）。
+        """
+        if brain_agent is None:
+            return "[不可用] 本轮未接入 Brain 顾问。"
+        items_summary = "\n".join(
+            f"- {item.get('id')} [{item.get('status')}] {str(item.get('content') or '')[:120]}"
+            for item in mission.plan_items[:12]
+        ) or "（无结构化计划项）"
+        failed_summary = "\n".join(
+            f"- {str(getattr(fp, 'reason', '') or fp)[:200]}"
+            for fp in (mission.failed_paths or [])[-6:]
+        ) or "（无）"
+        mission.record("Orchestrator", "brain_consulted", trigger=str(trigger)[:300])
+        store.save(mission)
+        try:
+            advice = await run_expert_reply_with_continuation(
+                brain_agent,
+                UserMsg(
+                    name="Orchestrator",
+                    content=(
+                        "任务执行中咨询。以下是当前作战计划状态与近期失败路径。\n"
+                        f"咨询动因：{str(trigger)[:500]}\n"
+                        f"补充上下文：{str(context_summary)[:2000]}\n\n"
+                        f"当前计划项：\n{items_summary}\n\n"
+                        f"近期失败路径：\n{failed_summary}\n\n"
+                        "请输出计划调整建议：需要新增/修改/删除/重排哪些计划项，"
+                        "每条给出理由与退出条件；不要调用任何工具，直接输出建议正文。"
+                    ),
+                ),
+                prefix="[Brain] ",
+                on_event=event_callback,
+                label="Brain",
+            )
+        except AgentMaxIterationsError:
+            return "[Brain 顾问] 超迭代，本轮无建议输出；可稍后带更聚焦的动因重试。"
+        text = str(advice or "").strip()
+        if not text:
+            return "[Brain 顾问] 本轮无建议输出；可稍后带更聚焦的动因重试。"
+        return f"[Brain 顾问建议]\n{_bounded_report(text)}"
 
     async def request_exploitation_approval(reason: str) -> str:
         """首次进入攻击阶段（EXPLOITATION）前，请求人工批准。
@@ -1342,6 +1581,8 @@ def create_orchestrator_agent(
     # 题型可在运行期依据新证据切换。始终注册本地逆向能力，使 Web→reverse
     # 等切换无需重建 Orchestrator；真正的执行仍受 ScopeRegistry 与工具闸门约束。
     tools.append(AllowedFunctionTool(dispatch_reverse, is_concurrency_safe=False))
+    # P5：后台派遣收取（recon/reverse 可与其他角色并行，报告经此收取）
+    tools.append(AllowedFunctionTool(check_experts, is_read_only=True))
     mode = mission.mission_mode or (
         "authorized_pentest" if target_kind == "network" else "ctf"
     )
@@ -1351,8 +1592,11 @@ def create_orchestrator_agent(
         tools.append(AllowedFunctionTool(submit_nss_flag, is_concurrency_safe=False))
     if slab_context:
         tools.append(AllowedFunctionTool(submit_slab_flag, is_concurrency_safe=False))
+    if brain_agent is not None:
+        tools.append(AllowedFunctionTool(consult_brain, is_concurrency_safe=False))
     enabled_capabilities = [
         "recon", "attack", "hypothesis", "plan", "state", "approval", "memory",
+        "background_dispatch", "check_experts",
     ]
     if artifact_recon_agent is not None:
         enabled_capabilities.append("artifact_recon")
@@ -1365,13 +1609,15 @@ def create_orchestrator_agent(
         enabled_capabilities.append("nss_submit")
     if slab_context:
         enabled_capabilities.append("slab_submit")
+    if brain_agent is not None:
+        enabled_capabilities.append("brain_advisor")
     orchestrator_prompt = (
         ORCHESTRATOR_SYS_PROMPT
         + "\n本轮已启用职责："
         + ", ".join(enabled_capabilities)
         + "。"
     )
-    return Agent(
+    agent = Agent(
         name=ORCHESTRATOR_EXPERT,
         system_prompt=orchestrator_prompt,
         model=model,
@@ -1381,6 +1627,10 @@ def create_orchestrator_agent(
         context_config=context_config,
         state=state,
     )
+    # 主循环窥视通道：后台报告就绪时由 main 主循环注入收取提示
+    # （与 fast 模式 Captain 同机制，_fast_pending_report_hint 通用读取）
+    agent._lingshu_bg = bg_state
+    return agent
 
 # 超过 20轮自动提出窗口显示是否迭代
 

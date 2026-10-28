@@ -2742,6 +2742,14 @@ async def list_sessions(
     for s in sessions:
         s["is_live"] = s["id"] in _active_sessions
         _attach_model_metadata(s, runtime)
+        # 列表行与详情接口保持一致：把 target_info JSON 字符串解析为对象，
+        # 供前端读取 run_mode（顶栏模式徽章/列表 ⚡FAST 徽章）等字段。
+        raw_info = s.get("target_info")
+        if isinstance(raw_info, str):
+            try:
+                s["target_info"] = json.loads(raw_info)
+            except (json.JSONDecodeError, TypeError):
+                s["target_info"] = {}
     return {
         "sessions": sessions,
         "has_more": has_more,

@@ -1,2 +1,2 @@
 [permissions]
-allow = ["Bash(pip install 'agentscope[service,storage-sql,rag,vdb-milvus]==2.0.6' 2>&1 | tail -20)"]
+allow = ["Bash(pip install 'agentscope[service,storage-sql,rag,vdb-milvus]==2.0.6' 2>&1 | tail -20)", "Bash(cd /home/kali/agentscope/lingshu_agent_aicreate/Lingshu && for c in 41fdb2e a7e64b4 9f9c458 86a8948 4a22d18 bb85bbe 45c3ed9; do echo \"=== $c ===\"; git show --stat --format='%s' $c | grep -vE 'webui/dist|\\.example$' | head -20; done)"]

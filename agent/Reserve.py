@@ -196,6 +196,8 @@ async def create_reverse_agent(
     vision_roots: tuple[str | Path, ...] = (),
     enable_gdb: bool = True,
     command_workdir: str | Path | None = None,
+    mission=None,
+    store=None,
 ) -> Agent:
     async def analysis(service_info: str) -> str:
         """委托 Analysis 专家研判真实证据。
@@ -213,10 +215,23 @@ async def create_reverse_agent(
             )
         except AgentMaxIterationsError:
             return "[Analysis] 超迭代，本轮无研判输出；请基于现有证据自行推进。"
-        return text or (
+        result = text or (
             "[Analysis] 未返回文本结果（含补轮）。"
             "可再次调用本工具重试；若再次为空请基于现有证据自行研判推进。"
         )
+        # 研判入库：专家间委托的结论也进入证据链，避免 Reserve 失败后
+        # Orchestrator 看不到研判而重派重复分析；入库失败不阻断返回。
+        if mission is not None and text:
+            try:
+                mission.add_evidence(
+                    analysis_agent.name, "analysis_report", text,
+                    confidence=0.7,
+                )
+                if store is not None:
+                    store.save(mission)
+            except Exception:  # noqa: BLE001 - 入库仅为可观测性增强
+                pass
+        return result
 
     # 项目根仅用于读取 Skills 与 IDA 配置；所有 MCP/Shell 运行时文件都应
     # 写入本任务 WorkDir，绝不能写到 Lingshu 源码根目录。

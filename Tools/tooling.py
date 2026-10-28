@@ -516,21 +516,38 @@ async def run_expert_reply_with_continuation(
     try:
         result = await run_interruptible_agent_reply(agent, inputs, prefix, on_event)
     except AgentMaxIterationsError as exc:
-        # 补轮：新 reply = 新迭代预算，专家只需收口输出报告
+        # 补轮：新 reply = 新迭代预算，专家只需收口输出报告。补轮目的只是
+        # 收口，不是重新展开分析——临时把迭代预算收紧为 3，防止收口轮
+        # 又烧满一轮完整 ReAct；同 Agent 无并发 reply（busy 互斥/串行路径），
+        # 改回前不会有人读到该值。
+        original_max_iters = getattr(
+            getattr(agent, "react_config", None), "max_iters", None,
+        )
+        capped = False
+        if isinstance(original_max_iters, int) and original_max_iters > 3:
+            try:
+                agent.react_config.max_iters = 3
+                capped = True
+            except Exception:  # noqa: BLE001 - 只读型/特殊 Agent 不强制收紧
+                capped = False
         try:
-            result = await run_interruptible_agent_reply(
-                agent,
-                _msg(
-                    f"[系统] 你已达到最大推理迭代次数（{exc}）。禁止再调用任何工具，"
-                    "立即基于已完成的工具输出和分析，输出最终中文报告正文。"
-                ),
-                prefix,
-                on_event,
-            )
-        except AgentMaxIterationsError:
-            raise exc from None
-        except asyncio.CancelledError:
-            raise
+            try:
+                result = await run_interruptible_agent_reply(
+                    agent,
+                    _msg(
+                        f"[系统] 你已达到最大推理迭代次数（{exc}）。禁止再调用任何工具，"
+                        "立即基于已完成的工具输出和分析，输出最终中文报告正文。"
+                    ),
+                    prefix,
+                    on_event,
+                )
+            except AgentMaxIterationsError:
+                raise exc from None
+            except asyncio.CancelledError:
+                raise
+        finally:
+            if capped:
+                agent.react_config.max_iters = original_max_iters
     text = ""
     getter = getattr(result, "get_text_content", None)
     if callable(getter):
