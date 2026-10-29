@@ -268,5 +268,98 @@ class StartPostMissionQaTest(unittest.TestCase):
         self.assertIn("409", str(ctx_manager.exception))
 
 
+class RunPostMissionQaEndToEndTest(unittest.TestCase):
+    """回归锁定：QA runner 必须以同步方式调用会话回调。
+
+    _make_session_callback 返回同步函数；此前误写 await callback(...)
+    触发 "'NoneType' object can't be awaited"。本用例以最小 mock 跑通
+    完整 runner（含真实 callback、事件发布与落库提交路径）。
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.session_id = "qa-runner-session"
+        api_module._terminal_contexts.clear()
+        # 准备权威任务 JSON（MissionStore.for_session 读取处）
+        base_dir = Path(self.temp.name) / "sessions"
+        base_dir.mkdir(parents=True)
+        store = MissionStore.for_session(self.session_id, base_dir=base_dir)
+        self._original_sessions_dir = api_module._sessions_dir
+        api_module._sessions_dir = base_dir
+        self._submitted: list[list[dict]] = []
+
+        async def fake_submit(operations, wait=False):
+            self._submitted.append(list(operations))
+            return len(self._submitted)
+
+        def fake_queue(operations):
+            self._submitted.append(list(operations))
+            return True
+
+        def fake_fallback(operations):
+            self._submitted.append(list(operations))
+
+        self._patches = [
+            patch.object(
+                api_module, "ps",
+                SimpleNamespace(
+                    submit=fake_submit,
+                    queue_persistence_operations=fake_queue,
+                    fallback_direct_write=fake_fallback,
+                ),
+            ),
+            patch.object(api_module, "create_model", return_value=SimpleNamespace()),
+            patch.object(
+                api_module, "set_usage_context", return_value=None,
+            ),
+            patch.object(
+                api_module, "get_workspace_service",
+                return_value=SimpleNamespace(
+                    mission_dir=lambda *a: Path(self.temp.name) / "mission",
+                    workspace_dir=lambda *a: Path(self.temp.name) / "ws",
+                    get=AsyncMock(return_value=SimpleNamespace()),
+                    pin=AsyncMock(return_value=None),
+                    unpin=AsyncMock(return_value=None),
+                    close_one=AsyncMock(return_value=None),
+                ),
+            ),
+            patch.object(
+                api_module, "run_interruptible_agent_reply",
+                new=AsyncMock(return_value=SimpleNamespace(
+                    get_text_content=lambda: "Flag 由 SQL 注入获得，见证据 1。",
+                )),
+            ),
+        ]
+        self._store = store
+        self._mission = _mission()
+        self._mission.add_evidence(
+            "attack", "attack_report", "注入取得 flag{t}", confidence=0.9,
+        )
+        store.save(self._mission)
+
+    def tearDown(self) -> None:
+        for p in self._patches:
+            p.stop()
+        api_module._sessions_dir = self._original_sessions_dir
+        api_module._terminal_contexts.clear()
+        self.temp.cleanup()
+
+    def test_runner_completes_with_sync_callback_and_persists_reply(self) -> None:
+        for p in self._patches:
+            p.start()
+        asyncio.run(api_module._run_post_mission_qa(
+            self.session_id, "flag 是怎么得出的？", 1,
+        ))
+        # 回复经回调落库：message 操作（role=agent，agent_name=调度者真名）
+        flat = [op for batch in self._submitted for op in batch]
+        reply_ops = [
+            op for op in flat
+            if op.get("type") == "message" and "SQL 注入" in str(op.get("content"))
+        ]
+        self.assertTrue(reply_ops, flat)
+        self.assertEqual(reply_ops[-1]["role"], "agent")
+        self.assertIn("Alex", reply_ops[-1]["agent_name"])
+
+
 if __name__ == "__main__":
     unittest.main()

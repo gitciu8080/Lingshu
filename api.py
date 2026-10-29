@@ -2730,7 +2730,7 @@ async def _run_post_mission_qa(session_id: str, question: str, user_id: int) -> 
         store = MissionStore.for_session(session_id, base_dir=_sessions_dir)
         mission = await asyncio.to_thread(store.load)
         if mission is None:
-            await callback("error", message="任务状态文件缺失，无法进行复盘问答。")
+            callback("error", message="任务状态文件缺失，无法进行复盘问答。")
             return
 
         provider = str((session_row or {}).get("provider") or "deepseek")
@@ -2810,15 +2810,15 @@ async def _run_post_mission_qa(session_id: str, question: str, user_id: int) -> 
             except Exception:  # noqa: BLE001
                 text = ""
         if text:
-            await callback("message", content=text, agent=agent.name)
+            callback("message", content=text, agent=agent.name)
         else:
-            await callback("error", message="追问未获得回答，请调整问题后重试。")
+            callback("error", message="追问未获得回答，请调整问题后重试。")
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - 问答失败不影响会话与其余功能
         logger.exception("终态追问处理失败: %s", exc)
         try:
-            await callback("error", message=f"追问处理失败：{exc}")
+            callback("error", message=f"追问处理失败：{exc}")
         except Exception:  # noqa: BLE001
             pass
     finally:
