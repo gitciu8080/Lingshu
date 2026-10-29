@@ -589,6 +589,23 @@ export const api = {
     }
     return response.blob();
   },
+  artifacts: (id: string) =>
+    request<{
+      session_id: string;
+      artifacts: { path: string; size: number; modified_at: string }[];
+    }>(`/api/session/${encodeURIComponent(id)}/artifacts`),
+  artifactFile: async (id: string, path: string) => {
+    const response = await fetch(
+      base +
+        `/api/session/${encodeURIComponent(id)}/artifacts/file?path=${encodeURIComponent(path)}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new Error(data?.detail || `产物下载失败 (${response.status})`);
+    }
+    return response.blob();
+  },
   knowledgeStatus: () =>
     request<Record<string, unknown>>("/api/knowledge/status"),
   toolingCatalog: (refresh = false) =>
