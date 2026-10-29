@@ -2796,11 +2796,24 @@ async def _run_post_mission_qa(session_id: str, question: str, user_id: int) -> 
                 offloader=workspace,
                 state=agent_state,
             )
+        # 流式去重：run_interruptible_agent_reply 已经把回复经 text_start/
+        # delta/end 流式推送并落库；只有流式未产出任何文本时，才把最终
+        # 返回值以一条 message 兜底落库，避免同一回答出现两次。
+        streamed = {"saw_text": False}
+
+        def qa_on_event(event_type: str, **payload: Any) -> None:
+            if event_type in ("text_delta", "text_end") and str(
+                payload.get("delta") or payload.get("full_text")
+                or payload.get("content") or ""
+            ).strip():
+                streamed["saw_text"] = True
+            callback(event_type, **payload)
+
         result = await run_interruptible_agent_reply(
             agent,
             inputs,
             prefix=f"[{str(agent.name).split(' ')[0]}] ",
-            on_event=callback,
+            on_event=qa_on_event,
         )
         getter = getattr(result, "get_text_content", None)
         text = ""
@@ -2809,10 +2822,11 @@ async def _run_post_mission_qa(session_id: str, question: str, user_id: int) -> 
                 text = (getter() or "").strip()
             except Exception:  # noqa: BLE001
                 text = ""
-        if text:
-            callback("message", content=text, agent=agent.name)
-        else:
-            callback("error", message="追问未获得回答，请调整问题后重试。")
+        if not streamed["saw_text"]:
+            if text:
+                callback("message", content=text, agent=agent.name)
+            else:
+                callback("error", message="追问未获得回答，请调整问题后重试。")
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - 问答失败不影响会话与其余功能

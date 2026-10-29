@@ -345,20 +345,52 @@ class RunPostMissionQaEndToEndTest(unittest.TestCase):
         self.temp.cleanup()
 
     def test_runner_completes_with_sync_callback_and_persists_reply(self) -> None:
+        # 流式路径：mock 的 reply 经 on_event 推送 text_start/delta/end
+        #（与真实 stream_agent_reply 同形），runner 不得再补发 message 兜底。
+        async def streaming_reply(agent, inputs, prefix="", on_event=None):
+            if on_event is not None:
+                on_event("text_start", agent="Alex")
+                on_event("text_delta", delta="Flag 由 SQL 注入获得，见证据 1。", agent="Alex")
+                on_event("text_end", full_text="Flag 由 SQL 注入获得，见证据 1。", agent="Alex")
+            return SimpleNamespace(
+                get_text_content=lambda: "Flag 由 SQL 注入获得，见证据 1。",
+            )
+
+        self._patches[-1].stop()
+        self._patches[-1] = patch.object(
+            api_module, "run_interruptible_agent_reply", new=streaming_reply,
+        )
         for p in self._patches:
             p.start()
         asyncio.run(api_module._run_post_mission_qa(
             self.session_id, "flag 是怎么得出的？", 1,
         ))
-        # 回复经回调落库：message 操作（role=agent，agent_name=调度者真名）
+        flat = [op for batch in self._submitted for op in batch]
+        # 兜底 message 的判定：event_type == "message" 且含回复正文
+        #（text_start/text_end 的落库 event_type 是 text_*，不算兜底）
+        message_dups = [
+            op for op in flat
+            if op.get("type") == "message" and op.get("event_type") == "message"
+            and "SQL 注入" in str(op.get("content"))
+        ]
+        # 流式已推送（text_end 全文落库），不得再有 message 兜底 → 只出现一次
+        self.assertEqual(len(message_dups), 0, flat)
+
+    def test_runner_falls_back_to_message_when_stream_empty(self) -> None:
+        # 非流式路径：on_event 从未收到文本 → 兜底 message 必须补发一次
+        for p in self._patches:
+            p.start()
+        asyncio.run(api_module._run_post_mission_qa(
+            self.session_id, "flag 是怎么得出的？", 1,
+        ))
         flat = [op for batch in self._submitted for op in batch]
         reply_ops = [
             op for op in flat
             if op.get("type") == "message" and "SQL 注入" in str(op.get("content"))
         ]
-        self.assertTrue(reply_ops, flat)
-        self.assertEqual(reply_ops[-1]["role"], "agent")
-        self.assertIn("Alex", reply_ops[-1]["agent_name"])
+        self.assertEqual(len(reply_ops), 1)
+        self.assertEqual(reply_ops[0]["role"], "agent")
+        self.assertIn("Alex", reply_ops[0]["agent_name"])
 
 
 if __name__ == "__main__":
