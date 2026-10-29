@@ -3,7 +3,7 @@ name: docs-generator
 description: |
   Creates task-oriented technical documentation with progressive disclosure. Use when writing READMEs, API docs, architecture docs, or markdown documentation.
   Also use this skill at the END of any completed reverse engineering, penetration testing, CTF, or security analysis task to generate a formal report in the user's project directory.
-  Trigger keywords: 写报告, 写文档, 出报告, writeup, 技术文档, report, documentation.
+  Trigger keywords: 写报告, 写文档, 出报告, 技术文档, report, documentation.（CTF 提交式 writeup 由 ctf-writeup 负责，勿抢答）
 ---
 
 # Technical Documentation

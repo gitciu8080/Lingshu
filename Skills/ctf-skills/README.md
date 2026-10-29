@@ -1,5 +1,10 @@
 # ctf-skills
 
+> **灵枢入口说明**：本库题型技能（ctf-*）由系统按题目分类**直接挂载**（见
+> `agent/Attack.py` `_SKILL_PATH_MAP`），无需经 solve-challenge 分发
+> （该入口已移除，与 cyberpenda 的 ctf-sandbox-orchestrator 职责冲突）。
+> cyberpenda 族技能入口：ctf-sandbox-orchestrator；逆向族路由：reverse-skill-router。
+
 [Agent Skills](https://agentskills.io) for solving CTF challenges — web exploitation, binary pwn, crypto, reverse engineering, forensics, OSINT, and more. Works with any tool that supports the Agent Skills spec, including [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
 ## Installation

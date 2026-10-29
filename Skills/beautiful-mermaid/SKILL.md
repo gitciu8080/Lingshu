@@ -1,0 +1,1411 @@
+---
+name: beautiful-mermaid
+version: "1.1.5"
+icon: beautiful-mermaid.png
+description: 将 Mermaid 图表渲染为美观的 SVG、PNG 或 ASCII 艺术字。支持流程图、序列图、状态图、类图、ER图、XY图表（含柱状图、折线图、组合图等）等6种核心图表类型，提供17个内置主题（15个上游+2个本地扩展）和自定义主题能力，支持CSS级样式定制和交互式预览。适用于在终端、聊天界面或网页中可视化数据流、系统架构、状态机等。
+description_zh: 将 Mermaid 图表渲染为美观的 SVG、PNG 或 ASCII 艺术字
+description_en: Render Mermaid diagrams as beautiful SVG, PNG or ASCII art
+homepage: https://github.com/chouraycn/beautiful-mermaid
+author: chouray (https://github.com/chouraycn)
+keywords:
+  - mermaid
+  - diagram
+  - flowchart
+  - sequence-diagram
+  - svg
+  - ascii
+triggers:
+  - mermaid图表
+  - 渲染mermaid
+  - 流程图
+  - 序列图
+  - 状态图
+  - 类图
+  - ER图
+  - ASCII图表
+  - SVG图表
+  - PNG图表
+  - 导出mermaid
+  - 样式定制
+  - 自定义样式
+  - xychart
+  - 柱状图
+  - 折线图
+  - 数据图表
+  - 架构图
+  - 系统架构图
+  - 时序图
+  - 关系图
+  - 生成图表
+  - 图形化
+  - 可视化
+  - 画图
+  - 绘图
+  - 绘制图表
+  - 产品流程图
+  - 业务流程图
+  - 客户流程
+  - 试妆流程
+  - 购买流程
+  - 领券流程
+---
+
+# Beautiful Mermaid Skill
+
+## 安装说明
+
+**目录名要求**：skill 目录名必须为 `beautiful-mermaid`，不是 `beautiful-mermaid-main` 或其他名称。
+
+**如果目录名不对**，手动重命名：
+```bash
+mv ~/.workbuddy/skills/beautiful-mermaid-main ~/.workbuddy/skills/beautiful-mermaid
+# 或项目级
+mv 项目目录/.workbuddy/skills/beautiful-mermaid-main 项目目录/.workbuddy/skills/beautiful-mermaid
+```
+
+## 概述
+
+Beautiful Mermaid 是一个高性能的 Mermaid 图表渲染库，专为 AI 时代设计。它将 Mermaid 语法转换为美观的 SVG 图形、PNG 位图或 ASCII 艺术字，支持同步渲染、全主题定制、CSS级样式定制，零 DOM 依赖。
+
+| 说明 | 地址 |
+|------|------|
+| 本 Skill | [https://github.com/chouraycn/beautiful-mermaid](https://github.com/chouraycn/beautiful-mermaid) |
+| 上游项目 | [https://github.com/lukilabs/beautiful-mermaid](https://github.com/lukilabs/beautiful-mermaid) |
+
+## 核心能力
+
+### 1. 支持的图表类型
+
+- **流程图 (Flowchart)**：`graph TD`、`graph LR`、`graph BT`、`graph RL` 等方向
+- **序列图 (Sequence Diagram)**：参与者之间的交互
+- **状态图 (State Diagram)**：状态转换
+- **类图 (Class Diagram)**：面向对象设计
+- **实体关系图 (ER Diagram)**：数据库设计
+- **XY 图表**：条形图、折线图、组合图（`xychart-beta` 语法）
+
+### 1.1 暂不支持的图表类型（上游开发中）
+
+以下图表类型**暂不支持**，渲染会报错 `Invalid mermaid header`：
+
+| 图表类型 | 语法示例 | 状态 |
+|---------|---------|------|
+| **Mindmap（思维导图）** | `mindmap root((中心)) A B C` | 上游 Issue #59 跟踪 |
+| **Pie Chart（饼图）** | `pie title "标题" "A": 10 "B": 20` | 上游 Issue #59 跟踪 |
+| **Gantt（甘特图）** | `gantt title 项目计划 ...` | 上游 Issue #59 跟踪 |
+| **Git Graph** | `gitGraph ...` | 上游 Issue #59 跟踪 |
+| **User Journey** | `journey ...` | 上游 Issue #59 跟踪 |
+| **C4 Context** | `C4Context ...` | 计划外 |
+
+> **上游进度**：lukilabs/beautiful-mermaid Issue #59 正在开发 Mermaid v11 新图表支持。预计未来版本会添加。
+
+**临时替代方案**：如果需要这些图表类型，可以：
+1. 使用 Mermaid 官方在线编辑器（mermaid.live）导出 SVG，然后用本 skill 进行主题样式转换
+2. 将数据转换为 XY 图表（条形图/折线图）实现类似效果
+3. 等待上游支持后同步更新
+
+### 2. 输出格式
+
+- **SVG**：适用于富 UI 界面，支持透明背景和内联样式
+- **PNG**：适用于文档嵌入、高清位图输出，支持自定义尺寸和 DPI
+- **ASCII/Unicode**：适用于终端环境，支持颜色输出
+
+### 3. 主题系统
+
+- **17 个主题**：上游 15 个 + 本地扩展 2 个（orange-dark, orange-light）
+- **上游主题**：zinc、tokyo-night、catppuccin、nord、dracula、github、solarized、one-dark（共 15 个）
+- **本地扩展**：`orange-dark`（暖色暗色）、`orange-light`（暖色亮色）—— 独立维护，上游更新时不丢失
+- **完整 7 字段**：每个主题包含 `bg`、`fg`、`line`、`accent`、`muted`、`surface`、`border` 全部字段
+- **Mono 模式**：仅需提供背景色(bg)和前景色(fg)，自动推导整套配色
+- **自定义主题**：可覆盖任意元素颜色
+- **Shiki 集成**：通过 `fromShikiTheme()` 直接使用 VS Code 编辑器主题
+- **语义角色主题自适应**：每个语义角色（critical / success / danger / info / muted）内置亮色和暗色两套颜色，系统根据当前主题背景亮度自动选择，切换主题无需修改 `.mmd` 文件
+
+> **架构说明**：主题采用「上游 + 本地」分层设计。上游主题同步自 lukilabs/beautiful-mermaid 库；本地主题（orange 系）在 `styles.js` 中独立定义，通过 `{ ...UPSTREAM_THEMES, ...LOCAL_THEMES }` 合并，确保上游更新时本地扩展不会丢失。
+
+#### 主题完整对照表
+
+完整主题列表和推荐搭配请参考下方 **API 参考** 部分的 **主题对照表**。
+
+#### 主题与语义角色颜色对照
+
+语义角色颜色由系统根据主题背景亮度（感知亮度 < 128 判定为暗色主题）自动选择：
+
+| 角色 | 亮色主题（fill / stroke / text） | 暗色主题（fill / stroke / text） |
+|------|-------------------------------|-------------------------------|
+| `critical` | `#FFF7ED` / `#F97316` / `#9A3412` | `#431407` / `#F97316` / `#FDBA74` |
+| `success`  | `#F0FDF4` / `#22C55E` / `#166534` | `#052e16` / `#22C55E` / `#86EFAC` |
+| `danger`   | `#FEF2F2` / `#EF4444` / `#991B1B` | `#450a0a` / `#EF4444` / `#FCA5A5` |
+| `info`     | `#EFF6FF` / `#3B82F6` / `#1D4ED8` | `#172554` / `#3B82F6` / `#93C5FD` |
+| `muted`    | `#F4F4F5` / `#A1A1AA` / `#52525B` | `#27272A` / `#71717A` / `#A1A1AA` |
+
+---
+
+## AI 工作流程指南
+
+> 本节包含 AI 助手使用此 skill 时必须遵守的工作规则。
+
+### 任务识别规则（强制执行）
+
+#### 第0步：检测新建还是继续（每次都要执行）
+
+**检查是否有上次渲染记录**：
+- 读取 `.workbuddy/last-render.json` 文件
+- 如果文件存在且包含有效的 theme/preset，说明用户之前有渲染过
+
+**弹窗询问用户**：
+```
+您有以下选择：
+1. 继续完善 - 继承上次的主题和预设，继续优化
+2. 全新开始 - 创建全新的图表（上次的主题/预设会丢失）
+
+请选择：___
+```
+
+- **如果用户选择"继续完善"**：读取 last-render.json 中的 theme/preset，直接进入渲染步骤（跳过 Step 1 打开预览）
+- **如果用户选择"全新开始"**：执行下面的标准流程（Step 1 打开预览）
+
+### 新任务的标准流程（必须全部执行）
+
+**Step 1 — 打开预览工具（第一优先级）**
+
+首先通过 `execute_command` 工具执行 find 命令找到 skill 实际安装目录（目录名取决于 zip 文件名，不一定是 `beautiful-mermaid`）：
+
+```javascript
+// 使用 execute_command 执行 find 命令查找
+// 返回结果示例：/Users/chouray/.workbuddy/skills/beautiful-mermaid/SKILL.md
+// 取其父目录即为 SKILL_DIR
+```
+
+得到 `SKILL_DIR` 后，立即执行：
+```javascript
+// 优先从 last-render.json 读取上次的主题/预设，传递到 URL 参数
+// 这样 preview.html 会自动继承上次的样式（用户无需重新选择）
+const lastRender = readRenderState(); // 读取 .workbuddy/last-render.json
+const themeParam = lastRender ? `?theme=${lastRender.theme}&preset=${lastRender.preset}` : '';
+preview_url("file://" + SKILL_DIR + "/assets/preview.html" + themeParam)
+```
+
+- **禁止**：硬编码 `beautiful-mermaid` 作为目录名
+- 如果有 last-render.json，URL 参数会自动传递上次的主题/预设（preview.html 会优先使用 URL 参数）
+- 不要问用户任何问题，先打开 preview.html
+- 等用户在预览界面选择主题和预设
+
+**Step 2 — 记录用户选择（关键：主题必须保留到最终输出）**
+- 用户选择完主题和预设后，底部 CLI 命令栏会实时显示选择结果
+- **必须记录**用户选择的主题（如 `tokyo-night`）和预设（如 `glass`）
+- **这两个值将贯穿后续所有步骤，包括渲染命令和 rich-html.js 命令**
+
+**Step 3 — 生成 .mmd 文件**
+- 根据用户描述的业务场景，生成对应的 .mmd 文件
+- **禁止**：在生成前读取工作区现有的任何 .mmd 文件
+- **禁止**：在生成前询问"让我看看你现有的图表"
+
+**Step 4 — 执行渲染，传递 Step 2 记录的主题**
+- 使用 Step 2 记录的主题和预设执行渲染，**必须带 `--theme` 和 `--preset` 参数**
+- 输出 **SVG/PNG/ASCII**：用 `node scripts/render.js`
+- 输出 **HTML**（无论单张还是多张图表）：**必须用** `node scripts/rich-html.js`
+
+```bash
+# SVG / PNG / ASCII
+node scripts/render.js <file.mmd> -t <主题> -p <预设> -o output.svg
+
+# HTML（必须用 rich-html.js，不可用 render.js -f html 替代）
+node scripts/rich-html.js "<标题>" --diagrams <file.mmd> --theme <主题> --preset <预设> --output result.html
+```
+
+- 用 `preview_url` 打开生成的 HTML 结果（`file://` + 绝对路径）
+
+### 意图不确定时的确认机制（强制）
+
+当 AI 无法明确判断用户意图时（即用户既没有明确说"继续"，也没有明确说"新任务"，但 AI 感觉可能涉及之前的内容时），**必须主动弹出确认对话框**，不得自行猜测继续。
+
+**触发条件**：
+- 用户的请求中包含之前任务中出现的关键词（如之前的业务名称、产品名称、概念等）
+- 用户使用了指代词如"这个"、"那个"、"它"、"之前那个"
+- 用户只说了很短的话（如"换一个"、"再做一个"）
+
+**确认方式**：
+- 使用 `ask_followup_question` 工具提供选项：
+  - "继续之前的任务" → 读取并修改现有文件
+  - "全新开始一个任务" → **打开 preview.html** 让用户选择主题和预设
+
+**【强制规则】AI 在打开 preview.html 后的行为**：
+- ❌ 禁止：打开 preview.html 后继续生成代码或执行其他操作
+- ❌ 禁止：在用户选择完成前就准备下一步工作
+- ✅ 必须：明确告诉用户"请选择主题和预设，选择完成后告诉我"
+- ✅ 必须：等待用户回复"选好了"或类似表示选择完成的信息
+- ✅ 只有用户明确确认选择完成后，才能记录主题和预设，继续生成 .mmd 文件
+- ✅ **记录的主题/预设必须传递给所有后续渲染命令（包括 render.js 和 rich-html.js）**
+
+### Mermaid 语法最佳实践
+
+#### subgraph 子图语法问题处理
+
+**问题描述**：使用 `subgraph` 子图分区语法时，某些主题（特别是 `zinc-light` 的 `outline` 预设）与 subgraph 配合时，Mermaid 布局引擎在计算子图边界时容易出错，导致节点重叠或连线错乱。
+
+**解决方案**：
+1. **简化子图结构**：避免多层嵌套子图
+2. **使用明确的节点 ID 和连接**
+3. **避免使用 `zinc-light + outline` 预设处理复杂子图**
+
+#### 节点 ID 命名规范
+
+- ❌ 避免：`AA`、`BB`、`CC`、`A1`、`B2` 等简单字母组合
+- ✅ 推荐：`start_node`、`process_step`、`decision_point`、`end_result` 等描述性名称
+
+#### 主题与预设兼容性建议
+
+| 图表复杂度 | 推荐主题 | 推荐预设 | 说明 |
+|-----------|---------|---------|------|
+| **简单流程图**（无 subgraph） | 任意主题 | 任意预设 | 所有主题和预设都兼容 |
+| **中等复杂度**（1-2层 subgraph） | 除 `zinc-light` 外 | 除 `outline` 外 | `zinc-light + outline` 可能布局异常 |
+| **复杂架构图**（多层嵌套 subgraph） | `tokyo-night`、`github-dark`、`nord` | `glass`、`default` | 布局引擎最稳定 |
+| **XY图表** | 所有主题 | 所有预设 | 完全兼容 |
+
+### 暂不支持的图表类型处理规则
+
+当用户请求以下图表类型时，**必须明确告知用户暂不支持**，并提供替代方案：
+
+| 图表类型 | 替代方案 |
+|---------|---------|
+| **Mindmap（思维导图）** | 使用流程图 `graph TD` 替代，或使用 mermaid.live 导出后用本 skill 转换样式 |
+| **Pie Chart（饼图）** | 使用 XY 柱状图替代 |
+| **Gantt（甘特图）** | 使用流程图 + 状态图组合 |
+| **Git Graph** | 使用 mermaid.live |
+| **User Journey** | 使用流程图 |
+
+### 继续任务的标准流程
+
+当用户明确说以下话术时，执行继续任务流程：
+- "继续"、"接着上一个"、"在之前基础上"、"基于XX修改"、"优化这个图表"、"修改一下"
+
+**Step 1 — 读取现有文件 + 上次渲染状态**
+- 读取用户指定的 .mmd 文件
+- **读取 `.workbuddy/last-render.json` 获取上次渲染时使用的主题和预设**
+
+**Step 2 — 理解修改需求**
+- 询问或理解用户想要如何修改
+
+**Step 3 — 修改 .mmd 文件**
+- 在原有基础上进行修改
+
+**Step 4 — 重新渲染**
+- 使用 **last-render.json 中记录的 theme 和 preset** 重新渲染
+
+### AI 工作流程完整性检查点
+
+**必须完整执行以下5个步骤**：
+
+1. **Step 1 — 打开预览或读取上次状态**
+   - ✅ 验证：确保有明确的主题和预设值
+
+2. **Step 2 — 记录用户选择**
+   - ✅ 验证：主题和预设值不为空
+
+3. **Step 3 — 生成/修改 .mmd 文件**
+   - ✅ 验证：.mmd 文件已成功创建或修改
+
+4. **Step 4 — 必须执行渲染命令**
+   - ✅ 验证：渲染命令执行成功，输出文件存在
+
+5. **Step 5 — 必须预览结果**
+   - ✅ 验证：`preview_url` 工具被调用
+
+### AI 预览工作规则
+
+任何涉及渲染 Mermaid 图表的请求，**无论用户是否已指定主题/预设**，都必须先调用 `preview_url` 打开预览工具。
+
+**打开方式**（唯一合法方式）：
+- 工具：`preview_url`
+- URL：`file://` + skill目录 + `assets/preview.html`
+- **AI 自动检测规则**：本 SKILL.md 所在目录即为 skill 根目录
+
+**唯一例外**：用户明确说"直接渲染，不用预览"或"跳过预览"时，才可跳过 preview 步骤。
+
+### 4. 样式定制系统
+
+- **节点样式**：圆角、边框、阴影、填充色
+- **连线样式**：粗细、颜色、箭头、圆角
+- **字体排版**：支持多种字体和响应式适配
+- **5种预设风格**：默认、现代简约、渐变、线条轮廓、毛玻璃
+- **语义角色着色**：通过 `# @roles` 注释声明节点角色，告别写死 HEX 颜色，主题切换时颜色自动跟随
+
+## 使用方法
+
+### 安装
+
+```bash
+npm install beautiful-mermaid
+# 或
+bun add beautiful-mermaid
+```
+
+### 交互式预览工具
+
+提供可视化的样式定制界面，**AI 必须用 `preview_url` 工具直接以文件路径打开**（在 IDE 内置浏览器中显示，无需服务器）：
+
+```javascript
+// 第1步：用 execute_command 执行 find 命令查找 beautiful-mermaid 的 SKILL.md
+// find ~/.workbuddy/skills -name "SKILL.md" -exec grep -l "name: beautiful-mermaid" {} \;
+// 结果示例：/Users/chouray/.workbuddy/skills/beautiful-mermaid/SKILL.md
+// 取其父目录作为 SKILL_DIR
+
+// 第2步：读取 .workbuddy/last-render.json（如果有）
+// 第3步：用实际路径打开（传递 theme/preset 参数以便继承上次样式）
+const lastRender = loadRenderState(); // 读取 .workbuddy/last-render.json
+const themeParam = lastRender ? `?theme=${lastRender.theme}&preset=${lastRender.preset}` : '';
+preview_url("file://" + SKILL_DIR + "/assets/preview.html" + themeParam)
+```
+
+> ⚠️ **重要**：skill 安装目录名 = zip 文件名（不含 .zip），**不一定**是 `beautiful-mermaid`。若用户将 zip 改名，安装目录也会变。**每次使用前必须用 `execute_command` 的 find 命令动态检测实际目录名**，不得硬编码。
+
+❌ 禁止使用 `open`/`start` 命令或启动任何 HTTP 服务器。
+
+**预览工具功能**：
+
+- **17 主题即时预览**：点击切换，实时查看效果
+- **5 种样式预设**：default / modern / gradient / outline / glass
+- **自定义颜色**：背景色、前景色、连线颜色
+- **6 种核心图表类型**：Flowchart、Sequence、State、Class、ER、XY Chart
+- **XY 图表细分类型**：Bar（柱状图）、Line（折线图）、Combo（组合图）、H-Bar（横向柱状图）
+- **实时代码编辑器**：支持自定义 Mermaid 代码，Tab 缩进，400ms debounce 自动渲染
+- **状态持久化**：所有选择（主题、预设、颜色、自定义代码）自动保存到 localStorage
+- **一键导出**：复制代码或导出带完整样式的 SVG 文件
+
+### 丰富结果 HTML（多图表聚合展示）
+
+当用户需要将**多张 Mermaid 图表**整合为一个专业的展示页面时，使用 `scripts/rich-html.js`。
+
+生成的 HTML 包含：
+- 顶部 **Badge**（显示主题和预设）+ 标题 + 副标题
+- **标签页导航**（每张图表对应一个 Tab，支持 ① ② ③ … 编号）
+- 每个 Tab 内的**信息卡片网格**（图表类型 + 自定义元数据）
+- **卡片式 SVG 图表区**（带图标、标题、描述）
+- 底部页脚（渲染信息）
+- **完整继承用户选择的主题风格**（背景、前景、强调色等）
+
+#### 基本用法
+
+```bash
+# 方式一：直接调用脚本
+node scripts/rich-html.js "标题" \
+  --diagrams file1.mmd file2.mmd file3.mmd \
+  --theme tokyo-night --preset glass \
+  --subtitle "副标题" \
+  --output result.html
+
+# 方式二：通过 npm script（等效）
+npm run rich-html -- "标题" \
+  --diagrams file1.mmd file2.mmd file3.mmd \
+  --theme tokyo-night --preset glass \
+  --subtitle "副标题" \
+  --output result.html
+```
+
+#### 批量模式（渲染整个目录）
+
+```bash
+node scripts/rich-html.js "示例集" \
+  --batch assets/examples \
+  --theme dracula --preset gradient \
+  --output examples-report.html
+
+# npm 方式
+npm run rich-html -- "示例集" --batch assets/examples --theme dracula --preset gradient --output examples-report.html
+```
+
+#### 为图表添加元数据（可选）
+
+在 `.mmd` 文件中通过注释声明元数据，显示在信息卡片中：
+
+```
+# @title  用户下单完整流程
+# @desc   从进入活动页到订单完成的端到端链路，含限流、库存扣减、异步建单
+# @icon   🛒
+# @type   Flowchart
+# @meta   关键节点:8 个|覆盖阶段:全链路|主题:Tokyo Night|限流策略:Redis Lua
+graph TD
+    A[用户进入秒杀页] --> B{限流检查}
+    ...
+```
+
+元数据字段说明：
+- `@title`：Tab 名称和卡片标题
+- `@desc`：卡片描述（小字，显示在标题下方）
+- `@icon`：图标 emoji（默认根据图表类型自动推断）
+- `@type`：图表类型说明（自动推断，可手动覆盖）
+- `@meta`：信息卡片内容，格式 `标签:值|标签:值`（最多 4 组）
+- `@roles`：**语义角色声明**（见下方说明）
+
+#### 语义角色 @roles（节点颜色语义化）
+
+用 `# @roles` 注释声明哪些节点属于哪种语义角色。渲染时自动根据主题亮暗选择对应颜色套装，**无需写死 HEX 颜色**。
+
+**用法格式：**
+```
+# @roles  角色名:节点ID,节点ID  角色名:节点ID  ...
+```
+
+**可用角色（5 个）：**
+| 角色 | 含义 | 亮色主题 | 暗色主题 |
+|------|------|---------|---------|
+| `critical` | 关键节点 / 触发入口 | 橙底 `#FFF7ED`，橙边 `#F97316` | 深橙底 `#431407`，橙边 `#F97316` |
+| `success`  | 成功 / 完成 / 正向结果 | 绿底 `#F0FDF4`，绿边 `#22C55E` | 深绿底 `#052e16`，绿边 `#22C55E` |
+| `danger`   | 失败 / 降级 / 风险   | 红底 `#FEF2F2`，红边 `#EF4444` | 深红底 `#450a0a`，红边 `#EF4444` |
+| `info`     | 重要处理 / 关键步骤  | 蓝底 `#EFF6FF`，蓝边 `#3B82F6` | 深蓝底 `#172554`，蓝边 `#3B82F6` |
+| `muted`    | 次要 / 跳过 / 禁用  | 灰底 `#F4F4F5`，灰边 `#A1A1AA` | 深灰底 `#27272A`，灰边 `#71717A` |
+
+**完整示例：**
+```mermaid
+# @title  秒杀预加载流程
+# @roles  critical:A  info:E,F  success:K,G  danger:H  muted:Z
+flowchart TD
+    A[距离开始 < 5分钟] --> B{用户在线?}
+    B -->|是| E[资源分类预加载]
+    B -->|否| Z[等待用户上线]
+    E --> F[CDN 预热]
+    F --> G[标记准备就绪]
+    G --> K[进入等待期]
+    F --> H{预热失败?}
+    H -->|是| Z
+    H -->|否| K
+```
+
+渲染后：
+- 节点 A 显示为橙色系（关键入口）
+- 节点 E、F 显示为蓝色系（重要处理步骤）
+- 节点 K、G 显示为绿色系（成功结果）
+- 节点 H 显示为红色系（失败路径）
+- 节点 Z 显示为灰色系（次要路径）
+- 切换到深色主题时，所有颜色自动切换到对应的深色版本
+
+**图例**：当 `.mmd` 中有 `@roles` 声明时，Rich HTML 卡片底部会自动出现「节点角色」图例条，列出所有角色及对应节点 ID。
+
+#### 主题继承规则
+
+生成的 HTML **完整继承**渲染时指定的主题颜色：
+- 页面背景 = 主题 `bg`
+- 卡片/导航背景 = 主题 `surface`
+- 边框 = 主题 `border`
+- 正文文字 = 主题 `fg`
+- 次要文字 = 主题 `muted`
+- 强调色（Badge、Tab 激活、数值） = 主题 `accent`
+- SVG 图表背景 = 比 `bg` 略深/浅，自动计算
+
+> **AI 工作规则**：生成 rich-html 后，必须用 `preview_url` 工具打开生成的 HTML 文件，让用户直观查看效果。
+
+### SVG 渲染
+
+```typescript
+import { renderMermaidSVG, THEMES } from 'beautiful-mermaid';
+
+// 使用内置主题
+const svg = renderMermaidSVG(`graph TD
+    A[开始] --> B{判断}
+    B -->|是| C[执行操作]
+    B -->|否| D[结束]`, THEMES['tokyo-night']);
+
+// 使用自定义主题
+const customSvg = renderMermaidSVG(diagramCode, {
+  bg: '#1a1b26',
+  fg: '#a9b1d6',
+  accent: '#7aa2f7',
+  transparent: true,
+});
+
+// 使用 CSS 变量（支持实时主题切换）
+const cssVarSvg = renderMermaidSVG(diagramCode, {
+  bg: 'var(--background)',
+  fg: 'var(--foreground)',
+  transparent: true,
+});
+
+// 异步渲染（适用于 async 上下文）
+const asyncSvg = await renderMermaidSVGAsync(diagramCode, THEMES['dracula']);
+```
+
+### ASCII 渲染
+
+```typescript
+import { renderMermaidASCII } from 'beautiful-mermaid';
+
+// Unicode 模式（默认）
+const unicode = renderMermaidASCII(`graph LR
+A --> B --> C`);
+
+// 纯 ASCII 模式
+const ascii = renderMermaidASCII(`graph LR
+A --> B --> C`, { useAscii: true });
+
+// 带颜色输出
+const colored = renderMermaidASCII(`graph LR
+A --> B --> C`, { colorMode: 'truecolor' });
+
+// 输出示例：
+// ┌───┐     ┌───┐     ┌───┐
+// │   │     │   │     │   │
+// │ A │────►│ B │────►│ C │
+// │   │     │   │     │   │
+// └───┘     └───┘     └───┘
+```
+
+### React 集成
+
+```typescript
+import { renderMermaidSVG } from 'beautiful-mermaid';
+
+function MermaidDiagram({ code }: { code: string }) {
+  const { svg, error } = React.useMemo(() => {
+    try {
+      return {
+        svg: renderMermaidSVG(code, {
+          bg: 'var(--background)',
+          fg: 'var(--foreground)',
+          transparent: true,
+        }),
+        error: null,
+      };
+    } catch (err) {
+      return { svg: null, error: err as Error };
+    }
+  }, [code]);
+
+  if (error) return <pre>{error.message}</pre>;
+  return <div dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+```
+
+### XY 图表（柱状图、折线图、组合图）
+
+```typescript
+import { renderMermaidSVG } from 'beautiful-mermaid';
+
+// 柱状图
+const bar = renderMermaidSVG(`xychart-beta
+    title "Monthly Revenue"
+    x-axis [Jan, Feb, Mar, Apr, May, Jun]
+    y-axis "Revenue ($K)" 0 --> 500
+    bar [180, 250, 310, 280, 350, 420]`, THEMES['tokyo-night']);
+
+// 折线图
+const line = renderMermaidSVG(`xychart-beta
+    title "User Growth"
+    x-axis [Jan, Feb, Mar, Apr, May, Jun]
+    line [1200, 1800, 2500, 3100, 3800, 4500]`, THEMES['github-dark']);
+
+// 组合图（柱状 + 折线）
+const combo = renderMermaidSVG(`xychart-beta
+    title "Sales with Trend"
+    x-axis [Jan, Feb, Mar, Apr, May, Jun]
+    bar [300, 380, 280, 450, 350, 520]
+    line [300, 330, 320, 353, 352, 395]`, THEMES['dracula']);
+
+// 交互式 XY 图表（鼠标悬停显示 tooltip）
+const interactive = renderMermaidSVG(chartCode, {
+  bg: '#1a1b26',
+  fg: '#a9b1d6',
+  accent: '#7aa2f7',
+  interactive: true,
+});
+```
+
+### Shiki 主题集成
+
+```typescript
+import { getSingletonHighlighter } from 'shiki';
+import { renderMermaidSVG, fromShikiTheme } from 'beautiful-mermaid';
+
+// 使用任意 VS Code 主题
+const highlighter = await getSingletonHighlighter({
+  themes: ['vitesse-dark', 'rose-pine', 'material-theme-darker']
+});
+
+const colors = fromShikiTheme(highlighter.getTheme('vitesse-dark'));
+const svg = renderMermaidSVG(code, colors);
+```
+
+## CLI 命令行工具
+
+### 基本用法
+
+```bash
+# 渲染文件为 SVG
+node scripts/render.js diagram.mmd -o output.svg
+
+# 使用指定主题
+node scripts/render.js diagram.mmd -t dracula -o output.svg
+
+# 渲染为 PNG (高清位图)
+node scripts/render.js diagram.mmd -f png -o output.png
+
+# PNG 自定义尺寸 (宽度)
+node scripts/render.js diagram.mmd -f png -w 2400 -o output.png
+
+# PNG 高清缩放 (2x)
+node scripts/render.js diagram.mmd -f png -s 2 -o output.png
+
+# PNG 高 DPI (印刷质量)
+node scripts/render.js diagram.mmd -f png --dpi 300 -o output.png
+
+# 渲染为 ASCII (终端)
+node scripts/render.js diagram.mmd -f ascii
+
+# 渲染为内嵌 SVG 的 HTML 页面
+node scripts/render.js diagram.mmd -f html -t tokyo-night -p glass -o output.html
+
+# XY 图表启用交互式 tooltip
+node scripts/render.js chart.mmd --interactive -o chart.svg
+
+# 直接传入代码 (注意：Mermaid 代码中换行用 \n)
+node scripts/render.js -c "graph TD\nA --> B" -o output.svg
+```
+
+### 命令行参数
+
+| 参数 | 说明 |
+|------|------|
+| `--format`, `-f` | 输出格式: `svg` (默认) \| `ascii` \| `png` \| `html` |
+| `--theme`, `-t` | 主题名称: tokyo-night, dracula, nord 等 17 个，或自定义 JSON |
+| `--output`, `-o` | 输出文件路径（批量模式为输出目录） |
+| `--code`, `-c` | 直接传入 Mermaid 代码 |
+| `--bg` | 背景色 (如: #f7f7fa) |
+| `--fg` | 前景色/文字颜色 (如: #27272a) |
+| `--line` | 连线颜色 (如: #6b7280) |
+| `--preset`, `-p` | 样式预设: `default` \| `modern` \| `gradient` \| `outline` \| `glass`（可与 --theme 联用） |
+| `--width`, `-w` | PNG 输出宽度 (默认: 1200px) |
+| `--scale`, `-s` | PNG 缩放比例 (默认: 1, 范围: 0.5-4) |
+| `--dpi` | PNG 输出 DPI (默认: 144, 范围: 72-600) |
+| `--interactive` | 启用交互式 tooltip (仅 XY 图表) |
+| `--color-mode` | ASCII 颜色模式: `none` \| `auto` \| `ansi16` \| `ansi256` \| `truecolor` \| `html` |
+| `--batch` | 批量模式: 渲染指定目录下所有 .mmd 文件 |
+| `--list-themes` | 列出所有可用主题及其推荐预设搭配 |
+| `--help`, `-h` | 显示帮助信息 |
+
+### PNG 输出说明
+
+PNG 格式适用于文档嵌入、PPT 演示等场景：
+
+- **默认宽度**：1200px
+- **默认 DPI**：144（适合屏幕显示）
+- **缩放范围**：0.5x - 4x (通过 `-s` 参数)
+- **DPI 范围**：72 - 600 (通过 `--dpi` 参数，72=屏幕，300=印刷)
+- **透明背景**：PNG 输出支持透明背景
+- **高质量**：默认 100% 质量输出
+
+```bash
+# 屏幕显示 (默认 144 DPI)
+node scripts/render.js diagram.mmd -f png -o screen.png
+
+# 印刷质量 (300 DPI)
+node scripts/render.js diagram.mmd -f png --dpi 300 -o print.png
+
+# 2K 高清 (2400px)
+node scripts/render.js diagram.mmd -f png -w 2400 -o hd.png
+
+# 4K 超清 (4800px)
+node scripts/render.js diagram.mmd -f png -s 4 -o 4k.png
+
+# 图标尺寸 (600px)
+node scripts/render.js diagram.mmd -f png -w 600 -o icon.png
+```
+
+### 样式预设
+
+通过 `--preset` 参数使用与 `preview.html` 一致的样式预设。**推荐与 `--theme` 联用**：
+
+```bash
+# ✅ 推荐：主题 + 预设自由组合
+node scripts/render.js diagram.mmd -t tokyo-night -p glass -o output.svg
+node scripts/render.js diagram.mmd -t dracula -p gradient -o output.svg
+node scripts/render.js diagram.mmd -t catppuccin-mocha -p glass -f png -o output.png
+
+# 也支持自定义颜色 + 预设
+node scripts/render.js diagram.mmd --bg '#f7f7fa' --fg '#27272a' --line '#6b7280' -p modern -o output.svg
+node scripts/render.js diagram.mmd --bg '#f7f7fa' --fg '#27272a' --line '#6b7280' -p gradient -o output.svg
+node scripts/render.js diagram.mmd --bg '#f7f7fa' --fg '#27272a' --line '#6b7280' -p outline -o output.svg
+node scripts/render.js diagram.mmd --bg '#f7f7fa' --fg '#27272a' --line '#6b7280' -p glass -f png -o output.png
+```
+
+**可用预设对比：**
+
+| 预设 | 圆角 | 边框 | 阴影 | 场景 |
+|------|------|------|------|------|
+| default | 8px | 2px | 中等 | 通用场景 |
+| modern | 16px | 1px | 柔和 | 现代产品 UI |
+| gradient | 12px | 0px | 彩色 | 视觉展示 |
+| outline | 4px | 2px | 无 | 技术文档 |
+| glass | 12px | 1px | 高模糊 | 深色叠加 |
+
+### 批量渲染
+
+使用 `--batch` 参数可以一次渲染目录下所有 `.mmd` 文件：
+
+```bash
+# 批量渲染为 SVG（输出到源目录）
+node scripts/render.js --batch ./diagrams -t dracula
+
+# 批量渲染为 PNG，输出到指定目录
+node scripts/render.js --batch ./diagrams -f png -t tokyo-night -o ./output
+
+# 批量渲染为 ASCII
+node scripts/render.js --batch ./examples -f ascii --color-mode ansi256
+```
+
+批量模式会遍历指定目录下的所有 `.mmd` 文件，自动按文件名生成对应的 `.svg`/`.png`/`.txt` 输出文件。
+
+### ASCII 颜色模式
+
+通过 `--color-mode` 参数控制 ASCII 渲染的着色方式：
+
+```bash
+# 无颜色（纯 ASCII）
+node scripts/render.js diagram.mmd -f ascii --color-mode none
+
+# 256 色模式（兼容更多终端）
+node scripts/render.js diagram.mmd -f ascii --color-mode ansi256
+
+# HTML 模式（可在网页中展示）
+node scripts/render.js diagram.mmd -f ascii --color-mode html
+```
+
+## 主题配置
+
+### `--theme` 与 `--preset` 联用（推荐）
+
+`--preset` 现在可以与 `--theme` 联用，不再互斥：
+
+```bash
+# ✅ 推荐：--theme + --preset 自由组合
+node scripts/render.js diagram.mmd -t dracula -p gradient -o out.svg
+node scripts/render.js diagram.mmd -t tokyo-night -p glass -o out.svg
+node scripts/render.js diagram.mmd -t github-light -p modern -o out.svg
+
+# ✅ 仍然支持：--preset 配合 --bg/--fg
+node scripts/render.js diagram.mmd --bg '#f7f7fa' --fg '#27272a' -p modern -o out.svg
+
+# ✅ 自动推荐预设：只指定 --theme，自动使用该主题的推荐预设
+node scripts/render.js diagram.mmd -t dracula -o out.svg
+# 输出: ✓ SVG 已保存: out.svg + preset:gradient  (dracula 推荐 gradient)
+```
+
+### 查看所有主题
+
+```bash
+# 列出所有主题及其推荐预设
+node scripts/render.js --list-themes
+
+# 输出示例:
+# ● 暗色主题 (Dark):
+#   tokyo-night               → 推荐预设: glass
+#   dracula                   → 推荐预设: gradient
+#   ...
+# ● 亮色主题 (Light):
+#   github-light              → 推荐预设: default
+#   ...
+```
+
+### 参数优先级
+
+1. `--bg` + `--fg` → 自定义基础配色（line/accent/muted 自动推导）
+2. `--theme` 名称 → 从内置 17 主题取完整 7 字段配色
+3. `--theme` JSON → 直接使用 JSON 对象（缺省字段自动补全）
+4. `--preset` → 应用形状预设（与任何颜色来源都可以搭配）
+5. 自动推荐预设 → 不传 `--preset` 时，自动使用主题推荐的预设
+
+### CSS 样式注入原理
+
+样式预设通过 **CSS 变量覆盖** 实现：
+
+1. beautiful-mermaid 库使用 CSS 变量：`var(--_node-fill)`、`var(--_line)`
+2. render.js 在 SVG `<svg>` 标签后注入 `<style>` 标签
+3. 通过 `!important` 覆盖 CSS 变量和元素属性
+
+```css
+/* 注入的 CSS 结构 */
+svg {
+  --_text: #27272a !important;
+  --_line: #6b7280 !important;
+  --_node-fill: #f7f7fa !important;
+}
+
+rect { rx: 16px !important; }  /* 圆角 */
+path { stroke-width: 1.5px !important; }  /* 线宽 */
+```
+
+### Mono 主题（最简单）
+
+```typescript
+const monoTheme = {
+  bg: '#0f0f0f',  // 背景色
+  fg: '#e0e0e0',  // 前景色
+};
+```
+
+### 丰富主题
+
+```typescript
+const richTheme = {
+  bg: '#0f0f0f',      // 背景色
+  fg: '#e0e0e0',      // 前景色
+  accent: '#ff6b6b',  // 箭头/高亮色
+  muted: '#666666',   // 次要文字/标签
+  surface: '#1a1a1a', // 节点填充色
+  border: '#333333',  // 边框色
+};
+```
+
+## 风格选择 → 生成 → 管理 工作流
+
+### 推荐工作流（Playground → CLI → 管理）
+
+> ⚠️ **强制规则**：Step 1 不可跳过。即使用户已指定主题和预设，AI 也必须先打开 Playground 让用户在 preview.html 中确认效果，再执行 Step 2 渲染。唯一例外：用户明确说"跳过预览"。
+
+**Step 1 — 在 Playground 中确认风格（强制）**
+
+AI 先通过 `search_file` 工具找到实际安装目录，再用 `preview_url` 工具打开（传递 last-render.json 中的 theme/preset 以便继承）：
+```javascript
+const lastRender = loadRenderState();
+const themeParam = lastRender ? `?theme=${lastRender.theme}&preset=${lastRender.preset}` : '';
+preview_url("file://" + SKILL_DIR + "/assets/preview.html" + themeParam)
+```
+用户在页面中选择主题和预设后，底部会实时显示 CLI 命令栏：
+
+```
+node scripts/render.js input.mmd -t dracula -p gradient -o output-dracula-gradient.svg
+```
+
+**Step 2 — 将选定风格传递给生成**
+
+Playground 提供三种传递方式：
+
+| 按钮 | 内容 | 用途 |
+|------|------|------|
+| **CLI 命令栏（点击）** | `node scripts/render.js ... -t <theme> -p <preset>` | 直接在终端粘贴执行 |
+| **Copy Config** | JSON（含 theme、preset、颜色对象、CLI命令） | AI / 脚本读取，参数化批量生成 |
+| **Copy Code** | `renderMermaidSVG(code, THEMES['...'])` | 嵌入 JS/TS 代码 |
+
+**Step 3 — 统一管理生成的文件**
+
+- **Download SVG**：文件名自动为 `mermaid-{theme}-{preset}.svg`，方便按风格整理
+- **Export HTML**：生成包含图表 + 主题配色 + CLI 命令的独立 HTML，可直接分享或存档
+
+**Step 4（可选）— 多图表丰富展示 HTML**
+
+当用户有**多张 Mermaid 图表**需要整合展示时（如系统设计文档、架构评审、技术报告），使用 `scripts/rich-html.js`，生成带标签页导航和信息卡片的专业展示页面：
+
+```bash
+# 使用 Step 1 中用户确认的主题和预设
+node scripts/rich-html.js "报告标题" \
+  --diagrams file1.mmd file2.mmd file3.mmd \
+  --theme <用户确认的主题> --preset <用户确认的预设> \
+  --subtitle "副标题" \
+  --output result.html
+```
+
+生成后**必须**用 `preview_url` 打开结果 HTML，让用户预览效果。
+
+> **工作流关键点**：rich-html.js 不需要单独指定颜色，只需传入 Step 1 中用户已在 preview.html 中确认的 `--theme` 和 `--preset`，所有颜色自动继承。
+
+---
+
+## 多图表丰富展示 HTML 规范
+
+> 当用户要求将**多张图表整合为报告/文档/展示页面**时，**必须使用 `scripts/rich-html.js`**，不要手动拼接 HTML。
+
+### 触发场景
+
+- 用户要求将图表输出为 **HTML 文件**（无论单张还是多张）
+- 用户说「生成一个报告」「做一份文档」「整合成页面」「汇总展示」
+- 用户要求类似「像参考文件那样的丰富展示」
+
+### 生成命令（直接执行，无需用户确认）
+
+```bash
+# 方式一：直接调用脚本
+node scripts/rich-html.js "<标题>" \
+  --diagrams <file1.mmd> [file2.mmd ...] \
+  --theme <主题> --preset <预设> \
+  --subtitle "<副标题>" \
+  --output <输出路径.html>
+
+# 方式二：npm script（等效，-- 之后的参数透传）
+npm run rich-html -- "<标题>" \
+  --diagrams <file1.mmd> [file2.mmd ...] \
+  --theme <主题> --preset <预设> \
+  --output <输出路径.html>
+```
+
+### 主题风格继承（核心规则）
+
+**rich-html.js 自动从 `--theme` 和 `--preset` 继承所有颜色**，AI **无需手动指定**任何颜色值：
+
+| 页面元素 | 来源 |
+|---------|------|
+| 页面背景 | 主题 `bg` |
+| 卡片/导航背景 | 主题 `surface` |
+| 边框线 | 主题 `border` |
+| 正文文字 | 主题 `fg` |
+| 次要文字/标签 | 主题 `muted` |
+| 强调色（Badge/激活Tab/数值） | 主题 `accent` |
+| SVG 图表背景 | `bg` 自动加深/变浅 |
+
+### .mmd 文件中添加元数据（可选但推荐）
+
+为了让信息卡片显示有意义的内容，在图表文件中添加注释元数据：
+
+```
+# @title  用户下单完整流程
+# @desc   从进入活动页到订单完成的端到端链路
+# @icon   🛒
+# @meta   关键节点:8 个|覆盖阶段:全链路|主题:Tokyo Night|限流:Redis Lua
+graph TD
+    ...
+```
+
+### 生成后的展示规则
+
+生成 HTML 后，**必须**调用 `preview_url` 工具打开文件，让用户直接在 IDE 内预览：
+
+```
+preview_url("file:///绝对路径/result.html")
+```
+
+---
+
+## ⚠️ AI 生成独立 HTML 文件的强制规范
+
+> ⛔ **本节是 rich-html.js 内部实现参考文档，AI 工作流中禁止使用。**
+> AI 必须调用 `scripts/rich-html.js` 生成 HTML，**不得绕过脚本手动拼接 HTML**。
+> 详见上方「多图表丰富展示 HTML 规范」章节（从第 911 行开始）。
+
+> 当用户要求将 Mermaid 图表输出为**独立 HTML 文件**时，AI **必须**严格按照本节模板生成，否则会出现样式串扰、SVG 裁剪、线条无颜色等问题。
+
+### SVG 内联进 HTML 的三件事（缺一不可）
+
+**① 每个 SVG 必须有唯一 id**
+用 `injectStylesToSVG(svg, theme, preset, 'diagram-flow')` 第 4 个参数传入不同 id。
+内联多个 SVG 时，每张图用不同 id（如 `diagram-flow`、`diagram-seq`、`diagram-3`）。
+
+**② 内部 `<style>` 选择器必须用 id 作用域化**
+`generateCSSStyles` 会自动完成（传入 svgId 参数后），输出：
+```css
+#diagram-flow { --_line: #A1A1AA; }   /* ✅ 有 id 作用域，不会污染其他 SVG */
+#diagram-flow text { ... }
+#diagram-flow path { ... }
+```
+而非裸选择器：
+```css
+svg { --_line: #A1A1AA; }   /* ❌ 内联进 HTML 后会影响所有 SVG */
+text { ... }
+path { ... }
+```
+
+**③ 外层 CSS 必须同时设 `max-width: 100%` + `height: auto`**
+`max-width: 100%` 单独不够。当容器宽度窄于 SVG 的硬编码宽度时，SVG 宽度被压缩，
+但若不设 `height: auto`，高度不跟随缩放，图表下半部分被截断。
+
+```css
+/* ✅ 正确：两个属性必须同时设置 */
+.diagram-wrap svg {
+  display: block;
+  max-width: 100%;
+  height: auto;   /* CRITICAL: 缺少这行会导致窄屏下图表被垂直截断 */
+  width: auto;
+}
+```
+
+### 独立打开 SVG 时线条无颜色的修复
+
+SVG 内部元素使用 `stroke="var(--_line)"`，该变量通过 CSS 从 `--line` 映射而来。
+`injectStylesToSVG` 会自动在 `<svg style="...">` 属性中内联所有 `--_xxx` 精确颜色值，
+确保在 Figma、Inkscape、系统预览等独立软件中打开时线条也有正确颜色。
+
+核心修复：
+```html
+<!-- 修复后的 SVG 开标签（--_line 等变量直接内联在 style 属性中） -->
+<svg id="diagram-flow"
+     style="background:#FFF;--_line:#A1A1AA;--_arrow:#A1A1AA;--_text:#27272A;..."
+     width="229" height="606" viewBox="0 0 229 606">
+```
+
+### 核心禁忌（必须遵守）
+
+1. **绝对不要给容器 div 设置 `overflow: hidden`** — 这会截断超出容器的 SVG 内容
+2. **绝对不要设置固定的容器高度（如 `height: 400px`）再嵌入 SVG** — SVG 会被截断
+3. **多张 SVG 内联时，每张必须有不同 id** — 否则 `#id` 作用域化后还是会互相影响
+4. **容器 CSS 必须同时写 `max-width:100%` 和 `height:auto`** — 只写前者会在窄屏裁剪
+
+### 标准代码（Node.js 生成 HTML 时使用）
+
+```js
+import { renderMermaidSVG } from 'beautiful-mermaid';
+import { injectStylesToSVG, resolveTheme } from './scripts/styles.js';
+
+const theme = resolveTheme('zinc-light');
+
+// 多张图时：每张图传入不同的 svgId（第 4 个参数）
+const flowSVG = injectStylesToSVG(renderMermaidSVG(flowCode, theme), theme, 'default', 'diagram-flow');
+const seqSVG  = injectStylesToSVG(renderMermaidSVG(seqCode,  theme), theme, 'default', 'diagram-seq');
+```
+
+```html
+<style>
+  /* ✅ 正确：max-width + height:auto 同时设置 */
+  .diagram-wrap svg {
+    display: block;
+    max-width: 100%;
+    height: auto;   /* CRITICAL：防止窄屏垂直裁剪 */
+    width: auto;
+  }
+</style>
+<div class="diagram-wrap">
+  <!-- flowSVG 已含 id="diagram-flow" 和作用域化 <style> -->
+</div>
+```
+
+### SVG 嵌入前的检查清单
+
+AI 在将 SVG 写入 HTML 前，必须确认：
+
+- [ ] `<svg id="diagram-xxx">` — 每张图有**唯一 id**，多图时 id 不重复
+- [ ] `<svg width="XXX" height="YYY">` — `width` 和 `height` 都是**具体像素数值**，不是 `100%`
+- [ ] `<svg viewBox="0 0 XXX YYY">` — `viewBox` 存在
+- [ ] SVG 内 `<style>` 选择器以 `#id` 开头（如 `#diagram-flow {`），无裸 `svg {` 或 `text {`
+- [ ] SVG `style` 属性含 `--_line`、`--_arrow` 等直接颜色值
+- [ ] 外层 CSS 同时设 `max-width: 100%` + `height: auto`
+
+### 常见错误对比
+
+```html
+<!-- ❌ 错误1：裸选择器污染（两张图样式互串） -->
+<style>svg { --_line: red; } text { color: blue; }</style>
+
+<!-- ❌ 错误2：只设 max-width，窄屏下图表被竖向截断 -->
+.diagram-wrap svg { max-width: 100%; }  /* 缺 height:auto */
+
+<!-- ❌ 错误3：固定容器高度截断图表 -->
+<div style="height:400px; overflow:hidden">
+  <svg width="800" height="600" ...>...</svg>
+</div>
+
+<!-- ✅ 正确：id 作用域 + max-width/height:auto + 具体宽高 -->
+.diagram-wrap svg { display:block; max-width:100%; height:auto; width:auto; }
+<svg id="diagram-flow" width="229" height="606" viewBox="0 0 229 606" style="--_line:#A1A1AA;...">
+  <style>#diagram-flow { --_line: #A1A1AA; } #diagram-flow path { stroke:#A1A1AA; }</style>
+</svg>
+```
+
+---
+
+### AI 使用 Copy Config 的格式
+
+当 AI 拿到「Copy Config」的内容后，可直接解析并用于批量渲染：
+
+```json
+{
+  "theme": "dracula",
+  "preset": "gradient",
+  "themeColors": { "bg": "#282a36", "fg": "#f8f8f2", ... },
+  "cliCommand": "node scripts/render.js input.mmd -t dracula -p gradient -o output-dracula-gradient.svg",
+  "npmUsage": "renderMermaidSVG(code, THEMES['dracula'])"
+}
+```
+
+AI 工作流示例：
+1. 用户在 Playground 选好 `tokyo-night + glass`，点「Copy Config」
+2. 将 JSON 粘贴给 AI
+3. AI 解析 `theme` / `preset`，用 `-t tokyo-night -p glass` 批量渲染所有 `.mmd` 文件
+
+---
+
+## 常见用例
+
+### 1. 系统架构图
+
+```mermaid
+graph TB
+    User[用户] -->|HTTP| Nginx[Nginx]
+    Nginx -->|反向代理| App[应用服务器]
+    App -->|查询| Redis[(Redis缓存)]
+    App -->|读写| MySQL[(MySQL数据库)]
+```
+
+### 2. 流程图
+
+```mermaid
+graph TD
+    Start([开始]) --> Input[输入数据]
+    Input --> Validate{验证?}
+    Validate -->|通过| Process[处理数据]
+    Validate -->|失败| Error[显示错误]
+    Process --> Save[保存结果]
+    Save --> End([结束])
+    Error --> Input
+```
+
+### 3. 序列图
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant A as API网关
+    participant S as 服务
+    participant D as 数据库
+
+    U->>A: 发送请求
+    A->>S: 转发请求
+    S->>D: 查询数据
+    D-->>S: 返回数据
+    S-->>A: 处理结果
+    A-->>U: 响应
+```
+
+### 4. 状态图
+
+```mermaid
+stateDiagram-v2
+    [*] --> 待处理
+    待处理 --> 处理中: 开始处理
+    处理中 --> 已完成: 处理成功
+    处理中 --> 失败: 处理失败
+    失败 --> 待处理: 重试
+    已完成 --> [*]
+```
+
+### 5. 类图
+
+```mermaid
+classDiagram
+    class Animal {
+        +String name
+        +int age
+        +makeSound()
+    }
+    class Dog {
+        +bark()
+    }
+    class Cat {
+        +meow()
+    }
+    Animal <|-- Dog
+    Animal <|-- Cat
+```
+
+### 6. ER 图
+
+```mermaid
+erDiagram
+    CUSTOMER ||--o{ ORDER : places
+    ORDER ||--|{ LINE-ITEM : contains
+    PRODUCT ||--o{ LINE-ITEM : "is in"
+    CUSTOMER {
+        int id PK
+        string name
+        string email
+    }
+    ORDER {
+        int id PK
+        date created
+        string status
+    }
+```
+
+### 7. XY 图表 — 柱状图
+
+```mermaid
+xychart-beta
+    title "Monthly Revenue"
+    x-axis [Jan, Feb, Mar, Apr, May, Jun]
+    y-axis "Revenue ($K)" 0 --> 500
+    bar [180, 250, 310, 280, 350, 420]
+```
+
+### 8. XY 图表 — 折线图
+
+```mermaid
+xychart-beta
+    title "User Growth"
+    x-axis [Jan, Feb, Mar, Apr, May, Jun]
+    line [1200, 1800, 2500, 3100, 3800, 4500]
+```
+
+### 9. XY 图表 — 组合图
+
+```mermaid
+xychart-beta
+    title "Sales with Trend"
+    x-axis [Jan, Feb, Mar, Apr, May, Jun]
+    bar [300, 380, 280, 450, 350, 520]
+    line [300, 330, 320, 353, 352, 395]
+```
+
+## API 参考
+
+### `renderMermaidSVG(text, options?): string`
+
+将 Mermaid 代码渲染为 SVG 字符串。**同步**，可直接用于 React `useMemo()`。
+
+**参数：**
+- `text: string` - Mermaid 图表代码
+- `options?: RenderOptions` - 渲染选项
+
+**RenderOptions：**
+
+| 选项 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bg` | `string` | `#FFFFFF` | 背景色（支持 CSS 变量） |
+| `fg` | `string` | `#27272A` | 前景色（支持 CSS 变量） |
+| `line` | `string?` | — | 连线颜色 |
+| `accent` | `string?` | — | 箭头、高亮色 |
+| `muted` | `string?` | — | 次要文字、标签 |
+| `surface` | `string?` | — | 节点填充色 |
+| `border` | `string?` | — | 节点边框色 |
+| `font` | `string` | `Inter` | 字体族 |
+| `transparent` | `boolean` | `false` | 透明背景 |
+| `padding` | `number` | `40` | 画布内边距 (px) |
+| `nodeSpacing` | `number` | `24` | 同级节点水平间距 |
+| `layerSpacing` | `number` | `40` | 层间垂直间距 |
+| `componentSpacing` | `number` | `24` | 断开组件间距 |
+| `interactive` | `boolean` | `false` | XY 图表悬浮 tooltip |
+
+**返回：** `string` - SVG 字符串
+
+### `renderMermaidSVGAsync(text, options?): Promise<string>`
+
+异步版本，相同输出。适用于 async 上下文。
+
+### `renderMermaidASCII(text, options?): string`
+
+将 Mermaid 代码渲染为 ASCII/Unicode 艺术字。**同步**。
+
+**参数：**
+- `text: string` - Mermaid 图表代码
+- `options?: AsciiRenderOptions` - 渲染选项
+
+**AsciiRenderOptions：**
+
+| 选项 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `useAscii` | `boolean` | `false` | 使用 ASCII（true）或 Unicode（false） |
+| `paddingX` | `number` | `5` | 节点水平间距 |
+| `paddingY` | `number` | `5` | 节点垂直间距 |
+| `boxBorderPadding` | `number` | `1` | 节点框内边距 |
+| `colorMode` | `string` | `'auto'` | `'none'` \| `'auto'` \| `'ansi16'` \| `'ansi256'` \| `'truecolor'` \| `'html'` |
+| `theme` | `Partial<AsciiTheme>` | — | 自定义 ASCII 颜色 |
+
+**返回：** `string` - ASCII 字符串
+
+### `parseMermaid(text): MermaidGraph`
+
+将 Mermaid 代码解析为结构化图对象（用于自定义处理）。支持流程图和状态图。
+
+### `fromShikiTheme(theme): DiagramColors`
+
+从 Shiki 主题对象提取图表颜色。映射关系：
+
+| 编辑器颜色 | 图表角色 |
+|-----------|---------|
+| `editor.background` | `bg` |
+| `editor.foreground` | `fg` |
+| `editorLineNumber.foreground` | `line` |
+| `focusBorder` / keyword token | `accent` |
+| comment token | `muted` |
+| `editor.selectionBackground` | `surface` |
+| `editorWidget.border` | `border` |
+
+### `THEMES`
+
+内置主题集合，每个主题包含完整 7 字段（`bg`/`fg`/`line`/`accent`/`muted`/`surface`/`border`）。完整色值见"核心能力 → 主题完整对照表"。
+
+| 主题名 | 类型 | accent 色 | 推荐预设 |
+|--------|------|-----------|---------|
+| `tokyo-night` | 暗色 | `#7aa2f7` | glass |
+| `tokyo-night-storm` | 暗色 | `#7aa2f7` | modern |
+| `tokyo-night-light` | 亮色 | `#34548a` | modern |
+| `dracula` | 暗色 | `#bd93f9` | gradient |
+| `github-dark` | 暗色 | `#4493f8` | modern |
+| `github-light` | 亮色 | `#0969da` | default |
+| `nord` | 暗色 | `#88c0d0` | modern |
+| `nord-light` | 亮色 | `#5e81ac` | outline |
+| `one-dark` | 暗色 | `#c678dd` | gradient |
+| `catppuccin-mocha` | 暗色 | `#cba6f7` | glass |
+| `catppuccin-latte` | 亮色 | `#8839ef` | modern |
+| `solarized-dark` | 暗色 | `#268bd2` | modern |
+| `solarized-light` | 亮色 | `#268bd2` | outline |
+| `zinc-light` | 亮色 | `#3F3F46` | outline |
+| `zinc-dark` | 暗色 | `#A1A1AA` | glass |
+| `orange-dark` | 暗色 | `#f97316` | glass |
+| `orange-light` | 亮色 | `#ea580c` | modern |
+
+### `DEFAULTS`
+
+默认颜色值（完整 7 字段）：
+
+```typescript
+{
+  bg:      '#FFFFFF',  // 画布背景
+  fg:      '#27272A',  // 主文字
+  line:    '#A1A1AA',  // 连线
+  accent:  '#3F3F46',  // 强调色
+  muted:   '#71717A',  // 次要色
+  surface: '#F4F4F5',  // 节点填充次级色
+  border:  '#D4D4D8',  // 节点边框
+}
+```
+
+## 代码级样式预设
+
+```javascript
+// 导入样式预设模块
+import { STYLE_PRESETS, generateCSSStyles, injectStylesToSVG } from './scripts/styles.js';
+
+import { renderMermaidSVG } from 'beautiful-mermaid';
+
+// 1. 渲染基础 SVG
+const svg = renderMermaidSVG(code, {
+  bg: '#f7f7fa',
+  fg: '#27272a',
+  line: '#6b7280'
+});
+
+// 2. 应用样式预设 (Node.js 环境)
+const styledSvg = injectStylesToSVG(svg, {
+  bg: '#f7f7fa',
+  fg: '#27272a',
+  line: '#6b7280'
+}, 'modern');
+
+// 3. 获取 CSS 字符串（可选）
+const css = generateCSSStyles({ bg: '#f7f7fa', fg: '#27272a' }, 'modern');
+console.log(css);
+```
+
+## 安全注意事项
+
+1. **SVG 输出安全**：SVG 内容包含用户控制的文本，直接嵌入 HTML 可能导致 XSS。不要将不可信来源提供的 Mermaid 代码直接渲染后嵌入网页。如果 SVG 需要在浏览器中展示，建议对输出进行 sanitize 处理（如使用 DOMPurify）。
+2. **输入信任边界**：本 Skill 设计用于渲染开发者自己编写的 .mmd 文件。如果渲染来自用户输入的 Mermaid 代码，请务必进行输入校验和输出清理。
+3. **依赖安全**：定期检查 `npm audit` 输出，及时升级 beautiful-mermaid 至包含安全修复的最新版本。
+
+## 注意事项
+
+1. **同步渲染**：`renderMermaidSVG` 和 `renderMermaidASCII` 都是同步函数，可直接用于 React 的 `useMemo`
+2. **异步渲染**：`renderMermaidSVGAsync` 返回 `Promise<string>`，适用于 async 上下文
+3. **无 DOM 依赖**：可在 Node.js、浏览器、终端等多环境运行
+4. **错误处理**：建议用 try-catch 包裹渲染调用
+5. **性能**：100+ 图表可在 500ms 内完成渲染
+6. **`--preset` 与 `--theme` 可以自由联用**：`-t dracula -p gradient` 完全合法；不传 `--preset` 时自动使用该主题的推荐预设
+7. **CSS 注入顺序**：注入的 `<style>` 标签位于 `<svg>` 之后，使用 `!important` 确保覆盖
+8. **CSS 变量主题切换**：传递 `var(--xxx)` 作为颜色值，SVG 可实时响应主题变化
+9. **XY 图表**：使用 `xychart-beta` 语法，`accent` 颜色驱动图表系列配色
+10. **linkStyle 支持**：流程图和状态图支持 `linkStyle` 内联边样式覆盖
+11. **语义角色 vs. style/classDef**：不要用 `style A fill:#xxx` 或 `classDef xxx fill:#yyy` 写死颜色——这些硬编码颜色会被 `cleanHardcodedColors()` 清除。应改用 `# @roles` 声明语义角色，颜色由主题自动决定
+12. **语义角色作用域**：`@roles` 仅对当前 `.mmd` 文件生效；节点 ID 区分大小写，须与 Mermaid 代码里的 ID 完全一致
+13. **SVG 输出的语义角色**：`render.js` 生成的 SVG 也支持语义角色着色（含 PNG 导出）；`rich-html.js` 额外显示图例条
+
+## 相关链接
+
+- [在线演示](https://agents.craft.do/mermaid)
+- [Mermaid 语法文档](https://mermaid.js.org/)
+- [GitHub 仓库](https://github.com/lukilabs/beautiful-mermaid)
+- [Issue #79: Mermaid config 支持](https://github.com/lukilabs/beautiful-mermaid/issues/79) — 上游计划中，待实现后将跟进
+- [Issue #59: 更多图表类型](https://github.com/lukilabs/beautiful-mermaid/issues/59) — Mindmap、Pie、Gantt 等类型待上游支持后同步
