@@ -14,12 +14,14 @@ import {
   Database,
   FlaskConical,
   FileDown,
+  FileSearch,
   FileText,
   GitBranch,
   LogOut,
   LoaderCircle,
   Moon,
   Network,
+  PackageOpen,
   Plus,
   Upload,
   Search,
@@ -206,6 +208,23 @@ type Mission = Record<string, unknown> & {
   model_name?: string;
   hypotheses?: HypothesisView[];
   active_hypothesis?: HypothesisView | null;
+  evidence_records?: EvidenceView[];
+};
+type EvidenceView = {
+  id?: string;
+  source?: string;
+  kind?: string;
+  summary?: string;
+  artifact?: string;
+  category?: string;
+  confidence?: number;
+  created_at?: string;
+  verification?: {
+    status?: string;
+    replay_command?: string;
+    verified_at?: string;
+    detail?: string;
+  } | null;
 };
 type HypothesisView = {
   id?: string;
@@ -295,6 +314,13 @@ const AGENTS: Record<
     role: "证据分析",
   },
   Attack: { label: "验证专家", expert: "Mike - WEB渗透专家", icon: Swords, tone: "attack", role: "授权验证" },
+  Blade: {
+    label: "快速指挥官",
+    expert: "Blade - 快速行动指挥官",
+    icon: Zap,
+    tone: "orchestrator",
+    role: "快速调度",
+  },
   Orchestrator: {
     label: "行动指挥",
     expert: "Alex - 行动指挥专家",
@@ -328,6 +354,7 @@ const AGENTS: Record<
 
 const EXPERT_HINTS: [RegExp, keyof typeof AGENTS][] = [
   [/Sophia|战略规划/, "Brain"],
+  [/Blade|快速行动指挥官/, "Blade"],
   [/Alex|行动指挥/, "Orchestrator"],
   [/Mia|对话总结|报告专家/, "Summary"],
   [/Ethan|网络侦察/, "Recon"],
@@ -1997,6 +2024,164 @@ function PlanPanel({ mission, phase }: { mission: Mission; phase?: string }) {
   );
 }
 
+function formatArtifactSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function EvidenceBadge({ status }: { status?: string }) {
+  const label =
+    status === "verified" ? "已验证" : status === "failed" ? "验证失败" : "未验证";
+  return <span className={`evidence-badge ${status || "unverified"}`}>{label}</span>;
+}
+
+function EvidencePanel({
+  mission,
+  onDownload,
+}: {
+  mission: Mission;
+  onDownload: (path: string) => void;
+}) {
+  const records = mission.evidence_records || [];
+  const [visible, setVisible] = useState(30);
+  useEffect(() => {
+    setVisible(30);
+  }, [records.length]);
+  const shown = records.slice(-visible);
+  return (
+    <section className="side-section evidence-section">
+      <div className="side-title">
+        <FileSearch size={15} />
+        证据记录 <span>{records.length}</span>
+      </div>
+      <div className="evidence-list">
+        {shown.length ? (
+          shown.map((item) => (
+            <details className="evidence-line" key={item.id}>
+              <summary>
+                <span className="evidence-id">{item.id}</span>
+                <b title={item.source}>{item.source || "未知来源"}</b>
+                <EvidenceBadge status={item.verification?.status} />
+              </summary>
+              <div className="evidence-detail">
+                <p className="evidence-summary">{item.summary}</p>
+                <small>
+                  类型 {item.kind || "—"} · 置信度{" "}
+                  {Math.round((item.confidence || 0) * 100)}%
+                  {item.created_at ? ` · ${item.created_at}` : ""}
+                </small>
+                {item.verification?.replay_command && (
+                  <pre className="evidence-verify">
+                    {item.verification.replay_command}
+                  </pre>
+                )}
+                {item.verification?.detail && (
+                  <small>验证结论：{item.verification.detail}</small>
+                )}
+                {item.artifact && (
+                  <button
+                    type="button"
+                    className="artifact-chip"
+                    onClick={() => item.artifact && onDownload(item.artifact)}
+                    title={`下载 ${item.artifact}`}
+                  >
+                    <FileDown size={12} />
+                    {item.artifact.split("/").pop() || item.artifact}
+                  </button>
+                )}
+              </div>
+            </details>
+          ))
+        ) : (
+          <p className="empty-note">暂无证据记录；侦察与攻击报告登记后在此显示。</p>
+        )}
+      </div>
+      {records.length > shown.length && (
+        <button
+          type="button"
+          className="quiet-button full"
+          onClick={() => setVisible((v) => v + 60)}
+        >
+          加载更早的 {records.length - shown.length} 条证据
+        </button>
+      )}
+    </section>
+  );
+}
+
+function ArtifactPanel({
+  sessionId,
+  onDownload,
+}: {
+  sessionId: string;
+  onDownload: (path: string) => void;
+}) {
+  const [items, setItems] = useState<
+    { path: string; size: number; modified_at: string }[]
+  >([]);
+  const [loading, setLoading] = useState(false);
+  const load = useCallback(async (id: string) => {
+    if (!id) return;
+    setLoading(true);
+    try {
+      const result = await api.artifacts(id);
+      setItems(result.artifacts || []);
+    } catch {
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    setItems([]);
+    void load(sessionId);
+  }, [sessionId, load]);
+  const shown = items.slice(-80).reverse();
+  return (
+    <section className="side-section artifact-section">
+      <div className="side-title">
+        <PackageOpen size={15} />
+        任务产物 <span>{items.length}</span>
+        <button
+          type="button"
+          className="side-refresh"
+          onClick={() => void load(sessionId)}
+          title="刷新产物列表"
+          aria-label="刷新产物列表"
+        >
+          <RefreshCw size={12} className={loading ? "spin" : ""} />
+        </button>
+      </div>
+      <div className="artifact-list">
+        {shown.length ? (
+          shown.map((item) => (
+            <button
+              type="button"
+              className="artifact-row"
+              key={item.path}
+              onClick={() => onDownload(item.path)}
+              title={`下载 ${item.path}`}
+            >
+              <b>{item.path.split("/").pop()}</b>
+              <small>{item.path}</small>
+              <em>{formatArtifactSize(item.size)}</em>
+            </button>
+          ))
+        ) : (
+          <p className="empty-note">暂无产物文件；工具输出与截图落盘后在此显示。</p>
+        )}
+      </div>
+      {items.length > shown.length && (
+        <small className="artifact-more">
+          仅显示最近 {shown.length} 个，共 {items.length} 个文件
+        </small>
+      )}
+    </section>
+  );
+}
+
 const TOOL_STATUS_LABELS: Record<string, string> = {
   available: "可用",
   missing: "缺失",
@@ -2503,6 +2688,8 @@ function ConsoleApp() {
     [newMissionSignal, setNewMissionSignal] = useState(0);
   const feedRef = useRef<HTMLElement>(null);
   const autoScroll = useRef(true);
+  // target_info 触发的证据重取节流（≥8s 一次）
+  const lastEvidenceFetchRef = useRef(0);
   const autoScrollEnabledRef = useRef(autoScrollEnabled);
   const sessionsRef = useRef<Session[]>([]);
   const eventsRef = useRef<Event[]>([]);
@@ -2525,6 +2712,15 @@ function ConsoleApp() {
   // active 在 render 阶段已经变化、清空 effect 尚未运行时，也绝不能渲染
   // 上一个会话的仓库。sessionId 是 EventStore 的硬隔离边界。
   const events = eventsForSession(eventStore, active);
+  // 智能体活动面板：当前发言者 = 最后一个非系统/非操作员事件的作者。
+  // 流式 delta 折叠更新尾部 item，因此专家一开始流式输出即翻转亮灯。
+  const currentSpeaker = (() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const key = agentOf(events[i]).agentKey;
+      if (key && key !== "system" && key !== "user") return key;
+    }
+    return "";
+  })();
   const toolEvents = eventStore.sessionId === active ? eventStore.toolItems : [];
   const phase = String(detail.phase || current?.phase || "");
   // 会话列表过滤结果按 (sessions, search) 记忆化：事件高频到达时避免每次
@@ -2872,8 +3068,31 @@ function ConsoleApp() {
           if (
             event.type === "target_info" ||
             event.event_type === "target_info"
-          )
+          ) {
             setDetail((v) => ({ ...v, ...payload }));
+            // 证据记录随任务推进增长但无独立 SSE 事件：借 target_info
+            // （每次证据登记附近都会推送）做节流重取，让证据/产物面板实时。
+            const now = Date.now();
+            if (
+              activeSessionRef.current === sessionId &&
+              now - lastEvidenceFetchRef.current > 8000
+            ) {
+              lastEvidenceFetchRef.current = now;
+              void api
+                .session(sessionId)
+                .then((r) => {
+                  if (
+                    !controller.signal.aborted &&
+                    activeSessionRef.current === sessionId
+                  )
+                    setDetail({
+                      ...r,
+                      ...((r.mission_state as Mission) || {}),
+                    });
+                })
+                .catch(() => {});
+            }
+          }
         }
       } catch (err) {
         if (
@@ -3063,6 +3282,20 @@ function ConsoleApp() {
       setRerunOpen(true);
     } catch (err) {
       toast.error(`无法读取原任务配置：${String(err)}`);
+    }
+  };
+  const downloadArtifact = async (path: string) => {
+    if (!active) return;
+    try {
+      const blob = await api.artifactFile(active, path);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = path.split("/").pop() || "artifact";
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast.error(`产物下载失败：${String(err)}`);
     }
   };
   const downloadReport = async () => {
@@ -3526,12 +3759,15 @@ function ConsoleApp() {
               <div className="agent-roster">
                 {Object.entries(AGENTS)
                   .filter(([n]) => !["system", "user"].includes(n))
-                  .slice(0, 6)
                   .map(([name, a]) => {
                     const Icon = a.icon;
-                    const activeAgent = events
-                      .slice(-8)
-                      .some((e) => agentOf(e).agentKey === name);
+                    // 当前发言者 = 最后一个非系统事件（含流式 delta 折叠项）的作者。
+                    // 对话切换角色即刻翻转，替代旧"最近 8 条窗口"的混合亮灯。
+                    const activeAgent =
+                      name === currentSpeaker &&
+                      !["completed", "failed", "cancelled", "aborted"].includes(
+                        String(phase || ""),
+                      );
                     return (
                       <div key={name} className={activeAgent ? "working" : ""}>
                         <span className={a.tone}>
@@ -3547,6 +3783,8 @@ function ConsoleApp() {
                   })}
               </div>
             </section>
+            <EvidencePanel mission={detail} onDownload={downloadArtifact} />
+            <ArtifactPanel sessionId={active} onDownload={downloadArtifact} />
             <ToolHistoryPanel events={toolEvents} />
             <PlanPanel mission={detail} phase={phase} />
           </div>
