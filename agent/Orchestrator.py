@@ -14,7 +14,12 @@ from Tools.AgenticMemory import (
     extract_lessons,
     save_mission,
 )
-from core.TaskState import MissionState, MissionStore, Phase
+from core.TaskState import (
+    _ALLOWED_TRANSITIONS,
+    MissionState,
+    MissionStore,
+    Phase,
+)
 from Tools.fingerprint import (
     compute_action_fingerprint,
     error_type,
@@ -40,6 +45,7 @@ from agent.experts import ORCHESTRATOR_EXPERT
 from agent.categorize import (
     CategoryDecision,
     evaluate_reclassification,
+    extract_iocs,
     extract_recon_signals,
     extract_verify_block,
     verify_output_matches,
@@ -56,6 +62,43 @@ _EXPLOITATION_KEYWORDS = (
 )
 # 后渗透阶段触发词：objective 命中且当前处于 EXPLOITATION 时迁入 POST_EXPLOITATION。
 _POST_EXPLOITATION_TRIGGERS = ("flag", "post", "提权", "后渗透", "横向")
+
+# IR 阶段推进判词（incident_response 专属；由 dispatch 报告/目标文本命中）
+_IR_CONTAINMENT_TRIGGERS = ("遏制", "containment", "隔离", "断网", "封禁", "封堵")
+_IR_ERADICATION_TRIGGERS = ("根除", "eradication", "清除后门", "清除恶意", "删除持久化")
+_IR_RECOVERY_TRIGGERS = ("恢复", "recovery", "加固", "复查", "复测", "确认无残留")
+
+_IR_PHASES = {
+    Phase.IR_IDENTIFICATION, Phase.IR_CONTAINMENT,
+    Phase.IR_ERADICATION, Phase.IR_RECOVERY,
+}
+
+
+def ir_completion_gate(mission: MissionState, success: bool) -> str | None:
+    """IR 收尾闸门：success=True 需 ≥3 步时间线 + ≥1 条 IOC 事实。
+
+    机序化判据（杜绝 LLM 自评放水）；返回 None 表示放行，否则返回
+    拒绝文案（complete_mission 原样回给 Orchestrator）。
+    """
+    if not success or mission.mission_mode != "incident_response":
+        return None
+    has_ioc = any(
+        str(fact.category or "") == "ioc" for fact in mission.facts)
+    timeline_steps = len(mission.attack_chain or [])
+    if timeline_steps >= 3 and has_ioc:
+        return None
+    missing = []
+    if timeline_steps < 3:
+        missing.append(
+            f"事件时间线仅 {timeline_steps} 步（需 ≥3：入口→动作→影响）")
+    if not has_ioc:
+        missing.append("尚无 IOC 事实（需在报告中给出外部 IP/域名/样本哈希）")
+    return (
+        "[IR 判据未满足] 应急响应任务以成功收尾需要：\n- "
+        + "\n- ".join(missing)
+        + "\n请继续补全研判（可再派专家分析日志/样本），"
+        "或改用 success=false 记录未完成结论。"
+    )
 
 # 报告回灌指挥官上下文的字符上限：全文已按原顺序登记 Evidence/findings，
 # 超限只回灌截断版，指挥官需要细节时经 view_mission_state 按需查看。
@@ -246,6 +289,7 @@ def create_orchestrator_agent(
         # 也允许回补；远程利用仍由 Attack 的能力闸门控制。
         if mission.phase not in {
             Phase.RECON, Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION,
+            *_IR_PHASES,
         }:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Recon"
         route = str(route or "auto").strip().lower()
@@ -412,7 +456,9 @@ def create_orchestrator_agent(
         msg = _check_steering()
         if msg is not None:
             return msg
-        if mission.phase not in {Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION}:
+        if mission.phase not in {
+            Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION, *_IR_PHASES,
+        }:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Attack"
         mode = mission.mission_mode or (
             "authorized_pentest"
@@ -505,11 +551,27 @@ def create_orchestrator_agent(
                 "hypothesis_id": hypothesis_id,
             },
         )
-        if exploitation and mission.phase == Phase.ANALYSIS:
-            mission.transition(Phase.EXPLOITATION, f"开始执行: {objective}")
-        if any(word in lower or word in objective for word in _POST_EXPLOITATION_TRIGGERS):
-            if mission.phase == Phase.EXPLOITATION:
-                mission.transition(Phase.POST_EXPLOITATION, f"开始执行: {objective}")
+        if mission.mission_mode == "incident_response":
+            # IR 阶段推进：研判→遏制→根除→恢复，按判词就近推进（转移表
+            # 保证合法性：新阶段不在合法目标集时 transition 抛错，逐级尝试）
+            combined = f"{lower} {objective}"
+            targets: list[tuple[Phase, str]] = []
+            if any(w in combined for w in _IR_CONTAINMENT_TRIGGERS):
+                targets.append((Phase.IR_CONTAINMENT, "进入遏制评估"))
+            if any(w in combined for w in _IR_ERADICATION_TRIGGERS):
+                targets.append((Phase.IR_ERADICATION, "进入根除验证"))
+            if any(w in combined for w in _IR_RECOVERY_TRIGGERS):
+                targets.append((Phase.IR_RECOVERY, "进入恢复确认"))
+            for target_phase, label in targets:
+                if target_phase in _ALLOWED_TRANSITIONS.get(mission.phase, set()):
+                    mission.transition(target_phase, f"{label}: {objective}")
+                    break
+        else:
+            if exploitation and mission.phase == Phase.ANALYSIS:
+                mission.transition(Phase.EXPLOITATION, f"开始执行: {objective}")
+            if any(word in lower or word in objective for word in _POST_EXPLOITATION_TRIGGERS):
+                if mission.phase == Phase.EXPLOITATION:
+                    mission.transition(Phase.POST_EXPLOITATION, f"开始执行: {objective}")
         mission.record("Orchestrator", "dispatch_attack", objective=objective)
         store.checkpoint(mission, "attack_dispatch_before")
         store.save(mission)
@@ -615,6 +677,18 @@ def create_orchestrator_agent(
             category=str((mission.category_decision or {}).get("primary") or ""),
             confidence=0.8,
         )
+        # 应急响应：从报告确定性提取 IOC（外部 IP/域名/哈希）为独立事实
+        if mission.mission_mode == "incident_response":
+            iocs = extract_iocs(report)
+            for ioc in iocs[:10]:
+                mission.add_fact(
+                    f"IOC[{ioc['type']}]: {ioc['value']}",
+                    attack_agent.name, [evidence.id],
+                    category="ioc", confidence=0.75,
+                )
+            if iocs:
+                mission.record("Orchestrator", "iocs_extracted",
+                               count=len(iocs[:10]))
         # 验证闭环：报告携带 ```verify``` PoC 块时登记待重放验证
         verify_block = extract_verify_block(report)
         if verify_block is not None and evidence.verification is None:
@@ -679,7 +753,9 @@ def create_orchestrator_agent(
         msg = _check_steering()
         if msg is not None:
             return msg
-        if mission.phase not in {Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION}:
+        if mission.phase not in {
+            Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION, *_IR_PHASES,
+        }:
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Reserve"
         lower = objective.lower()
         attempt = mission.begin_attempt(
@@ -1421,6 +1497,10 @@ def create_orchestrator_agent(
         """
         if mission.phase in {Phase.COMPLETED, Phase.FAILED}:
             return "[拒绝] 任务已经结束"
+        # 应急响应 success 闸门（机序化判据，详见 ir_completion_gate）
+        gate_message = ir_completion_gate(mission, success)
+        if gate_message is not None:
+            return gate_message
         # 验证闭环：终态迁移前独立重放已登记 PoC（不阻断收尾）
         try:
             verification_note = await _verify_findings()

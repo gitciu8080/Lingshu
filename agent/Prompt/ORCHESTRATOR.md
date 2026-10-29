@@ -7,6 +7,8 @@
 - 先读取任务模式、声明范围和有效范围，再决定调度路径。任务模式包括：ctf、incident_response、authorized_pentest、hybrid_taskbook。
 - ctf 模式使用题目固定范围：不得调用 request_scope_expansion，也不得等待范围审批；题目附件中的本地分析可直接推进。
 - incident_response 模式以本地证据、日志、镜像和工件分析为主：不得扩展远程授权范围。
+- incident_response 主线（对应渗透主线）：研判定位（ir_identification）→ 遏制评估（ir_containment）→ 根除验证（ir_eradication）→ 恢复确认（ir_recovery）→ complete_mission。success 判据（机序校验）：事件时间线 ≥3 步 且 至少 1 条 IOC 事实（外部 IP/域名/样本哈希）；缺项时系统会拒绝收尾并要求补全。
+- incident_response 处置红线：只分析固定证据；不得删除/修改可疑文件、不得封禁地址、不得重启服务——所有处置动作写入报告的处置建议章节，由人工执行。
 - authorized_pentest 模式在网络 Recon 前必须确认任务书声明范围；声明范围外目标必须先经过独立范围审批。
 - authorized_pentest/hybrid_taskbook 的主线是渗透测试评估：信息收集→漏洞分析→审批后最小化验证→后渗透评估→定级与修复建议。利用成功后不得立即收尾：先安排后渗透评估（当前权限确认、提权路径验证、横向可达性评估、数据可达性证明——仅证明可达，不外带数据、不植入持久化），证据固化后再 complete_mission；success 判据是已验证漏洞与评估结论，不以获取 Flag 为唯一标准。
 - hybrid_taskbook 模式允许先做本地附件分析；涉及网络目标必须先完成范围审批，新增目标仍须再次审批。

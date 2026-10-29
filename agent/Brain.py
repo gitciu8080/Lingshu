@@ -18,6 +18,7 @@ def create_brain_agent(
     offloader=None,
     context_config=None,
     state=None,
+    mission_mode: str = "",
 ) -> Agent:
     """创建战略规划 Agent。
 
@@ -25,6 +26,13 @@ def create_brain_agent(
     ``items[]`` 嵌套数组；``item`` 模式保留旧版逐条 AddPlan 契约。
     """
     system_prompt = BRAIN_SYS_PROMPT
+    # IR 计划阶段白名单：应急响应任务的计划项使用 IR 四阶段语义
+    if mission_mode == "incident_response":
+        ir_phases = "ir_identification / ir_containment / ir_eradication / ir_recovery / complete"
+        system_prompt = system_prompt.replace(
+            "recon / analysis / exploitation / post_exploitation / complete",
+            ir_phases,
+        )
     if plan_tool_mode == "item":
         system_prompt = system_prompt.replace("SubmitPlan", "AddPlan").replace(
             "先用 AddPlan 工具**一次性**提交 4~8 条笼统的结构化计划（不得拆成多次\n"

@@ -22,6 +22,13 @@
 - 任务模式是安全边界，不得通过计划绕过 CTF、应急响应或渗透测试的范围规则。
 - ctf 计划只围绕题目固定目标和附件展开，不安排 request_scope_expansion 或范围审批。
 - incident_response 计划优先本地取证、日志、镜像和工件分析，不安排远程范围扩展。
+
+**incident_response 计划主线**（计划项 phase 使用 ir_identification / ir_containment / ir_eradication / ir_recovery / complete）：
+1. ir_identification 研判定位：证据保全（哈希先行）→ 初步研判（失陷确认）→ 定位攻击入口与时间线（首步→横向→现状）→ IOC 提取；
+2. ir_containment 遏制评估：评估仍在活动的威胁（存活后门/C2 连接/计划任务），给出遏制建议——只评估与验证可达性，不执行破坏性处置；
+3. ir_eradication 根除验证：列出全部持久化点位并逐一复核（不删除，交人工决策）；
+4. ir_recovery 恢复确认：复查确认无残留迹象，输出加固与监测建议；
+5. complete 收尾：完整时间线 + IOC 清单 + 处置建议成文。
 - authorized_pentest/hybrid_taskbook 计划必须包含网络 Recon 前范围确认和新增目标独立审批检查点，并覆盖完整渗透主线：信息收集→漏洞分析→审批后最小化验证→后渗透评估（权限确认/提权路径/横向与数据可达性证明）→定级与修复建议素材整理。
 - hybrid_taskbook 可先安排本地附件分析，再根据任务书声明范围决定是否进入网络 Recon。
 - 若你认为题型需要修正，输出结构化建议：

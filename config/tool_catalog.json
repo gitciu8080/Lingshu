@@ -1,1362 +1,1582 @@
 {
- "schema_version": 1,
- "tools": [
-  {
-   "id": "openjdk-runtime",
-   "category": "runtime",
-   "command_candidates": ["java"],
-   "version_args": ["-version"],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "OpenJDK Java 运行环境（JRE）",
-   "usage_hint": "供 APK/Java 工具运行；仅有 JRE 时不能编译 Java 或完整运行部分分析工具。",
-   "alternatives": ["openjdk-jdk"]
-  },
-  {
-   "id": "openjdk-jdk",
-   "category": "runtime",
-   "command_candidates": ["javac"],
-   "version_args": ["-version"],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "OpenJDK Java 开发环境（JDK）",
-   "usage_hint": "APK 反编译、Java 代码编译和部分安全工具需要 javac；安全工具安装器的 core profile 会安装 default-jdk。",
-   "alternatives": ["openjdk-runtime"]
-  },
-  {
-   "id": "python-pwntools",
-   "category": "python_runtime",
-   "python_modules": [{"module": "pwn", "distribution": "pwntools"}],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "pwntools：PWN 二进制分析与利用辅助 Python 库",
-   "usage_hint": "由项目 requirements.txt 管理；检测基于运行 API 的 Python 环境。",
-   "alternatives": ["ropper"]
-  },
-  {
-   "id": "python-capstone",
-   "category": "python_runtime",
-   "python_modules": [{"module": "capstone", "distribution": "capstone"}],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "Capstone：多架构反汇编 Python 库",
-   "usage_hint": "由项目 requirements.txt 管理；供本地逆向分析组件使用。",
-   "alternatives": ["objdump", "radare2"]
-  },
-  {
-   "id": "python-pyelftools",
-   "category": "python_runtime",
-   "python_modules": [{"module": "elftools", "distribution": "pyelftools"}],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "pyelftools：ELF 解析 Python 库",
-   "usage_hint": "由项目 requirements.txt 管理；供本地二进制元数据分析使用。",
-   "alternatives": ["readelf"]
-  },
-  {
-   "id": "python-pefile",
-   "category": "python_runtime",
-   "python_modules": [{"module": "pefile", "distribution": "pefile"}],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "pefile：PE 文件解析 Python 库",
-   "usage_hint": "由项目 requirements.txt 管理；供 Windows 二进制静态分析使用。",
-   "alternatives": ["rabin2"]
-  },
-  {
-   "id": "python-pycryptodome",
-   "category": "python_runtime",
-   "python_modules": [{"module": "Crypto", "distribution": "pycryptodome"}],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "PyCryptodome：密码学分析 Python 库",
-   "usage_hint": "由项目 requirements.txt 管理；供本地密码题和数据解密辅助使用。",
-   "alternatives": []
-  },
-  {
-   "id": "python-pytesseract",
-   "category": "python_runtime",
-   "python_modules": [{"module": "pytesseract", "distribution": "pytesseract"}],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "pytesseract：Tesseract OCR Python 绑定",
-   "usage_hint": "由 AgentScope Conda 环境的 requirements.txt 管理；还需要系统 tesseract 与语言包。",
-   "alternatives": ["tesseract"]
-  },
-  {
-   "id": "pdf-weasyprint-runtime",
-   "category": "runtime",
-   "python_modules": [
-    {"module": "weasyprint", "distribution": "weasyprint"},
-    {"module": "jinja2", "distribution": "Jinja2"},
-    {"module": "markdown_it", "distribution": "markdown-it-py"}
-   ],
-   "import_check_modules": ["weasyprint", "jinja2", "markdown_it"],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "WeasyPrint：PDF 报告主渲染引擎",
-   "usage_hint": "实际导入检查会覆盖 Pango/Cairo 等系统图形库；完整生成结果见“PDF 报告端到端自检”。",
-   "alternatives": ["pdf-reportlab-runtime"]
-  },
-  {
-   "id": "pdf-reportlab-runtime",
-   "category": "runtime",
-   "python_modules": [
-    {"module": "reportlab", "distribution": "reportlab"},
-    {"module": "pypdf", "distribution": "pypdf"},
-    {"module": "PIL", "distribution": "Pillow"}
-   ],
-   "import_check_modules": ["reportlab", "pypdf", "PIL"],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "ReportLab：PDF 报告降级渲染与 PDF 可读性校验",
-   "usage_hint": "WeasyPrint 不可用时系统自动使用此引擎；pypdf 用于验证生成文件可读取。",
-   "alternatives": ["pdf-weasyprint-runtime"]
-  },
-  {
-   "id": "pdf-chinese-fonts",
-   "category": "runtime",
-   "runtime_check": "pdf_font_resources",
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "PDF 中文字体资源（常规与粗体）",
-   "usage_hint": "默认使用项目内置字体；也可通过 LINGSHU_PDF_FONT_REGULAR / LINGSHU_PDF_FONT_BOLD 指向客户机字体。",
-   "alternatives": []
-  },
-  {
-   "id": "pdf-report-generation",
-   "category": "runtime",
-   "runtime_check": "pdf_report_generation",
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "PDF 报告端到端生成自检",
-   "usage_hint": "在临时目录生成并读取最小 PDF；主引擎或回退引擎失效会明确显示降级原因，不访问会话数据。",
-   "alternatives": ["pdf-weasyprint-runtime", "pdf-reportlab-runtime"]
-  },
-  {
-   "id": "pdf-mermaid-renderer",
-   "category": "runtime",
-   "command_candidates": ["node"],
-   "required_files": [
-    "Skills/beautiful-mermaid/scripts/render.js",
-    "Skills/beautiful-mermaid/node_modules/beautiful-mermaid/package.json",
-    "Skills/beautiful-mermaid/node_modules/sharp/package.json"
-   ],
-   "runtime_check": "pdf_mermaid_rendering",
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "Mermaid：PDF 报告中的流程图 SVG 渲染器",
-   "usage_hint": "属于报告增强能力；缺失时 PDF 仍可生成，但流程图会以源码块降级显示。安装器会执行 Skills/beautiful-mermaid 的 npm ci。",
-   "alternatives": []
-  },
-  {
-   "id": "taskbook-pdf-ocr",
-   "category": "runtime",
-   "command_candidates": ["pdftoppm"],
-   "required_commands": ["tesseract"],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "扫描版 PDF 任务书 OCR 运行环境",
-   "usage_hint": "任务书没有文本层时，系统使用 pdftoppm 转换前 20 页，再以 Tesseract（chi_sim+eng）提取目标与授权范围。",
-   "alternatives": ["pypdf"]
-  },
-  {
-   "id": "volatility2-runtime",
-   "category": "runtime",
-   "command_candidates": ["python2", "python2.7"],
-   "required_files": ["Tools/volatility/vol.py"],
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "Volatility 2 内存取证运行环境",
-   "usage_hint": "项目内置 Volatility 2.6 需要 Python 2.7；该组件由安全工具 core profile 安装。",
-   "alternatives": []
-  },
-  {
-   "id": "antsword-electron-runtime",
-   "category": "runtime",
-   "required_files": [
-    "Tools/AntSword-Loader-v4.0.3-linux-x64/AntSword",
-    "Tools/antSword-2.1.16/package-lock.json",
-    "Tools/antSword-2.1.16/node_modules/ws/package.json"
-   ],
-   "runtime_check": "antsword_electron_loader",
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "AntSword MCP 的 Electron 图形运行环境",
-   "usage_hint": "验证内置启动器和动态库；无桌面会话时 API 自动使用 xvfb-run。实际服务状态见 MCP 分类中的 AntSword MCP。",
-   "alternatives": []
-  },
-  {
-   "id": "uv-uvx-runtime",
-   "category": "runtime",
-   "runtime_check": "uv_runtime",
-   "roles": [],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "uv / uvx：GDB Multi MCP 的受控 Python 工具运行器",
-   "usage_hint": "基础环境安装器固定安装 uv/uvx；一键部署会用它安装固定提交的 gdb-multi-mcp。",
-   "alternatives": []
-  },
-  {
-   "id": "nmap",
-   "category": "recon",
-   "command_candidates": [
-    "nmap"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "recon",
-    "attack"
-   ],
-   "risk": "active_scan",
-   "approval_required": false,
-   "description": "端口、服务与版本探测",
-   "usage_hint": "对授权目标执行分阶段扫描；网络任务默认使用 -Pn。",
-   "alternatives": [
-    "masscan"
-   ]
-  },
-  {
-   "id": "masscan",
-   "category": "recon",
-   "command_candidates": [
-    "masscan"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "recon"
-   ],
-   "risk": "active_scan",
-   "approval_required": false,
-   "description": "高速端口扫描",
-   "usage_hint": "仅对授权目标使用，并采用保守速率。",
-   "alternatives": [
-    "nmap"
-   ]
-  },
-  {
-   "id": "amass",
-   "category": "recon",
-   "command_candidates": [
-    "amass"
-   ],
-   "version_args": [
-    "-version"
-   ],
-   "roles": [
-    "recon"
-   ],
-   "risk": "read_only",
-   "approval_required": false,
-   "description": "域名与攻击面枚举",
-   "usage_hint": "仅查询授权域名。",
-   "alternatives": [
-    "subfinder"
-   ]
-  },
-  {
-   "id": "subfinder",
-   "category": "recon",
-   "command_candidates": [
-    "subfinder"
-   ],
-   "version_args": [
-    "-version"
-   ],
-   "roles": [
-    "recon"
-   ],
-   "risk": "read_only",
-   "approval_required": false,
-   "description": "被动子域名发现",
-   "usage_hint": "使用 -d 指定授权域名。",
-   "alternatives": [
-    "amass"
-   ]
-  },
-  {
-   "id": "theharvester",
-   "category": "recon",
-   "command_candidates": [
-    "theHarvester",
-    "theharvester"
-   ],
-   "version_args": [
-    "-h"
-   ],
-   "roles": [
-    "recon"
-   ],
-   "risk": "read_only",
-   "approval_required": false,
-   "description": "公开来源信息收集",
-   "usage_hint": "限制到授权域名。",
-   "alternatives": [
-    "amass"
-   ]
-  },
-  {
-   "id": "dnsrecon",
-   "category": "recon",
-   "command_candidates": [
-    "dnsrecon"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "recon"
-   ],
-   "risk": "read_only",
-   "approval_required": false,
-   "description": "DNS 记录枚举",
-   "usage_hint": "使用 -d 指定授权域名。",
-   "alternatives": [
-    "amass"
-   ]
-  },
-  {
-   "id": "feroxbuster",
-   "category": "web",
-   "command_candidates": [
-    "feroxbuster"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "recon",
-    "attack"
-   ],
-   "risk": "active_scan",
-   "approval_required": false,
-   "description": "Web 内容发现",
-   "usage_hint": "限制并发、深度与授权 URL。",
-   "alternatives": [
-    "gobuster",
-    "ffuf"
-   ]
-  },
-  {
-   "id": "chromium-headless",
-   "category": "web",
-   "command_candidates": [
-    "chromium",
-    "chromium-browser",
-    "google-chrome",
-    "google-chrome-stable"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "recon",
-    "attack"
-   ],
-   "risk": "active_scan",
-   "approval_required": false,
-   "description": "Headless 浏览器页面截图（webshot 证据）",
-   "usage_hint": "由 webshot 工具调用，仅对授权 URL 截图。",
-   "alternatives": []
-  },
-  {
-   "id": "whatweb",
-   "category": "web",
-   "command_candidates": [
-    "whatweb"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "recon"
-   ],
-   "risk": "read_only",
-   "approval_required": false,
-   "description": "Web 技术指纹识别",
-   "usage_hint": "仅访问授权 URL。",
-   "alternatives": [
-    "curl"
-   ]
-  },
-  {
-   "id": "nikto",
-   "category": "web",
-   "command_candidates": [
-    "nikto"
-   ],
-   "version_args": [
-    "-Version"
-   ],
-   "roles": [
-    "recon",
-    "attack"
-   ],
-   "risk": "active_scan",
-   "approval_required": false,
-   "description": "Web 服务安全检查",
-   "usage_hint": "只扫描授权主机并限制超时。",
-   "alternatives": []
-  },
-  {
-   "id": "gobuster",
-   "category": "web",
-   "command_candidates": [
-    "gobuster"
-   ],
-   "version_args": [
-    "version"
-   ],
-   "roles": [
-    "recon",
-    "attack"
-   ],
-   "risk": "active_scan",
-   "approval_required": false,
-   "description": "目录、DNS 与虚拟主机枚举",
-   "usage_hint": "使用授权目标并限制线程数。",
-   "alternatives": [
-    "feroxbuster",
-    "ffuf"
-   ]
-  },
-  {
-   "id": "ffuf",
-   "category": "web",
-   "command_candidates": [
-    "ffuf"
-   ],
-   "version_args": [
-    "-V"
-   ],
-   "roles": [
-    "recon",
-    "attack"
-   ],
-   "risk": "active_scan",
-   "approval_required": false,
-   "description": "Web 模糊测试与内容发现",
-   "usage_hint": "限制速率、线程和授权 URL。",
-   "alternatives": [
-    "wfuzz"
-   ]
-  },
-  {
-   "id": "wfuzz",
-   "category": "web",
-   "command_candidates": [
-    "wfuzz"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "active_scan",
-   "approval_required": false,
-   "description": "Web 参数模糊测试",
-   "usage_hint": "仅对授权请求使用并限制并发。",
-   "alternatives": [
-    "ffuf"
-   ]
-  },
-  {
-   "id": "sqlmap",
-   "category": "web",
-   "command_candidates": [
-    "sqlmap"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "exploitation",
-   "approval_required": true,
-   "description": "SQL 注入验证",
-   "usage_hint": "人工批准后从低风险检测开始，不执行破坏性选项。",
-   "alternatives": []
-  },
-  {
-   "id": "wpscan",
-   "category": "web",
-   "command_candidates": [
-    "wpscan"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "recon",
-    "attack"
-   ],
-   "risk": "active_scan",
-   "approval_required": false,
-   "description": "WordPress 枚举与安全检查",
-   "usage_hint": "只扫描授权 WordPress 站点。",
-   "alternatives": []
-  },
-  {
-   "id": "joomscan",
-   "category": "web",
-   "command_candidates": [
-    "joomscan"
-   ],
-   "version_args": [
-    "--help"
-   ],
-   "roles": [
-    "recon",
-    "attack"
-   ],
-   "risk": "active_scan",
-   "approval_required": false,
-   "description": "Joomla 安全检查",
-   "usage_hint": "只扫描授权 Joomla 站点。",
-   "alternatives": []
-  },
-  {
-   "id": "commix",
-   "category": "web",
-   "command_candidates": [
-    "commix"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "exploitation",
-   "approval_required": true,
-   "description": "命令注入验证",
-   "usage_hint": "必须人工批准并保存可复核证据。",
-   "alternatives": []
-  },
-  {
-   "id": "hydra",
-   "category": "credential",
-   "command_candidates": [
-    "hydra"
-   ],
-   "version_args": [
-    "-h"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "credential_attack",
-   "approval_required": true,
-   "description": "网络服务凭证验证",
-   "usage_hint": "必须人工批准，限制账户、字典和速率。",
-   "alternatives": [
-    "medusa"
-   ]
-  },
-  {
-   "id": "netexec",
-   "category": "ad",
-   "command_candidates": [
-    "netexec",
-    "crackmapexec"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "credential_attack",
-   "approval_required": true,
-   "description": "Windows/AD 枚举与凭证验证",
-   "usage_hint": "凭证操作必须人工批准并限制到授权主机。",
-   "alternatives": [
-    "impacket"
-   ]
-  },
-  {
-   "id": "impacket",
-   "category": "ad",
-   "command_candidates": [
-    "impacket-smbclient",
-    "impacket-secretsdump"
-   ],
-   "version_args": [
-    "-h"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "credential_attack",
-   "approval_required": true,
-   "description": "Windows 网络协议工具集",
-   "usage_hint": "选择具体 impacket 命令；凭证及远程执行必须审批。",
-   "alternatives": [
-    "netexec"
-   ]
-  },
-  {
-   "id": "evil-winrm",
-   "category": "ad",
-   "command_candidates": [
-    "evil-winrm"
-   ],
-   "version_args": [
-    "--help"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "exploitation",
-   "approval_required": true,
-   "description": "WinRM 授权远程会话",
-   "usage_hint": "仅在已有授权凭证并经审批后使用。",
-   "alternatives": []
-  },
-  {
-   "id": "certipy",
-   "category": "ad",
-   "command_candidates": [
-    "certipy-ad",
-    "certipy"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "credential_attack",
-   "approval_required": true,
-   "description": "Active Directory 证书服务分析",
-   "usage_hint": "枚举与利用分开，利用必须审批。",
-   "alternatives": []
-  },
-  {
-   "id": "bloodhound",
-   "category": "ad",
-   "command_candidates": [
-    "bloodhound-python"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "active_scan",
-   "approval_required": true,
-   "description": "Active Directory 关系采集",
-   "usage_hint": "仅采集授权域并控制查询规模。",
-   "alternatives": []
-  },
-  {
-   "id": "responder",
-   "category": "ad",
-   "command_candidates": [
-    "responder"
-   ],
-   "version_args": [
-    "--help"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "credential_attack",
-   "approval_required": true,
-   "description": "本地网络名称解析响应测试",
-   "usage_hint": "高风险，必须审批且不得在非隔离网络使用。",
-   "alternatives": []
-  },
-  {
-   "id": "hashcat",
-   "category": "crypto",
-   "command_candidates": [
-    "hashcat"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "compute_intensive",
-   "approval_required": false,
-   "description": "离线哈希恢复",
-   "usage_hint": "仅处理任务工作区中的哈希，限制运行时间。",
-   "alternatives": [
-    "john"
-   ]
-  },
-  {
-   "id": "john",
-   "category": "crypto",
-   "command_candidates": [
-    "john"
-   ],
-   "version_args": [
-    "--list=build-info"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "compute_intensive",
-   "approval_required": false,
-   "description": "离线密码与哈希分析",
-   "usage_hint": "仅处理任务工作区文件，限制进程数。",
-   "alternatives": [
-    "hashcat"
-   ]
-  },
-  {
-   "id": "sage",
-   "category": "crypto",
-   "command_candidates": [
-    "${LINGSHU_SAGE_CMD}",
-    "sage"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "数论、代数与符号计算",
-   "usage_hint": "优先通过 execute_sagemath 结构化工具调用。",
-   "alternatives": [
-    "sympy"
-   ]
-  },
-  {
-   "id": "tshark",
-   "category": "forensics",
-   "command_candidates": [
-    "tshark"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "PCAP 协议分析",
-   "usage_hint": "离线读取工作区 PCAP；实时抓包需要额外权限。",
-   "alternatives": [
-    "tcpdump"
-   ]
-  },
-  {
-   "id": "tcpdump",
-   "category": "forensics",
-   "command_candidates": [
-    "tcpdump"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "attack"
-   ],
-   "risk": "privileged",
-   "approval_required": true,
-   "description": "流量读取与抓取",
-   "usage_hint": "离线读取无需特权；实时抓包须审批和受限 capability。",
-   "alternatives": [
-    "tshark"
-   ]
-  },
-  {
-   "id": "binwalk",
-   "category": "forensics",
-   "command_candidates": [
-    "binwalk"
-   ],
-   "version_args": [
-    "--help"
-   ],
-   "roles": [
-    "triage",
-    "attack",
-    "reserve"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "固件与嵌入文件识别",
-   "usage_hint": "仅分析工作区文件，提取到独立证据目录。",
-   "alternatives": []
-  },
-  {
-   "id": "bulk-extractor",
-   "category": "forensics",
-   "command_candidates": [
-    "bulk_extractor",
-    "bulk-extractor"
-   ],
-   "version_args": [
-    "-V"
-   ],
-   "roles": [
-    "triage",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "镜像特征批量提取",
-   "usage_hint": "输出必须写入当前会话证据目录。",
-   "alternatives": []
-  },
-  {
-   "id": "foremost",
-   "category": "forensics",
-   "command_candidates": [
-    "foremost"
-   ],
-   "version_args": [
-    "-V"
-   ],
-   "roles": [
-    "triage",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "文件雕刻与恢复",
-   "usage_hint": "只读输入，输出写入独立目录。",
-   "alternatives": [
-    "binwalk"
-   ]
-  },
-  {
-   "id": "tesseract",
-   "category": "forensics",
-   "command_candidates": [
-    "tesseract"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "attack",
-    "reserve"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "图片 OCR 识别",
-   "usage_hint": "优先通过 ocr_image 结构化工具调用。",
-   "alternatives": []
-  },
-  {
-   "id": "tesseract-ocr-eng",
-   "category": "forensics",
-   "command_candidates": ["tesseract"],
-   "version_args": ["--version"],
-   "health_check_args": ["--list-langs"],
-   "health_check_contains": ["eng"],
-   "roles": ["triage", "recon", "attack", "reserve"],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "Tesseract 英文 OCR 语言数据",
-   "usage_hint": "OCR 英文文本前自动检查 eng 语言包；由 tesseract-ocr-eng 提供。",
-   "alternatives": []
-  },
-  {
-   "id": "tesseract-ocr-chi-sim",
-   "category": "forensics",
-   "command_candidates": ["tesseract"],
-   "version_args": ["--version"],
-   "health_check_args": ["--list-langs"],
-   "health_check_contains": ["chi_sim"],
-   "roles": ["triage", "recon", "attack", "reserve"],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "Tesseract 简体中文 OCR 语言数据",
-   "usage_hint": "OCR 简体中文文本前自动检查 chi_sim 语言包；由 tesseract-ocr-chi-sim 提供。",
-   "alternatives": []
-  },
-  {
-   "id": "tesseract-ocr-chi-tra",
-   "category": "forensics",
-   "command_candidates": ["tesseract"],
-   "version_args": ["--version"],
-   "health_check_args": ["--list-langs"],
-   "health_check_contains": ["chi_tra"],
-   "roles": ["triage", "recon", "attack", "reserve"],
-   "approval_required": false,
-   "description": "Tesseract 繁体中文 OCR 语言数据",
-   "usage_hint": "OCR 繁体中文文本前自动检查 chi_tra 语言包；由 tesseract-ocr-chi-tra 提供。",
-   "alternatives": []
-  },
-  {
-   "id": "zbarimg",
-   "category": "forensics",
-   "command_candidates": [
-    "zbarimg"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "二维码与条码识别",
-   "usage_hint": "仅处理工作区图片。",
-   "alternatives": [
-    "tesseract"
-   ]
-  },
-  {
-   "id": "steghide",
-   "category": "forensics",
-   "command_candidates": [
-    "steghide"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "常见媒体隐写分析",
-   "usage_hint": "仅处理工作区文件，保留原文件。",
-   "alternatives": []
-  },
-  {
-   "id": "stegseek",
-   "category": "forensics",
-   "command_candidates": [
-    "stegseek"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "隐写内容快速爆破提取（steghide 字典破解）",
-   "usage_hint": "仅处理工作区文件；无口令时优先 --seed 空口令探测，字典爆破限制运行时间。",
-   "alternatives": [
-    "steghide"
-   ]
-  },
-  {
-   "id": "apktool",
-   "category": "mobile",
-   "command_candidates": [
-    "apktool"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "Android APK 资源与字节码解包",
-   "usage_hint": "输出写入当前会话工作区。",
-   "alternatives": []
-  },
-  {
-   "id": "file",
-   "category": "reverse",
-   "command_candidates": [
-    "file"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "文件格式识别",
-   "usage_hint": "先识别格式再选择分析器。",
-   "alternatives": []
-  },
-  {
-   "id": "objdump",
-   "category": "reverse",
-   "command_candidates": [
-    "objdump"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "ELF/PE 反汇编与节信息分析",
-   "usage_hint": "仅分析当前任务工作区内的文件。",
-   "alternatives": [
-    "radare2"
-   ]
-  },
-  {
-   "id": "readelf",
-   "category": "reverse",
-   "command_candidates": [
-    "readelf"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "ELF 头、节和符号信息分析",
-   "usage_hint": "仅分析当前任务工作区内的文件。",
-   "alternatives": [
-    "file"
-   ]
-  },
-  {
-   "id": "strings",
-   "category": "reverse",
-   "command_candidates": [
-    "strings"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "二进制可打印字符串提取",
-   "usage_hint": "仅分析当前任务工作区内的文件。",
-   "alternatives": []
-  },
-  {
-   "id": "rabin2",
-   "category": "reverse",
-   "command_candidates": [
-    "rabin2"
-   ],
-   "version_args": [
-    "-v"
-   ],
-   "roles": [
-    "triage",
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "PE/ELF 文件头、导入和节信息分析",
-   "usage_hint": "仅分析当前任务工作区内的文件。",
-   "alternatives": [
-    "file",
-    "readelf"
-   ]
-  },
-  {
-   "id": "checksec",
-   "category": "reverse",
-   "command_candidates": [
-    "${LINGSHU_CHECKSEC_CMD}",
-    "checksec"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "triage",
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "ELF 安全保护检查",
-   "usage_hint": "仅检查工作区二进制。",
-   "alternatives": [
-    "readelf"
-   ]
-  },
-  {
-   "id": "radare2",
-   "category": "reverse",
-   "command_candidates": [
-    "r2",
-    "radare2"
-   ],
-   "version_args": [
-    "-v"
-   ],
-   "roles": [
-    "triage",
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "二进制静态与动态分析",
-   "usage_hint": "默认只读打开工作区二进制。",
-   "alternatives": [
-    "ida",
-    "ghidra"
-   ]
-  },
-  {
-   "id": "ropper",
-   "category": "reverse",
-   "command_candidates": [
-    "ropper"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "ROP gadget 检索",
-   "usage_hint": "仅分析工作区二进制。",
-   "alternatives": [
-    "pwntools"
-   ]
-  },
-  {
-   "id": "pwntools",
-   "category": "reverse",
-   "command_candidates": [
-    "${LINGSHU_PWN_CMD}",
-    "pwn"
-   ],
-   "version_args": [
-    "version"
-   ],
-   "roles": [
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "PWN 分析与利用辅助",
-   "usage_hint": "本地分析可直接使用，网络利用必须审批并限制目标。",
-   "alternatives": []
-  },
-  {
-   "id": "gdb",
-   "category": "reverse",
-   "command_candidates": [
-    "gdb"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "reserve"
-   ],
-   "risk": "local_analysis",
-   "approval_required": false,
-   "description": "本地动态调试",
-   "usage_hint": "优先通过 GDB MCP 结构化会话调用。",
-   "alternatives": []
-  },
-  {
-   "id": "strace",
-   "category": "reverse",
-   "command_candidates": [
-    "strace"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_execution",
-   "approval_required": true,
-   "description": "Linux 系统调用追踪",
-   "usage_hint": "执行不可信程序前必须审批并使用隔离。",
-   "alternatives": [
-    "gdb"
-   ]
-  },
-  {
-   "id": "wine",
-   "category": "reverse",
-   "command_candidates": [
-    "${LINGSHU_WINE_CMD}",
-    "wine64",
-    "wine"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_execution",
-   "approval_required": true,
-   "description": "Wine 64 位 Windows 程序兼容执行层（Reverse / PWN）",
-   "usage_hint": "仅 Reverse 专家与 PWN 攻击专家可用。仅执行工作区内的 64 位 Windows 样本；须先获得动作审批，保持网络隔离，不适用于 32 位样本。",
-   "alternatives": []
-  },
-  {
-   "id": "qemu-system-x86",
-   "category": "reverse",
-   "command_candidates": [
-    "${LINGSHU_QEMU_CMD}",
-    "qemu-system-x86_64"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "health_check_args": [
-    "--version"
-   ],
-   "health_check_contains": [
-    "qemu emulator version"
-   ],
-   "environment": {
-    "LD_LIBRARY_PATH": "${LINGSHU_QEMU_LIB_DIR}"
-   },
-   "roles": [
-    "reserve",
-    "attack"
-   ],
-   "risk": "local_execution",
-   "approval_required": true,
-   "description": "QEMU x86/x86_64 本地样本仿真器（Reverse / PWN）",
-   "usage_hint": "仅 Reverse 专家与 PWN 攻击专家可用。仅对工作区内授权样本做本地仿真；须先获得动作审批，默认使用 -net none 禁止客户机网络。",
-   "alternatives": []
-  },
-  {
-   "id": "angr",
-   "category": "reverse",
-   "command_candidates": [
-    "${LINGSHU_ANGR_PYTHON}"
-   ],
-   "version_args": [
-    "-c",
-    "import angr; print(angr.__version__)"
-   ],
-   "roles": [
-    "reserve",
-    "attack"
-   ],
-   "risk": "compute_intensive",
-   "approval_required": false,
-   "description": "符号执行与程序分析",
-   "usage_hint": "使用独立环境处理工作区二进制，限制时间和内存。",
-   "alternatives": [
-    "sage"
-   ]
-  },
-  {
-   "id": "msfconsole",
-   "category": "framework",
-   "command_candidates": [
-    "msfconsole"
-   ],
-   "version_args": [
-    "--version"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "exploitation",
-   "approval_required": true,
-   "description": "Metasploit 授权验证框架",
-   "usage_hint": "必须人工批准，禁止持久化和范围外回连。",
-   "alternatives": []
-  },
-  {
-   "id": "bettercap",
-   "category": "network",
-   "command_candidates": [
-    "bettercap"
-   ],
-   "version_args": [
-    "-version"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "privileged",
-   "approval_required": true,
-   "description": "网络分析与中间人测试框架",
-   "usage_hint": "默认禁用，仅在隔离网络和审批后使用。",
-   "alternatives": [],
-   "enabled": false
-  },
-  {
-   "id": "aircrack-ng",
-   "category": "wireless",
-   "command_candidates": [
-    "aircrack-ng"
-   ],
-   "version_args": [
-    "--help"
-   ],
-   "roles": [
-    "attack"
-   ],
-   "risk": "privileged",
-   "approval_required": true,
-   "description": "无线安全测试工具集",
-   "usage_hint": "默认禁用，仅对明确授权无线网络使用。",
-   "alternatives": [],
-   "enabled": false
-  }
- ]
+  "schema_version": 1,
+  "tools": [
+    {
+      "id": "openjdk-runtime",
+      "category": "runtime",
+      "command_candidates": [
+        "java"
+      ],
+      "version_args": [
+        "-version"
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "OpenJDK Java 运行环境（JRE）",
+      "usage_hint": "供 APK/Java 工具运行；仅有 JRE 时不能编译 Java 或完整运行部分分析工具。",
+      "alternatives": [
+        "openjdk-jdk"
+      ]
+    },
+    {
+      "id": "openjdk-jdk",
+      "category": "runtime",
+      "command_candidates": [
+        "javac"
+      ],
+      "version_args": [
+        "-version"
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "OpenJDK Java 开发环境（JDK）",
+      "usage_hint": "APK 反编译、Java 代码编译和部分安全工具需要 javac；安全工具安装器的 core profile 会安装 default-jdk。",
+      "alternatives": [
+        "openjdk-runtime"
+      ]
+    },
+    {
+      "id": "python-pwntools",
+      "category": "python_runtime",
+      "python_modules": [
+        {
+          "module": "pwn",
+          "distribution": "pwntools"
+        }
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "pwntools：PWN 二进制分析与利用辅助 Python 库",
+      "usage_hint": "由项目 requirements.txt 管理；检测基于运行 API 的 Python 环境。",
+      "alternatives": [
+        "ropper"
+      ]
+    },
+    {
+      "id": "python-capstone",
+      "category": "python_runtime",
+      "python_modules": [
+        {
+          "module": "capstone",
+          "distribution": "capstone"
+        }
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "Capstone：多架构反汇编 Python 库",
+      "usage_hint": "由项目 requirements.txt 管理；供本地逆向分析组件使用。",
+      "alternatives": [
+        "objdump",
+        "radare2"
+      ]
+    },
+    {
+      "id": "python-pyelftools",
+      "category": "python_runtime",
+      "python_modules": [
+        {
+          "module": "elftools",
+          "distribution": "pyelftools"
+        }
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "pyelftools：ELF 解析 Python 库",
+      "usage_hint": "由项目 requirements.txt 管理；供本地二进制元数据分析使用。",
+      "alternatives": [
+        "readelf"
+      ]
+    },
+    {
+      "id": "python-pefile",
+      "category": "python_runtime",
+      "python_modules": [
+        {
+          "module": "pefile",
+          "distribution": "pefile"
+        }
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "pefile：PE 文件解析 Python 库",
+      "usage_hint": "由项目 requirements.txt 管理；供 Windows 二进制静态分析使用。",
+      "alternatives": [
+        "rabin2"
+      ]
+    },
+    {
+      "id": "python-pycryptodome",
+      "category": "python_runtime",
+      "python_modules": [
+        {
+          "module": "Crypto",
+          "distribution": "pycryptodome"
+        }
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "PyCryptodome：密码学分析 Python 库",
+      "usage_hint": "由项目 requirements.txt 管理；供本地密码题和数据解密辅助使用。",
+      "alternatives": []
+    },
+    {
+      "id": "python-pytesseract",
+      "category": "python_runtime",
+      "python_modules": [
+        {
+          "module": "pytesseract",
+          "distribution": "pytesseract"
+        }
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "pytesseract：Tesseract OCR Python 绑定",
+      "usage_hint": "由 AgentScope Conda 环境的 requirements.txt 管理；还需要系统 tesseract 与语言包。",
+      "alternatives": [
+        "tesseract"
+      ]
+    },
+    {
+      "id": "pdf-weasyprint-runtime",
+      "category": "runtime",
+      "python_modules": [
+        {
+          "module": "weasyprint",
+          "distribution": "weasyprint"
+        },
+        {
+          "module": "jinja2",
+          "distribution": "Jinja2"
+        },
+        {
+          "module": "markdown_it",
+          "distribution": "markdown-it-py"
+        }
+      ],
+      "import_check_modules": [
+        "weasyprint",
+        "jinja2",
+        "markdown_it"
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "WeasyPrint：PDF 报告主渲染引擎",
+      "usage_hint": "实际导入检查会覆盖 Pango/Cairo 等系统图形库；完整生成结果见“PDF 报告端到端自检”。",
+      "alternatives": [
+        "pdf-reportlab-runtime"
+      ]
+    },
+    {
+      "id": "pdf-reportlab-runtime",
+      "category": "runtime",
+      "python_modules": [
+        {
+          "module": "reportlab",
+          "distribution": "reportlab"
+        },
+        {
+          "module": "pypdf",
+          "distribution": "pypdf"
+        },
+        {
+          "module": "PIL",
+          "distribution": "Pillow"
+        }
+      ],
+      "import_check_modules": [
+        "reportlab",
+        "pypdf",
+        "PIL"
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "ReportLab：PDF 报告降级渲染与 PDF 可读性校验",
+      "usage_hint": "WeasyPrint 不可用时系统自动使用此引擎；pypdf 用于验证生成文件可读取。",
+      "alternatives": [
+        "pdf-weasyprint-runtime"
+      ]
+    },
+    {
+      "id": "pdf-chinese-fonts",
+      "category": "runtime",
+      "runtime_check": "pdf_font_resources",
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "PDF 中文字体资源（常规与粗体）",
+      "usage_hint": "默认使用项目内置字体；也可通过 LINGSHU_PDF_FONT_REGULAR / LINGSHU_PDF_FONT_BOLD 指向客户机字体。",
+      "alternatives": []
+    },
+    {
+      "id": "pdf-report-generation",
+      "category": "runtime",
+      "runtime_check": "pdf_report_generation",
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "PDF 报告端到端生成自检",
+      "usage_hint": "在临时目录生成并读取最小 PDF；主引擎或回退引擎失效会明确显示降级原因，不访问会话数据。",
+      "alternatives": [
+        "pdf-weasyprint-runtime",
+        "pdf-reportlab-runtime"
+      ]
+    },
+    {
+      "id": "pdf-mermaid-renderer",
+      "category": "runtime",
+      "command_candidates": [
+        "node"
+      ],
+      "required_files": [
+        "Skills/beautiful-mermaid/scripts/render.js",
+        "Skills/beautiful-mermaid/node_modules/beautiful-mermaid/package.json",
+        "Skills/beautiful-mermaid/node_modules/sharp/package.json"
+      ],
+      "runtime_check": "pdf_mermaid_rendering",
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "Mermaid：PDF 报告中的流程图 SVG 渲染器",
+      "usage_hint": "属于报告增强能力；缺失时 PDF 仍可生成，但流程图会以源码块降级显示。安装器会执行 Skills/beautiful-mermaid 的 npm ci。",
+      "alternatives": []
+    },
+    {
+      "id": "taskbook-pdf-ocr",
+      "category": "runtime",
+      "command_candidates": [
+        "pdftoppm"
+      ],
+      "required_commands": [
+        "tesseract"
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "扫描版 PDF 任务书 OCR 运行环境",
+      "usage_hint": "任务书没有文本层时，系统使用 pdftoppm 转换前 20 页，再以 Tesseract（chi_sim+eng）提取目标与授权范围。",
+      "alternatives": [
+        "pypdf"
+      ]
+    },
+    {
+      "id": "volatility2-runtime",
+      "category": "runtime",
+      "command_candidates": [
+        "python2",
+        "python2.7"
+      ],
+      "required_files": [
+        "Tools/volatility/vol.py"
+      ],
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "Volatility 2 内存取证运行环境",
+      "usage_hint": "项目内置 Volatility 2.6 需要 Python 2.7；该组件由安全工具 core profile 安装。",
+      "alternatives": []
+    },
+    {
+      "id": "antsword-electron-runtime",
+      "category": "runtime",
+      "required_files": [
+        "Tools/AntSword-Loader-v4.0.3-linux-x64/AntSword",
+        "Tools/antSword-2.1.16/package-lock.json",
+        "Tools/antSword-2.1.16/node_modules/ws/package.json"
+      ],
+      "runtime_check": "antsword_electron_loader",
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "AntSword MCP 的 Electron 图形运行环境",
+      "usage_hint": "验证内置启动器和动态库；无桌面会话时 API 自动使用 xvfb-run。实际服务状态见 MCP 分类中的 AntSword MCP。",
+      "alternatives": []
+    },
+    {
+      "id": "uv-uvx-runtime",
+      "category": "runtime",
+      "runtime_check": "uv_runtime",
+      "roles": [],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "uv / uvx：GDB Multi MCP 的受控 Python 工具运行器",
+      "usage_hint": "基础环境安装器固定安装 uv/uvx；一键部署会用它安装固定提交的 gdb-multi-mcp。",
+      "alternatives": []
+    },
+    {
+      "id": "nmap",
+      "category": "recon",
+      "command_candidates": [
+        "nmap"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "recon",
+        "attack"
+      ],
+      "risk": "active_scan",
+      "approval_required": false,
+      "description": "端口、服务与版本探测",
+      "usage_hint": "对授权目标执行分阶段扫描；网络任务默认使用 -Pn。",
+      "alternatives": [
+        "masscan"
+      ]
+    },
+    {
+      "id": "masscan",
+      "category": "recon",
+      "command_candidates": [
+        "masscan"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "recon"
+      ],
+      "risk": "active_scan",
+      "approval_required": false,
+      "description": "高速端口扫描",
+      "usage_hint": "仅对授权目标使用，并采用保守速率。",
+      "alternatives": [
+        "nmap"
+      ]
+    },
+    {
+      "id": "amass",
+      "category": "recon",
+      "command_candidates": [
+        "amass"
+      ],
+      "version_args": [
+        "-version"
+      ],
+      "roles": [
+        "recon"
+      ],
+      "risk": "read_only",
+      "approval_required": false,
+      "description": "域名与攻击面枚举",
+      "usage_hint": "仅查询授权域名。",
+      "alternatives": [
+        "subfinder"
+      ]
+    },
+    {
+      "id": "subfinder",
+      "category": "recon",
+      "command_candidates": [
+        "subfinder"
+      ],
+      "version_args": [
+        "-version"
+      ],
+      "roles": [
+        "recon"
+      ],
+      "risk": "read_only",
+      "approval_required": false,
+      "description": "被动子域名发现",
+      "usage_hint": "使用 -d 指定授权域名。",
+      "alternatives": [
+        "amass"
+      ]
+    },
+    {
+      "id": "theharvester",
+      "category": "recon",
+      "command_candidates": [
+        "theHarvester",
+        "theharvester"
+      ],
+      "version_args": [
+        "-h"
+      ],
+      "roles": [
+        "recon"
+      ],
+      "risk": "read_only",
+      "approval_required": false,
+      "description": "公开来源信息收集",
+      "usage_hint": "限制到授权域名。",
+      "alternatives": [
+        "amass"
+      ]
+    },
+    {
+      "id": "dnsrecon",
+      "category": "recon",
+      "command_candidates": [
+        "dnsrecon"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "recon"
+      ],
+      "risk": "read_only",
+      "approval_required": false,
+      "description": "DNS 记录枚举",
+      "usage_hint": "使用 -d 指定授权域名。",
+      "alternatives": [
+        "amass"
+      ]
+    },
+    {
+      "id": "feroxbuster",
+      "category": "web",
+      "command_candidates": [
+        "feroxbuster"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "recon",
+        "attack"
+      ],
+      "risk": "active_scan",
+      "approval_required": false,
+      "description": "Web 内容发现",
+      "usage_hint": "限制并发、深度与授权 URL。",
+      "alternatives": [
+        "gobuster",
+        "ffuf"
+      ]
+    },
+    {
+      "id": "chromium-headless",
+      "category": "web",
+      "command_candidates": [
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "google-chrome-stable"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "recon",
+        "attack"
+      ],
+      "risk": "active_scan",
+      "approval_required": false,
+      "description": "Headless 浏览器页面截图（webshot 证据）",
+      "usage_hint": "由 webshot 工具调用，仅对授权 URL 截图。",
+      "alternatives": []
+    },
+    {
+      "id": "whatweb",
+      "category": "web",
+      "command_candidates": [
+        "whatweb"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "recon"
+      ],
+      "risk": "read_only",
+      "approval_required": false,
+      "description": "Web 技术指纹识别",
+      "usage_hint": "仅访问授权 URL。",
+      "alternatives": [
+        "curl"
+      ]
+    },
+    {
+      "id": "nikto",
+      "category": "web",
+      "command_candidates": [
+        "nikto"
+      ],
+      "version_args": [
+        "-Version"
+      ],
+      "roles": [
+        "recon",
+        "attack"
+      ],
+      "risk": "active_scan",
+      "approval_required": false,
+      "description": "Web 服务安全检查",
+      "usage_hint": "只扫描授权主机并限制超时。",
+      "alternatives": []
+    },
+    {
+      "id": "gobuster",
+      "category": "web",
+      "command_candidates": [
+        "gobuster"
+      ],
+      "version_args": [
+        "version"
+      ],
+      "roles": [
+        "recon",
+        "attack"
+      ],
+      "risk": "active_scan",
+      "approval_required": false,
+      "description": "目录、DNS 与虚拟主机枚举",
+      "usage_hint": "使用授权目标并限制线程数。",
+      "alternatives": [
+        "feroxbuster",
+        "ffuf"
+      ]
+    },
+    {
+      "id": "ffuf",
+      "category": "web",
+      "command_candidates": [
+        "ffuf"
+      ],
+      "version_args": [
+        "-V"
+      ],
+      "roles": [
+        "recon",
+        "attack"
+      ],
+      "risk": "active_scan",
+      "approval_required": false,
+      "description": "Web 模糊测试与内容发现",
+      "usage_hint": "限制速率、线程和授权 URL。",
+      "alternatives": [
+        "wfuzz"
+      ]
+    },
+    {
+      "id": "wfuzz",
+      "category": "web",
+      "command_candidates": [
+        "wfuzz"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "active_scan",
+      "approval_required": false,
+      "description": "Web 参数模糊测试",
+      "usage_hint": "仅对授权请求使用并限制并发。",
+      "alternatives": [
+        "ffuf"
+      ]
+    },
+    {
+      "id": "sqlmap",
+      "category": "web",
+      "command_candidates": [
+        "sqlmap"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "exploitation",
+      "approval_required": true,
+      "description": "SQL 注入验证",
+      "usage_hint": "人工批准后从低风险检测开始，不执行破坏性选项。",
+      "alternatives": []
+    },
+    {
+      "id": "wpscan",
+      "category": "web",
+      "command_candidates": [
+        "wpscan"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "recon",
+        "attack"
+      ],
+      "risk": "active_scan",
+      "approval_required": false,
+      "description": "WordPress 枚举与安全检查",
+      "usage_hint": "只扫描授权 WordPress 站点。",
+      "alternatives": []
+    },
+    {
+      "id": "joomscan",
+      "category": "web",
+      "command_candidates": [
+        "joomscan"
+      ],
+      "version_args": [
+        "--help"
+      ],
+      "roles": [
+        "recon",
+        "attack"
+      ],
+      "risk": "active_scan",
+      "approval_required": false,
+      "description": "Joomla 安全检查",
+      "usage_hint": "只扫描授权 Joomla 站点。",
+      "alternatives": []
+    },
+    {
+      "id": "commix",
+      "category": "web",
+      "command_candidates": [
+        "commix"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "exploitation",
+      "approval_required": true,
+      "description": "命令注入验证",
+      "usage_hint": "必须人工批准并保存可复核证据。",
+      "alternatives": []
+    },
+    {
+      "id": "hydra",
+      "category": "credential",
+      "command_candidates": [
+        "hydra"
+      ],
+      "version_args": [
+        "-h"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "credential_attack",
+      "approval_required": true,
+      "description": "网络服务凭证验证",
+      "usage_hint": "必须人工批准，限制账户、字典和速率。",
+      "alternatives": [
+        "medusa"
+      ]
+    },
+    {
+      "id": "netexec",
+      "category": "ad",
+      "command_candidates": [
+        "netexec",
+        "crackmapexec"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "credential_attack",
+      "approval_required": true,
+      "description": "Windows/AD 枚举与凭证验证",
+      "usage_hint": "凭证操作必须人工批准并限制到授权主机。",
+      "alternatives": [
+        "impacket"
+      ]
+    },
+    {
+      "id": "impacket",
+      "category": "ad",
+      "command_candidates": [
+        "impacket-smbclient",
+        "impacket-secretsdump"
+      ],
+      "version_args": [
+        "-h"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "credential_attack",
+      "approval_required": true,
+      "description": "Windows 网络协议工具集",
+      "usage_hint": "选择具体 impacket 命令；凭证及远程执行必须审批。",
+      "alternatives": [
+        "netexec"
+      ]
+    },
+    {
+      "id": "evil-winrm",
+      "category": "ad",
+      "command_candidates": [
+        "evil-winrm"
+      ],
+      "version_args": [
+        "--help"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "exploitation",
+      "approval_required": true,
+      "description": "WinRM 授权远程会话",
+      "usage_hint": "仅在已有授权凭证并经审批后使用。",
+      "alternatives": []
+    },
+    {
+      "id": "certipy",
+      "category": "ad",
+      "command_candidates": [
+        "certipy-ad",
+        "certipy"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "credential_attack",
+      "approval_required": true,
+      "description": "Active Directory 证书服务分析",
+      "usage_hint": "枚举与利用分开，利用必须审批。",
+      "alternatives": []
+    },
+    {
+      "id": "bloodhound",
+      "category": "ad",
+      "command_candidates": [
+        "bloodhound-python"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "active_scan",
+      "approval_required": true,
+      "description": "Active Directory 关系采集",
+      "usage_hint": "仅采集授权域并控制查询规模。",
+      "alternatives": []
+    },
+    {
+      "id": "responder",
+      "category": "ad",
+      "command_candidates": [
+        "responder"
+      ],
+      "version_args": [
+        "--help"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "credential_attack",
+      "approval_required": true,
+      "description": "本地网络名称解析响应测试",
+      "usage_hint": "高风险，必须审批且不得在非隔离网络使用。",
+      "alternatives": []
+    },
+    {
+      "id": "hashcat",
+      "category": "crypto",
+      "command_candidates": [
+        "hashcat"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "compute_intensive",
+      "approval_required": false,
+      "description": "离线哈希恢复",
+      "usage_hint": "仅处理任务工作区中的哈希，限制运行时间。",
+      "alternatives": [
+        "john"
+      ]
+    },
+    {
+      "id": "john",
+      "category": "crypto",
+      "command_candidates": [
+        "john"
+      ],
+      "version_args": [
+        "--list=build-info"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "compute_intensive",
+      "approval_required": false,
+      "description": "离线密码与哈希分析",
+      "usage_hint": "仅处理任务工作区文件，限制进程数。",
+      "alternatives": [
+        "hashcat"
+      ]
+    },
+    {
+      "id": "sage",
+      "category": "crypto",
+      "command_candidates": [
+        "${LINGSHU_SAGE_CMD}",
+        "sage"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "数论、代数与符号计算",
+      "usage_hint": "优先通过 execute_sagemath 结构化工具调用。",
+      "alternatives": [
+        "sympy"
+      ]
+    },
+    {
+      "id": "tshark",
+      "category": "forensics",
+      "command_candidates": [
+        "tshark"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "PCAP 协议分析",
+      "usage_hint": "离线读取工作区 PCAP；实时抓包需要额外权限。",
+      "alternatives": [
+        "tcpdump"
+      ]
+    },
+    {
+      "id": "tcpdump",
+      "category": "forensics",
+      "command_candidates": [
+        "tcpdump"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "privileged",
+      "approval_required": true,
+      "description": "流量读取与抓取",
+      "usage_hint": "离线读取无需特权；实时抓包须审批和受限 capability。",
+      "alternatives": [
+        "tshark"
+      ]
+    },
+    {
+      "id": "binwalk",
+      "category": "forensics",
+      "command_candidates": [
+        "binwalk"
+      ],
+      "version_args": [
+        "--help"
+      ],
+      "roles": [
+        "triage",
+        "attack",
+        "reserve"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "固件与嵌入文件识别",
+      "usage_hint": "仅分析工作区文件，提取到独立证据目录。",
+      "alternatives": []
+    },
+    {
+      "id": "bulk-extractor",
+      "category": "forensics",
+      "command_candidates": [
+        "bulk_extractor",
+        "bulk-extractor"
+      ],
+      "version_args": [
+        "-V"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "镜像特征批量提取",
+      "usage_hint": "输出必须写入当前会话证据目录。",
+      "alternatives": []
+    },
+    {
+      "id": "foremost",
+      "category": "forensics",
+      "command_candidates": [
+        "foremost"
+      ],
+      "version_args": [
+        "-V"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "文件雕刻与恢复",
+      "usage_hint": "只读输入，输出写入独立目录。",
+      "alternatives": [
+        "binwalk"
+      ]
+    },
+    {
+      "id": "tesseract",
+      "category": "forensics",
+      "command_candidates": [
+        "tesseract"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack",
+        "reserve"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "图片 OCR 识别",
+      "usage_hint": "优先通过 ocr_image 结构化工具调用。",
+      "alternatives": []
+    },
+    {
+      "id": "tesseract-ocr-eng",
+      "category": "forensics",
+      "command_candidates": [
+        "tesseract"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "health_check_args": [
+        "--list-langs"
+      ],
+      "health_check_contains": [
+        "eng"
+      ],
+      "roles": [
+        "triage",
+        "recon",
+        "attack",
+        "reserve"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "Tesseract 英文 OCR 语言数据",
+      "usage_hint": "OCR 英文文本前自动检查 eng 语言包；由 tesseract-ocr-eng 提供。",
+      "alternatives": []
+    },
+    {
+      "id": "tesseract-ocr-chi-sim",
+      "category": "forensics",
+      "command_candidates": [
+        "tesseract"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "health_check_args": [
+        "--list-langs"
+      ],
+      "health_check_contains": [
+        "chi_sim"
+      ],
+      "roles": [
+        "triage",
+        "recon",
+        "attack",
+        "reserve"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "Tesseract 简体中文 OCR 语言数据",
+      "usage_hint": "OCR 简体中文文本前自动检查 chi_sim 语言包；由 tesseract-ocr-chi-sim 提供。",
+      "alternatives": []
+    },
+    {
+      "id": "tesseract-ocr-chi-tra",
+      "category": "forensics",
+      "command_candidates": [
+        "tesseract"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "health_check_args": [
+        "--list-langs"
+      ],
+      "health_check_contains": [
+        "chi_tra"
+      ],
+      "roles": [
+        "triage",
+        "recon",
+        "attack",
+        "reserve"
+      ],
+      "approval_required": false,
+      "description": "Tesseract 繁体中文 OCR 语言数据",
+      "usage_hint": "OCR 繁体中文文本前自动检查 chi_tra 语言包；由 tesseract-ocr-chi-tra 提供。",
+      "alternatives": []
+    },
+    {
+      "id": "zbarimg",
+      "category": "forensics",
+      "command_candidates": [
+        "zbarimg"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "二维码与条码识别",
+      "usage_hint": "仅处理工作区图片。",
+      "alternatives": [
+        "tesseract"
+      ]
+    },
+    {
+      "id": "steghide",
+      "category": "forensics",
+      "command_candidates": [
+        "steghide"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "常见媒体隐写分析",
+      "usage_hint": "仅处理工作区文件，保留原文件。",
+      "alternatives": []
+    },
+    {
+      "id": "stegseek",
+      "category": "forensics",
+      "command_candidates": [
+        "stegseek"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "隐写内容快速爆破提取（steghide 字典破解）",
+      "usage_hint": "仅处理工作区文件；无口令时优先 --seed 空口令探测，字典爆破限制运行时间。",
+      "alternatives": [
+        "steghide"
+      ]
+    },
+    {
+      "id": "apktool",
+      "category": "mobile",
+      "command_candidates": [
+        "apktool"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "Android APK 资源与字节码解包",
+      "usage_hint": "输出写入当前会话工作区。",
+      "alternatives": []
+    },
+    {
+      "id": "file",
+      "category": "reverse",
+      "command_candidates": [
+        "file"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "文件格式识别",
+      "usage_hint": "先识别格式再选择分析器。",
+      "alternatives": []
+    },
+    {
+      "id": "objdump",
+      "category": "reverse",
+      "command_candidates": [
+        "objdump"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "ELF/PE 反汇编与节信息分析",
+      "usage_hint": "仅分析当前任务工作区内的文件。",
+      "alternatives": [
+        "radare2"
+      ]
+    },
+    {
+      "id": "readelf",
+      "category": "reverse",
+      "command_candidates": [
+        "readelf"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "ELF 头、节和符号信息分析",
+      "usage_hint": "仅分析当前任务工作区内的文件。",
+      "alternatives": [
+        "file"
+      ]
+    },
+    {
+      "id": "strings",
+      "category": "reverse",
+      "command_candidates": [
+        "strings"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "二进制可打印字符串提取",
+      "usage_hint": "仅分析当前任务工作区内的文件。",
+      "alternatives": []
+    },
+    {
+      "id": "rabin2",
+      "category": "reverse",
+      "command_candidates": [
+        "rabin2"
+      ],
+      "version_args": [
+        "-v"
+      ],
+      "roles": [
+        "triage",
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "PE/ELF 文件头、导入和节信息分析",
+      "usage_hint": "仅分析当前任务工作区内的文件。",
+      "alternatives": [
+        "file",
+        "readelf"
+      ]
+    },
+    {
+      "id": "checksec",
+      "category": "reverse",
+      "command_candidates": [
+        "${LINGSHU_CHECKSEC_CMD}",
+        "checksec"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "ELF 安全保护检查",
+      "usage_hint": "仅检查工作区二进制。",
+      "alternatives": [
+        "readelf"
+      ]
+    },
+    {
+      "id": "radare2",
+      "category": "reverse",
+      "command_candidates": [
+        "r2",
+        "radare2"
+      ],
+      "version_args": [
+        "-v"
+      ],
+      "roles": [
+        "triage",
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "二进制静态与动态分析",
+      "usage_hint": "默认只读打开工作区二进制。",
+      "alternatives": [
+        "ida",
+        "ghidra"
+      ]
+    },
+    {
+      "id": "ropper",
+      "category": "reverse",
+      "command_candidates": [
+        "ropper"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "ROP gadget 检索",
+      "usage_hint": "仅分析工作区二进制。",
+      "alternatives": [
+        "pwntools"
+      ]
+    },
+    {
+      "id": "pwntools",
+      "category": "reverse",
+      "command_candidates": [
+        "${LINGSHU_PWN_CMD}",
+        "pwn"
+      ],
+      "version_args": [
+        "version"
+      ],
+      "roles": [
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "PWN 分析与利用辅助",
+      "usage_hint": "本地分析可直接使用，网络利用必须审批并限制目标。",
+      "alternatives": []
+    },
+    {
+      "id": "gdb",
+      "category": "reverse",
+      "command_candidates": [
+        "gdb"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "reserve"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "本地动态调试",
+      "usage_hint": "优先通过 GDB MCP 结构化会话调用。",
+      "alternatives": []
+    },
+    {
+      "id": "strace",
+      "category": "reverse",
+      "command_candidates": [
+        "strace"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_execution",
+      "approval_required": true,
+      "description": "Linux 系统调用追踪",
+      "usage_hint": "执行不可信程序前必须审批并使用隔离。",
+      "alternatives": [
+        "gdb"
+      ]
+    },
+    {
+      "id": "wine",
+      "category": "reverse",
+      "command_candidates": [
+        "${LINGSHU_WINE_CMD}",
+        "wine64",
+        "wine"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_execution",
+      "approval_required": true,
+      "description": "Wine 64 位 Windows 程序兼容执行层（Reverse / PWN）",
+      "usage_hint": "仅 Reverse 专家与 PWN 攻击专家可用。仅执行工作区内的 64 位 Windows 样本；须先获得动作审批，保持网络隔离，不适用于 32 位样本。",
+      "alternatives": []
+    },
+    {
+      "id": "qemu-system-x86",
+      "category": "reverse",
+      "command_candidates": [
+        "${LINGSHU_QEMU_CMD}",
+        "qemu-system-x86_64"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "health_check_args": [
+        "--version"
+      ],
+      "health_check_contains": [
+        "qemu emulator version"
+      ],
+      "environment": {
+        "LD_LIBRARY_PATH": "${LINGSHU_QEMU_LIB_DIR}"
+      },
+      "roles": [
+        "reserve",
+        "attack"
+      ],
+      "risk": "local_execution",
+      "approval_required": true,
+      "description": "QEMU x86/x86_64 本地样本仿真器（Reverse / PWN）",
+      "usage_hint": "仅 Reverse 专家与 PWN 攻击专家可用。仅对工作区内授权样本做本地仿真；须先获得动作审批，默认使用 -net none 禁止客户机网络。",
+      "alternatives": []
+    },
+    {
+      "id": "angr",
+      "category": "reverse",
+      "command_candidates": [
+        "${LINGSHU_ANGR_PYTHON}"
+      ],
+      "version_args": [
+        "-c",
+        "import angr; print(angr.__version__)"
+      ],
+      "roles": [
+        "reserve",
+        "attack"
+      ],
+      "risk": "compute_intensive",
+      "approval_required": false,
+      "description": "符号执行与程序分析",
+      "usage_hint": "使用独立环境处理工作区二进制，限制时间和内存。",
+      "alternatives": [
+        "sage"
+      ]
+    },
+    {
+      "id": "msfconsole",
+      "category": "framework",
+      "command_candidates": [
+        "msfconsole"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "exploitation",
+      "approval_required": true,
+      "description": "Metasploit 授权验证框架",
+      "usage_hint": "必须人工批准，禁止持久化和范围外回连。",
+      "alternatives": []
+    },
+    {
+      "id": "bettercap",
+      "category": "network",
+      "command_candidates": [
+        "bettercap"
+      ],
+      "version_args": [
+        "-version"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "privileged",
+      "approval_required": true,
+      "description": "网络分析与中间人测试框架",
+      "usage_hint": "默认禁用，仅在隔离网络和审批后使用。",
+      "alternatives": [],
+      "enabled": false
+    },
+    {
+      "id": "aircrack-ng",
+      "category": "wireless",
+      "command_candidates": [
+        "aircrack-ng"
+      ],
+      "version_args": [
+        "--help"
+      ],
+      "roles": [
+        "attack"
+      ],
+      "risk": "privileged",
+      "approval_required": true,
+      "description": "无线安全测试工具集",
+      "usage_hint": "默认禁用，仅对明确授权无线网络使用。",
+      "alternatives": [],
+      "enabled": false
+    },
+    {
+      "id": "yara",
+      "category": "forensics",
+      "command_candidates": [
+        "yara"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "YARA 规则扫描（样本/目录特征匹配）",
+      "usage_hint": "应急响应：用 YARA 规则对可疑目录全量扫描定位恶意样本；规则文件从技能 references 获取或现场编写。",
+      "alternatives": [
+        "grep"
+      ]
+    },
+    {
+      "id": "log2timeline",
+      "category": "forensics",
+      "command_candidates": [
+        "log2timeline",
+        "log2timeline.py"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "Plaso 统一日志时间线构建（EVTX/Syslog/auth.log 等）",
+      "usage_hint": "应急响应：把多源日志合并为统一时间线后用 psort 过滤导出，重建攻击时序。",
+      "alternatives": []
+    },
+    {
+      "id": "psort",
+      "category": "forensics",
+      "command_candidates": [
+        "psort",
+        "psort.py"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "Plaso 时间线过滤导出",
+      "usage_hint": "配合 log2timeline 产物按时间窗/来源过滤导出 CSV；未安装时可用 grep/awk 手工筛日志。",
+      "alternatives": []
+    },
+    {
+      "id": "chainsaw",
+      "category": "forensics",
+      "command_candidates": [
+        "chainsaw"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "Windows EVTX 快速狩猎（Sigma 规则）",
+      "usage_hint": "应急响应：对 EVTX 目录跑内置 Sigma 规则集，快速定位认证异常/持久化/横向移动痕迹。",
+      "alternatives": [
+        "evtx_dump"
+      ]
+    }
+  ]
 }

@@ -30,12 +30,12 @@ def _keyword_matches(keyword: str, text: str) -> bool:
 
 CategoryName = Literal[
     "web", "pwn", "reverse", "crypto", "forensics",
-    "malware", "misc", "osint", "ai-ml", "unknown",
+    "malware", "ir", "misc", "osint", "ai-ml", "unknown",
 ]
 
 ALL_CATEGORIES: list[CategoryName] = [
     "web", "pwn", "reverse", "crypto", "forensics",
-    "malware", "misc", "osint", "ai-ml",
+    "malware", "ir", "misc", "osint", "ai-ml",
 ]
 
 # 关键词权重（弱信号，每命中 +1）
@@ -66,6 +66,13 @@ _KEYWORD_WEIGHTS: dict[CategoryName, list[str]] = {
         "pcap", "网络包", "volatility", "autopsy",
         "镜像", "扇区", "stego", "隐写", "exif",
         "memory dump", "磁盘镜像",
+    ],
+    "ir": [
+        "应急响应", "incident response", "incident_response",
+        "入侵", "溯源", "失陷", "webshell", "挖矿",
+        "勒索", "持久化", "权限维持", "安全事件",
+        "后门排查", "木马排查", "入侵排查", "异常登录",
+        "横向移动", "攻击链还原", "事件响应",
     ],
     "malware": [
         "malware", "恶意软件", "sandbox", "病毒", "木马",
@@ -656,3 +663,55 @@ def verify_output_matches(stdout: str, expected_lines: list[str]) -> bool:
         return True
     haystack = (stdout or "").lower()
     return all(line.lower() in haystack for line in expected_lines)
+
+
+# ────────────────────────────────────────────────────────────────
+# 应急响应：报告文本中的 IOC 确定性提取
+# ────────────────────────────────────────────────────────────────
+
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_MD5_RE = re.compile(r"\b[a-fA-F0-9]{32}\b")
+_SHA1_RE = re.compile(r"\b[a-fA-F0-9]{40}\b")
+_SHA256_RE = re.compile(r"\b[a-fA-F0-9]{64}\b")
+_DOMAIN_RE = re.compile(
+    r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)"
+    r"+(?:com|net|org|cn|io|top|xyz|info|ru|su|tk|ml|ga|cf|pw|cc)\b")
+# 排除内网/本机噪音：IOC 应指向外部基础设施
+_IOC_IP_EXCLUDE = {"127.0.0.1", "0.0.0.0", "255.255.255.255"}
+
+
+def extract_iocs(report: str, *, limit: int = 20) -> list[dict]:
+    """从专家报告文本提取 IOC（域名/IP/哈希），确定性正则不调 LLM。
+
+    返回 [{type, value}]，去重、排除本机/内网地址，最多 limit 条。
+    SHA256 优先于 SHA1/MD5（长哈希是短哈希的超集，独立命中时才报短哈希）。
+    """
+    if not isinstance(report, str) or not report:
+        return []
+    found: list[dict] = []
+    seen: set[str] = set()
+
+    def _push(kind: str, value: str) -> None:
+        if value.lower() not in seen and len(found) < limit:
+            seen.add(value.lower())
+            found.append({"type": kind, "value": value})
+
+    sha256 = {m.group(0).lower() for m in _SHA256_RE.finditer(report)}
+    sha1 = {m.group(0).lower() for m in _SHA1_RE.finditer(report)}
+    for match in _SHA256_RE.finditer(report):
+        _push("sha256", match.group(0))
+    for match in _SHA1_RE.finditer(report):
+        if match.group(0).lower() not in sha256:
+            _push("sha1", match.group(0))
+    for match in _MD5_RE.finditer(report):
+        value = match.group(0).lower()
+        if value not in sha256 and value not in sha1:
+            _push("md5", match.group(0))
+    for match in _IPV4_RE.finditer(report):
+        value = match.group(0)
+        if value in _IOC_IP_EXCLUDE or value.startswith(("10.", "192.168.", "172.")):
+            continue
+        _push("ip", value)
+    for match in _DOMAIN_RE.finditer(report):
+        _push("domain", match.group(0))
+    return found

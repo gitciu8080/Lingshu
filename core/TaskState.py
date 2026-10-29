@@ -85,13 +85,20 @@ class Phase(str, Enum):
     ANALYSIS = "analysis"
     EXPLOITATION = "exploitation"
     POST_EXPLOITATION = "post_exploitation"
+    # 应急响应（IR）专属轨道：研判定位 → 遏制评估 → 根除验证 → 恢复确认。
+    # 仅 incident_response 模式使用；渗透/CTF 任务不进入这些阶段。
+    IR_IDENTIFICATION = "ir_identification"
+    IR_CONTAINMENT = "ir_containment"
+    IR_ERADICATION = "ir_eradication"
+    IR_RECOVERY = "ir_recovery"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
 
 _ALLOWED_TRANSITIONS = {
-    Phase.PLANNING: {Phase.RECON, Phase.FAILED, Phase.CANCELLED},
+    Phase.PLANNING: {Phase.RECON, Phase.IR_IDENTIFICATION,
+                     Phase.FAILED, Phase.CANCELLED},
     Phase.RECON: {Phase.RECON, Phase.ANALYSIS, Phase.FAILED, Phase.CANCELLED},
     Phase.ANALYSIS: {
         Phase.RECON,
@@ -112,6 +119,38 @@ _ALLOWED_TRANSITIONS = {
     },
     Phase.POST_EXPLOITATION: {
         Phase.POST_EXPLOITATION,
+        Phase.COMPLETED,
+        Phase.FAILED,
+        Phase.CANCELLED,
+    },
+    # IR：研判可反复（新证据回溯），遏制→根除→恢复线性推进，
+    # 每阶段允许回退一级复检；终态三向与渗透轨道一致。
+    Phase.IR_IDENTIFICATION: {
+        Phase.IR_IDENTIFICATION,
+        Phase.IR_CONTAINMENT,
+        Phase.COMPLETED,
+        Phase.FAILED,
+        Phase.CANCELLED,
+    },
+    Phase.IR_CONTAINMENT: {
+        Phase.IR_IDENTIFICATION,
+        Phase.IR_CONTAINMENT,
+        Phase.IR_ERADICATION,
+        Phase.COMPLETED,
+        Phase.FAILED,
+        Phase.CANCELLED,
+    },
+    Phase.IR_ERADICATION: {
+        Phase.IR_CONTAINMENT,
+        Phase.IR_ERADICATION,
+        Phase.IR_RECOVERY,
+        Phase.COMPLETED,
+        Phase.FAILED,
+        Phase.CANCELLED,
+    },
+    Phase.IR_RECOVERY: {
+        Phase.IR_ERADICATION,
+        Phase.IR_RECOVERY,
         Phase.COMPLETED,
         Phase.FAILED,
         Phase.CANCELLED,

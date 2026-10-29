@@ -1324,7 +1324,12 @@ def _mission_mode(target_spec: TargetSpec, goal: str, taskbook_text: str = "") -
     text = f"{goal}\n{taskbook_text}".lower()
     if any(token in text for token in ("nssctf", "ctf", "题目附件", "challenge")):
         return "ctf"
-    if any(token in text for token in ("应急响应", "incident response", "取证", "日志分析", "内存镜像")):
+    if any(token in text for token in (
+        "应急响应", "incident response", "incident_response", "取证",
+        "日志分析", "内存镜像", "溯源", "失陷", "入侵排查", "入侵检测",
+        "webshell", "网站后门", "挖矿", "勒索", "持久化后门", "权限维持",
+        "安全事件", "后门排查", "木马排查",
+    )):
         return "incident_response"
     pentest = any(token in text for token in ("渗透测试", "penetration test", "安全测试任务书", "授权测试", "漏洞验证"))
     if pentest and target_spec.kind != "network":
@@ -1340,10 +1345,14 @@ def _default_goal_for(run_mode: str, mission_mode: str) -> str:
     fast 与 standard+ctf 维持历史默认"获取 Flag"（夺旗语义不变）；
     standard 的渗透/应急模式给出 PTES 主线评估目标。
     """
-    if run_mode == "fast" or mission_mode == "ctf":
+    if mission_mode == "ctf":
         return "获取 Flag"
     if mission_mode == "incident_response":
+        # fast 模式收到的 IR 任务同样以应急研判为目标（历史缺陷：fast+IR
+        # 曾错误返回"获取 Flag"，IR 语义下没有 Flag）
         return "完成应急响应分析：定位攻击路径与影响面，固定证据，输出处置建议"
+    if run_mode == "fast":
+        return "获取 Flag"
     return "对授权目标完成渗透测试评估：识别并验证安全漏洞，评估风险等级，输出测试报告"
 
 
@@ -1539,6 +1548,7 @@ async def run_mission(
     run_mode: str = "standard",
     fast_summary: bool = True,
     token_soft_budget: int = 0,
+    mission_mode: str = "",
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
@@ -1600,7 +1610,11 @@ async def run_mission(
     # 先用原始目标文本（可为空）判定任务模式——网络目标不看目标文本即判
     # authorized_pentest，无循环依赖；再按 运行模式×任务模式 推导默认目标：
     # fast/ctf 维持「获取 Flag」，standard 渗透/应急给出评估目标。
-    mission_mode = _mission_mode(target_spec, goal.strip(), taskbook_text)
+    if mission_mode in {"ctf", "incident_response", "authorized_pentest",
+                        "hybrid_taskbook"}:
+        mission_mode = mission_mode.strip()   # 显式指定优先（CLI/API/前端下拉）
+    else:
+        mission_mode = _mission_mode(target_spec, goal.strip(), taskbook_text)
     goal_text = goal.strip() or _default_goal_for(run_mode, mission_mode)
     # classify 基于目标类型 + 目标描述 + 归档清单做启发式判断，
     # 输出 primary 题型、候选题型、置信度、证据与所属阶段，
@@ -2610,6 +2624,7 @@ async def run_mission(
                     build_role_agent_state(mission_id, "analysis")
                     if use_v2_workspace else None
                 ),
+                mission_mode=mission_mode,
             ),
         )
 
@@ -2689,8 +2704,11 @@ async def run_mission(
             if event_callback is not None:
                 event_callback("session_title", title=mission.title, agent="system")
             expert_roster_token = bind_expert_roster()
-            mission.transition(Phase.RECON, "快速模式跳过战略规划")
-            mission.transition(Phase.ANALYSIS, "快速模式直接进入执行")
+            if mission.mission_mode == "incident_response":
+                mission.transition(Phase.IR_IDENTIFICATION, "应急响应：进入研判定位阶段")
+            else:
+                mission.transition(Phase.RECON, "快速模式跳过战略规划")
+                mission.transition(Phase.ANALYSIS, "快速模式直接进入执行")
             store.save(mission)
             _push_target_info()
         else:
@@ -3033,9 +3051,12 @@ async def run_mission(
             expert_roster_token = bind_expert_roster()
             # 状态机保持合法迁移；首轮 Recon 已在规划前完成，因此随即进入 ANALYSIS，
             # Orchestrator 只有在信息不足时才再次派遣 Recon。
-            mission.transition(Phase.RECON, "战略计划已制定")
-            if mission.findings:
-                mission.transition(Phase.ANALYSIS, "首轮 Recon 证据与二次分类已完成")
+            if mission.mission_mode == "incident_response":
+                mission.transition(Phase.IR_IDENTIFICATION, "应急响应：进入研判定位阶段")
+            else:
+                mission.transition(Phase.RECON, "战略计划已制定")
+                if mission.findings:
+                    mission.transition(Phase.ANALYSIS, "首轮 Recon 证据与二次分类已完成")
             store.save(mission)  # 每步都持久化，保证崩溃可恢复
             _push_target_info()   # 首次推送靶机信息
             print(f"[Brain] 作战计划\n{mission.plan}\n")
@@ -3811,6 +3832,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="fast 模式收尾跳过 Summary 报告生成（省 token，挂机批跑推荐）",
     )
     parser.add_argument(
+        "--mission-mode",
+        choices=["ctf", "incident_response", "authorized_pentest", "hybrid_taskbook"],
+        default=None,
+        help="任务模式：显式指定后跳过 goal 文本推断（不指定则按目标/任务书自动判定）",
+    )
+    parser.add_argument(
         "--token-budget",
         type=int,
         default=0,
@@ -3834,6 +3861,7 @@ def main() -> None:
                 run_mode=args.mode,
                 fast_summary=not args.no_fast_summary,
                 token_soft_budget=args.token_budget,
+                mission_mode=args.mission_mode or "",
             ),
         )
     except (ValueError, RuntimeError) as exc:

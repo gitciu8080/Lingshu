@@ -8,9 +8,10 @@ CHECK_ONLY=0
 
 usage() {
   printf '%s\n' \
-    '用法: sudo ./scripts/install-security-tools.sh [--profile core|extended] [--dry-run|--check]' \
+    '用法: sudo ./scripts/install-security-tools.sh [--profile core|extended|ir] [--dry-run|--check]' \
     '  core      高频侦察、Web、取证（含 Volatility 2 Python 2）、OCR 语言包、逆向辅助工具与 OpenJDK JDK（默认）' \
     '  extended  在 core 基础上增加 Ghidra、Bettercap、Wine 等重型/特权组件' \
+    '  ir        在 core 基础上增加应急响应取证组件（yara、plaso 日志时间线；chainsaw 需手动下载）' \
     '  --check   只检查包状态，不安装'
 }
 
@@ -26,7 +27,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$PROFILE" in
-  core|extended) ;;
+  core|extended|ir) ;;
   *) printf '不支持的 profile: %s\n' "$PROFILE" >&2; exit 2 ;;
 esac
 
@@ -35,11 +36,21 @@ CORE_PACKAGES=(
   strace python2 default-jdk tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-chi-tra
 )
 EXTENDED_PACKAGES=(ghidra bettercap wine wine64 wine32)
+# 应急响应（IR）取证工具：YARA 规则扫描、plaso 日志时间线。
+# chainsaw 为 GitHub 二进制发布，apt 无包——--check 提示手动安装。
+IR_PACKAGES=(yara plaso-python3)
 # 当前源可能缺失的可选工具：逐个容错安装，失败不阻断整体。
 OPTIONAL_PACKAGES=(outguess)
 PACKAGES=("${CORE_PACKAGES[@]}")
 if [ "$PROFILE" = "extended" ]; then
   PACKAGES+=("${EXTENDED_PACKAGES[@]}")
+fi
+if [ "$PROFILE" = "ir" ] || [ "$PROFILE" = "extended" ]; then
+  PACKAGES+=("${IR_PACKAGES[@]}")
+fi
+# chainsaw 无论何种 profile 都做存在性检查并提示（不自动下载）
+if ! command -v chainsaw >/dev/null 2>&1; then
+  printf '  [提示]   chainsaw 未安装（EVTX 狩猎）：从 https://github.com/WithSecureLabs/chainsaw/releases 下载二进制放入 PATH\n'
 fi
 
 printf '灵枢工具安装配置: %s\n' "$PROFILE"

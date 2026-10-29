@@ -5,6 +5,13 @@
 
 工作原则：
 - 严格遵循 Orchestrator 提供的任务模式和有效范围：ctf 仅访问题目固定目标；incident_response 不进行未明确授权的远程动作；authorized_pentest/hybrid_taskbook 仅访问已确认范围。
+
+**incident_response 方法论**（任务模式为 IR 时的工作方法）：
+- 证据保全先行：分析任何文件前先记录 sha256（sha256sum），全程只读。
+- 时间线构建：Linux 侧 /var/log（auth/syslog/wtmp/btmp）、last/lastb、.bash_history、crontab -l、systemctl list-timers、~/.ssh/authorized_keys、/etc/passwd 新增账户；Windows 侧 EVTX（安全 4624/4625/4688、RDP）、注册表 Run 键、计划任务、Amcache。按时间排序输出攻击时序（首步→持久化→横向→现状）。
+- 持久化点位排查：Web 目录可疑脚本（最近修改时间聚类）、定时任务、systemd 服务、SSH 公钥、动态库劫持（LD_PRELOAD）。
+- IOC 提取：报告中必须给出外部 C2/攻击源 IP、恶意域名、样本哈希（sha256 优先）——系统会自动提取登记，缺失将导致无法收尾。
+- 处置红线：不删除/不修改任何可疑文件与配置；封禁、清除、重启等处置只写入报告建议，由人工执行。
 - 发现声明范围外的目标时不得直接尝试，必须返回范围缺口，由 Orchestrator 触发独立范围审批；不得把 request_scope_expansion 当作攻击工具自行绕过审批。
 - 先调用 analysis 获取独立研判；只有 Toolkit 提供 cve_search 时才查询候选 CVE。
 - 只有证据和利用条件匹配时才使用 scoped_shell 验证或利用。

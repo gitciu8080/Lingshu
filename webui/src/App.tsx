@@ -787,6 +787,10 @@ const TOOL_ARG_VALUE_LABELS: Record<string, string> = {
   analysis: "分析阶段",
   exploitation: "攻击验证阶段",
   post_exploitation: "后渗透阶段",
+  ir_identification: "研判定位阶段",
+  ir_containment: "遏制评估阶段",
+  ir_eradication: "根除验证阶段",
+  ir_recovery: "恢复确认阶段",
   completed: "已完成",
   in_progress: "进行中",
   pending: "待执行",
@@ -1000,6 +1004,10 @@ function phaseLabel(phase?: string) {
         analysis: "研判",
         exploitation: "利用验证",
         post_exploitation: "后渗透",
+        ir_identification: "研判定位",
+        ir_containment: "遏制评估",
+        ir_eradication: "根除验证",
+        ir_recovery: "恢复确认",
         completed: "已完成",
         failed: "失败",
         cancelled: "已停止",
@@ -1188,6 +1196,7 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
     [intensity, setIntensity] = useState("medium"),
     [qwenToolMode, setQwenToolMode] = useState("simple");
   const [fastSummary, setFastSummary] = useState(false);
+  const [missionMode, setMissionMode] = useState("auto");
   // 单任务模式（默认跟随全局，对话框内可改）
   const [mode, setMode] = useState<RunMode>("standard");
   useEffect(() => { if (open) setMode(runMode); }, [open, runMode]);
@@ -1234,6 +1243,7 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
         model,
         thinking_intensity: intensity,
         ...(mode === "fast" ? { mode: "fast", fast_summary: fastSummary } : {}),
+        ...(missionMode !== "auto" ? { mission_mode: missionMode } : {}),
         ...(provider === "qwen" || provider.startsWith("qwen::")
           ? { qwen_tool_call_mode: qwenToolMode } : {}),
       });
@@ -1337,6 +1347,16 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
                 </select>
               </label>
             </div>
+            <label>
+              任务模式
+              <select value={missionMode} onChange={(e) => setMissionMode(e.target.value)}>
+                <option value="auto">自动判定（按目标与任务描述）</option>
+                <option value="incident_response">应急响应（本地取证/日志/镜像分析）</option>
+                <option value="authorized_pentest">授权渗透测试</option>
+                <option value="hybrid_taskbook">混合任务书</option>
+                <option value="ctf">CTF 夺旗</option>
+              </select>
+            </label>
             {(provider === "qwen" || provider.startsWith("qwen::")) && <label>
               工具调用难度
               <select value={qwenToolMode} onChange={(e) => setQwenToolMode(e.target.value)}>
@@ -1390,6 +1410,7 @@ function RerunMission({
     [intensity, setIntensity] = useState("medium"),
     [qwenToolMode, setQwenToolMode] = useState("simple"),
     [fastSummary, setFastSummary] = useState(false),
+    [missionMode, setMissionMode] = useState("auto"),
     [withContext, setWithContext] = useState(true),
     [submitting, setSubmitting] = useState(false),
     [mode, setMode] = useState<RunMode>("standard");
@@ -1463,6 +1484,7 @@ function RerunMission({
         model,
         thinking_intensity: intensity,
         ...(mode === "fast" ? { mode: "fast", fast_summary: fastSummary } : {}),
+        ...(missionMode !== "auto" ? { mission_mode: missionMode } : {}),
         ...(provider === "qwen" || provider.startsWith("qwen::")
           ? { qwen_tool_call_mode: qwenToolMode } : {}),
         ...(withContext ? { source_session_id: source.id } : {}),
@@ -1556,6 +1578,16 @@ function RerunMission({
                 </select>
               </label>
             </div>
+            <label>
+              任务模式
+              <select value={missionMode} onChange={(event) => setMissionMode(event.target.value)}>
+                <option value="auto">自动判定</option>
+                <option value="incident_response">应急响应</option>
+                <option value="authorized_pentest">授权渗透测试</option>
+                <option value="hybrid_taskbook">混合任务书</option>
+                <option value="ctf">CTF 夺旗</option>
+              </select>
+            </label>
             {(provider === "qwen" || provider.startsWith("qwen::")) && <label>
               工具调用难度
               <select value={qwenToolMode} onChange={(event) => setQwenToolMode(event.target.value)}>
@@ -3486,6 +3518,14 @@ function ConsoleApp() {
                 >
                   <Zap size={13} className={sessionRunMode === "fast" ? "" : "off"} />
                   {sessionRunMode === "fast" ? "FAST" : "STANDARD"}
+                </span>
+              )}
+              {active && String(detail.mission_mode || "") === "incident_response" && (
+                <span
+                  className="mode-badge ir-badge"
+                  title="当前会话任务模式：应急响应（本地取证/日志/镜像分析，不进行远程范围扩展）"
+                >
+                  IR
                 </span>
               )}
               <b>

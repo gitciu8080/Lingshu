@@ -86,8 +86,14 @@ _CYBERPENDA_SKILL_MAP: dict[str, list[str]] = {
     "pwn": ["pwn-chain"],
     "reverse": ["reverse-skill-router", "reverse-engineering"],
     "crypto": ["ctf-sandbox-orchestrator"],
-    "forensics": ["digital-forensics"],
-    "malware": ["malware-analysis"],
+    "forensics": ["digital-forensics", "competition-forensic-timeline"],
+    "malware": ["malware-analysis", "competition-malware-config"],
+    # 应急响应：库存 IR bundle 全量激活（数字取证/威胁狩猎/AD 溯源/
+    # 时间线重建/凭证窃取痕迹）
+    "ir": [
+        "digital-forensics", "threat-hunting", "windows-ad",
+        "competition-forensic-timeline", "competition-lsass-ticket-material",
+    ],
     "misc": ["ctf-sandbox-orchestrator"],
     "osint": ["pentest-tools"],
     "ai-ml": ["llm-security"],
@@ -104,6 +110,7 @@ _ATTACK_CATALOG_CATEGORIES: dict[str, set[str]] = {
     "crypto": {"crypto"},
     "forensics": {"forensics"},
     "malware": {"forensics", "reverse"},
+    "ir": {"forensics", "misc"},
     "misc": {"forensics", "crypto", "reverse"},
     "osint": {"recon"},
     "ai-ml": set(),
@@ -393,7 +400,7 @@ async def create_attack_agent(
     antsword_mcp: MCPClient | None = None
     antsword_tools: list = []
     selected_antsword_tools = (
-        select_antsword_tools(capability_context) if primary in {"web", "unknown"} else ()
+        select_antsword_tools(capability_context) if primary in {"web", "unknown", "ir"} else ()
     )
     if selected_antsword_tools:
         try:

@@ -755,7 +755,8 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                            authorized_target: str | None = None,
                            run_mode: str = "standard",
                            fast_summary: bool = True,
-                           token_soft_budget: int = 0):
+                           token_soft_budget: int = 0,
+                           mission_mode: str = ""):
     """运行任务并处理清理逻辑。"""
     status_val = "failed"
     phase = "initializing"
@@ -786,6 +787,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             run_mode=run_mode,
             fast_summary=fast_summary,
             token_soft_budget=token_soft_budget,
+            mission_mode=mission_mode,
         )
         # 如果 Orchestrator 已经确定完成并取得 Flag，迟到的前端取消请求不得覆盖成功终态。
         mission_completed = bool(
@@ -1317,6 +1319,11 @@ class MissionStartRequest(BaseModel):
     mode: str | None = Field(
         default=None, pattern="^(standard|fast)$",
         description="运行模式：standard=完整渗透工作流（默认）| fast=快速模式（单指挥官调度，主打夺旗速度）",
+    )
+    mission_mode: str | None = Field(
+        default=None,
+        pattern="^(ctf|incident_response|authorized_pentest|hybrid_taskbook)$",
+        description="任务模式（可选）：显式指定后跳过 goal 文本推断。incident_response=应急响应（本地取证/日志/镜像分析）",
     )
     fast_summary: bool = Field(
         default=True,
@@ -2582,6 +2589,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
                 "authorized_target": authorized_target,
                 "attachment_target": attachment_target or "",
                 "run_mode": run_mode,
+                "mission_mode": str(req.mission_mode or "").strip(),
                 "fast_summary": bool(req.fast_summary),
                 "token_soft_budget": int(req.token_soft_budget or 0),
             }),
@@ -2624,6 +2632,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
                          qwen_tool_call_mode=req.qwen_tool_call_mode,
                          authorized_target=(authorized_target if attachment_target else None),
                          run_mode=run_mode,
+                         mission_mode=str(req.mission_mode or "").strip(),
                          fast_summary=bool(req.fast_summary),
                          token_soft_budget=int(req.token_soft_budget or 0))
     )
@@ -3582,6 +3591,7 @@ async def resume_session(
                          thinking_intensity=str(session.get("thinking_intensity") or "medium"),
                          authorized_target=(authorized_target if attachment_target else None),
                          run_mode=str(target_info.get("run_mode") or "standard").strip().lower() or "standard",
+                         mission_mode=str(target_info.get("mission_mode") or "").strip(),
                          fast_summary=bool(target_info.get("fast_summary", True)),
                          token_soft_budget=int(target_info.get("token_soft_budget") or 0)),
     )

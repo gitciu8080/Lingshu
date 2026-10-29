@@ -775,3 +775,6 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 .ob-modal>footer{display:flex;align-items:center;gap:12px;padding:13px 18px;border-top:1px solid var(--line2)}
 .ob-step-label{margin-left:auto;color:var(--dim);font:11px ui-monospace,monospace}
 @media(max-width:700px){.ob-cards{grid-template-columns:1fr 1fr}.ob-mock-body{grid-template-columns:90px 1fr}.ob-mock-body>.ob-mock-cell:last-child{display:none}}
+
+/* 应急响应徽章：与 mode-badge 同基线，橙色系区分 */
+.mode-badge.ir-badge{color:#f59e0b;border-color:rgba(245,158,11,.45);background:rgba(245,158,11,.10)}
