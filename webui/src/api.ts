@@ -542,6 +542,23 @@ export const api = {
     request<{ pending: boolean; event?: Record<string, unknown> }>(
       `/api/session/${encodeURIComponent(id)}/pending_approval`,
     ),
+  intelKeys: () =>
+    request<{ keys: { platforms: Record<string, { configured: boolean; email: string; hint: string; source: string }> } }>(
+      "/api/my/intel-keys",
+    ),
+  setIntelKey: (platform: string, key: string, email: string) =>
+    request<{ ok: boolean }>("/api/my/intel-keys", {
+      method: "PUT",
+      body: JSON.stringify({ platform, key, email }),
+    }),
+  deleteIntelKey: (platform: string) =>
+    request<{ ok: boolean }>(`/api/my/intel-keys/${encodeURIComponent(platform)}`, {
+      method: "DELETE",
+    }),
+  testIntelKey: (platform: string) =>
+    request<{ ok: boolean; error?: string }>(`/api/my/intel-keys/${encodeURIComponent(platform)}/test`, {
+      method: "POST",
+    }),
   upload: (files: File[]) => {
     const body = new FormData();
     files.forEach((file) => body.append("files", file));

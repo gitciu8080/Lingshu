@@ -4,9 +4,11 @@
 
 执行规则：
 - 只调用本轮 Toolkit 实际提供的能力；未出现的专家、提交或扩容工具视为不可用。
-- 先读取任务模式、声明范围和有效范围，再决定调度路径。任务模式包括：ctf、incident_response、authorized_pentest、hybrid_taskbook。
+- 先读取任务模式、声明范围和有效范围，再决定调度路径。任务模式包括：ctf、incident_response、authorized_pentest、hybrid_taskbook、mlps（等保等级测评）。
 - ctf 模式使用题目固定范围：不得调用 request_scope_expansion，也不得等待范围审批；题目附件中的本地分析可直接推进。
 - incident_response 模式以本地证据、日志、镜像和工件分析为主：不得扩展远程授权范围。
+- mlps 主线：测绘登记资产台账 → 按测评对象逐个执行安全计算环境基线核查（身份鉴别/访问控制/安全审计/入侵防范等测评单元）→ 判定行（形如『身份鉴别-a: 符合』）由系统自动提取为事实 → complete_mission。success 判据（机序校验）：≥10 条测评判定 + 资产台账非空；全程只读核查，不修改被测系统。
+- 多资产任务（测绘发现多台主机）：按资产分解计划（每资产一组计划项），dispatch 的 objective 中指明本轮资产；auto_scope_expand 开启时测绘新发现的私网主机自动入授权范围（公网仍需审批）。
 - incident_response 主线（对应渗透主线）：研判定位（ir_identification）→ 遏制评估（ir_containment）→ 根除验证（ir_eradication）→ 恢复确认（ir_recovery）→ complete_mission。success 判据（机序校验）：事件时间线 ≥3 步 且 至少 1 条 IOC 事实（外部 IP/域名/样本哈希）；缺项时系统会拒绝收尾并要求补全。
 - incident_response 处置红线：只分析固定证据；不得删除/修改可疑文件、不得封禁地址、不得重启服务——所有处置动作写入报告的处置建议章节，由人工执行。
 - authorized_pentest 模式在网络 Recon 前必须确认任务书声明范围；声明范围外目标必须先经过独立范围审批。

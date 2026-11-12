@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import httpx
 import json
 import logging
 import os
@@ -90,6 +91,13 @@ from Tools.KnowledgeBase import get_rag_service
 from core.TaskState import infer_exploitation_approval_status
 from Tools.tool_catalog import get_tool_catalog, python_environment_snapshot
 from Tools.target import normalize_target
+from core.intel_config import (
+    delete_intel_key,
+    get_intel_keys,
+    intel_keys_brief as intel_keys_brief_for,
+    set_intel_key,
+)
+from Tools.AssetIntel import IntelError, intel_search
 from core.model_registry import (
     ModelRegistryError,
     active_llm_providers,
@@ -756,7 +764,8 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                            run_mode: str = "standard",
                            fast_summary: bool = True,
                            token_soft_budget: int = 0,
-                           mission_mode: str = ""):
+                           mission_mode: str = "",
+                           auto_scope_expand: bool = False):
     """运行任务并处理清理逻辑。"""
     status_val = "failed"
     phase = "initializing"
@@ -788,6 +797,7 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             fast_summary=fast_summary,
             token_soft_budget=token_soft_budget,
             mission_mode=mission_mode,
+            auto_scope_expand=auto_scope_expand,
         )
         # 如果 Orchestrator 已经确定完成并取得 Flag，迟到的前端取消请求不得覆盖成功终态。
         mission_completed = bool(
@@ -1320,9 +1330,13 @@ class MissionStartRequest(BaseModel):
         default=None, pattern="^(standard|fast)$",
         description="运行模式：standard=完整渗透工作流（默认）| fast=快速模式（单指挥官调度，主打夺旗速度）",
     )
+    auto_scope_expand: bool = Field(
+        default=False,
+        description="测绘发现的私网新主机自动加入授权范围（仅 mlps/渗透系模式生效；公网地址永不自动）",
+    )
     mission_mode: str | None = Field(
         default=None,
-        pattern="^(ctf|incident_response|authorized_pentest|hybrid_taskbook)$",
+        pattern="^(ctf|incident_response|authorized_pentest|hybrid_taskbook|mlps)$",
         description="任务模式（可选）：显式指定后跳过 goal 文本推断。incident_response=应急响应（本地取证/日志/镜像分析）",
     )
     fast_summary: bool = Field(
@@ -2033,6 +2047,82 @@ async def user_provider_catalog(current_user: dict = Depends(get_current_user)):
     return {"providers": provider_catalog()}
 
 
+# ── 资产测绘引擎 Key 管理（FOFA/Hunter/Shodan/ZoomEye）──
+
+@app.get("/api/my/intel-keys")
+async def my_intel_keys(current_user: dict = Depends(get_current_user)):
+    """当前用户可见的测绘引擎配置（脱敏 hint，不回明文）。"""
+    scope = _owner_scope(current_user)
+    owner_id = None if scope.get("owner_is_superadmin") else scope["owner_user_id"]
+    return {"keys": intel_keys_brief_for(owner_id)}
+
+
+class IntelKeyIn(BaseModel):
+    platform: str
+    key: str
+    email: str = ""
+
+
+@app.put("/api/my/intel-keys")
+async def my_set_intel_key(data: IntelKeyIn, current_user: dict = Depends(get_current_user)):
+    scope = _owner_scope(current_user)
+    owner_id = None if scope.get("owner_is_superadmin") else scope["owner_user_id"]
+    try:
+        brief = await asyncio.to_thread(
+            set_intel_key, owner_id, data.platform, key=data.key, email=data.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"ok": True, "keys": brief}
+
+
+@app.delete("/api/my/intel-keys/{platform}")
+async def my_delete_intel_key(platform: str, current_user: dict = Depends(get_current_user)):
+    scope = _owner_scope(current_user)
+    owner_id = None if scope.get("owner_is_superadmin") else scope["owner_user_id"]
+    brief = await asyncio.to_thread(delete_intel_key, owner_id, platform)
+    return {"ok": True, "keys": brief}
+
+
+@app.post("/api/my/intel-keys/{platform}/test")
+async def my_test_intel_key(platform: str, current_user: dict = Depends(get_current_user)):
+    """测试连接：真实查询 size=1，只回可用性不回结果。"""
+    scope = _owner_scope(current_user)
+    owner_id = None if scope.get("owner_is_superadmin") else scope["owner_user_id"]
+    if not get_intel_keys(owner_id, platform):
+        raise HTTPException(status_code=400, detail=f"{platform} 未配置 API Key")
+    probe = {"fofa": 'title="test"', "hunter": 'web.title="test"',
+             "shodan": "http", "zoomeye": "apache"}.get(platform, "http")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45, connect=15)) as client:
+            _, rows, _ = await intel_search(client, owner_id, platform, probe, size=1)
+    except IntelError as exc:
+        return {"ok": False, "error": str(exc)[:200]}
+    return {"ok": True, "sample_count": len(rows)}
+
+
+@app.get("/api/superadmin/intel-keys")
+async def superadmin_intel_keys(current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "superadmin":
+        raise HTTPException(status_code=403, detail="仅超级管理员")
+    return {"keys": intel_keys_brief_for(None)}
+
+
+@app.put("/api/superadmin/intel-keys")
+async def superadmin_set_intel_key(
+    data: IntelKeyIn, current_user: dict = Depends(get_current_user),
+):
+    if current_user.get("role") != "superadmin":
+        raise HTTPException(status_code=403, detail="仅超级管理员")
+    try:
+        brief = await asyncio.to_thread(
+            set_intel_key, None, data.platform, key=data.key, email=data.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "keys": brief}
+
+
 @app.get("/api/my/model-providers")
 async def my_list_llm_providers(current_user: dict = Depends(get_current_user)):
     """当前用户可管理的 LLM 供应商配置（掩码视图，管理表格用）。"""
@@ -2590,6 +2680,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
                 "attachment_target": attachment_target or "",
                 "run_mode": run_mode,
                 "mission_mode": str(req.mission_mode or "").strip(),
+                "auto_scope_expand": bool(req.auto_scope_expand),
                 "fast_summary": bool(req.fast_summary),
                 "token_soft_budget": int(req.token_soft_budget or 0),
             }),
@@ -2633,6 +2724,7 @@ async def session_start(req: MissionStartRequest, current_user: dict = Depends(g
                          authorized_target=(authorized_target if attachment_target else None),
                          run_mode=run_mode,
                          mission_mode=str(req.mission_mode or "").strip(),
+                         auto_scope_expand=bool(req.auto_scope_expand),
                          fast_summary=bool(req.fast_summary),
                          token_soft_budget=int(req.token_soft_budget or 0))
     )
@@ -3592,6 +3684,7 @@ async def resume_session(
                          authorized_target=(authorized_target if attachment_target else None),
                          run_mode=str(target_info.get("run_mode") or "standard").strip().lower() or "standard",
                          mission_mode=str(target_info.get("mission_mode") or "").strip(),
+                         auto_scope_expand=bool(target_info.get("auto_scope_expand", False)),
                          fast_summary=bool(target_info.get("fast_summary", True)),
                          token_soft_budget=int(target_info.get("token_soft_budget") or 0)),
     )
@@ -3653,7 +3746,7 @@ async def cancel_session(session_id: str, current_user: dict = Depends(get_curre
             detail="任务停止超时，后台清理仍在进行，请稍后重试",
         ) from exc
     finally:
-        if ctx.task.done():
+        if ctx.task is None or ctx.task.done():
             _active_sessions.pop(session_id, None)
     return {"status": "cancelled", "message": "任务及其后台 Agent/命令进程已全部停止"}
 

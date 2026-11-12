@@ -207,6 +207,21 @@ class FactRecord:
 
 
 @dataclass
+class AssetRecord:
+    """资产台账条目：测绘/侦察发现的主机与服务，按 (host, port) 唯一。"""
+
+    id: str
+    host: str
+    port: int | None = None
+    service: str = ""
+    source: str = ""                 # 发现来源（专家名或 intel:<platform>）
+    evidence_ids: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    first_seen: str = field(default_factory=_now)
+    last_seen: str = field(default_factory=_now)
+
+
+@dataclass
 class AttemptRecord:
     """一次高层行动（Recon/Attack/Reverse）的结构化执行记录。"""
 
@@ -299,7 +314,7 @@ class MissionState:
     authorized: bool
     session_id: str = ""
     title: str = ""
-    # 任务模式：ctf / incident_response / authorized_pentest / hybrid_taskbook
+    # 任务模式：ctf / incident_response / authorized_pentest / hybrid_taskbook / mlps
     mission_mode: str = ""
     phase: Phase = Phase.PLANNING
     plan: str = ""
@@ -384,6 +399,10 @@ class MissionState:
     hypotheses: list[HypothesisRecord] = field(default_factory=list)
     action_history: list[ActionRecord] = field(default_factory=list)
     failed_paths: list[FailedPathRecord] = field(default_factory=list)
+    assets: list[AssetRecord] = field(default_factory=list)
+    # 测绘发现自动扩容开关（opt-in）：开启时新发现的 RFC1918 私网主机自动
+    # 加入授权范围；公网地址永不自动扩容。仅 mlps/pentest 系模式生效。
+    auto_scope_expand: bool = False
     action_sequence: int = 0
     hypothesis_sequence: int = 0
     failed_path_sequence: int = 0
@@ -634,6 +653,69 @@ class MissionState:
             category=category,
         )
         return fact
+
+    def add_asset(
+        self,
+        host: str,
+        port: int | None = None,
+        service: str = "",
+        *,
+        source: str = "",
+        evidence_ids: list[str] | None = None,
+        confidence: float = 0.0,
+    ) -> AssetRecord:
+        """登记资产台账；按 (host, port) 唯一——命中时更新 last_seen/service/
+        confidence 并合并 evidence 引用（台账语义：资产是持续观察对象，
+        不是一次性事实）。host 必填，port 可空（仅主机级发现）。"""
+        normalized_host = str(host or "").strip().lower()
+        if not normalized_host:
+            raise ValueError("Asset host 不能为空")
+        valid_evidence = {item.id for item in self.evidence_records}
+        refs = [
+            item for item in dict.fromkeys(evidence_ids or [])
+            if item in valid_evidence
+        ]
+        try:
+            normalized_port = int(port) if port is not None else None
+        except (TypeError, ValueError):
+            normalized_port = None
+        existing = next(
+            (
+                item for item in self.assets
+                if item.host == normalized_host and item.port == normalized_port
+            ),
+            None,
+        )
+        if existing is not None:
+            existing.last_seen = _now()
+            if service and service != existing.service:
+                existing.service = service
+            existing.confidence = max(existing.confidence,
+                                      max(0.0, min(float(confidence), 1.0)))
+            for ref in refs:
+                if ref not in existing.evidence_ids:
+                    existing.evidence_ids.append(ref)
+            self.record(
+                "Orchestrator", "asset_updated",
+                asset_id=existing.id, host=existing.host, port=existing.port,
+            )
+            return existing
+        asset = AssetRecord(
+            id=f"as{len(self.assets) + 1}",
+            host=normalized_host,
+            port=normalized_port,
+            service=str(service or "")[:120],
+            source=str(source or "")[:120],
+            evidence_ids=refs,
+            confidence=max(0.0, min(float(confidence), 1.0)),
+        )
+        self.assets.append(asset)
+        self.record(
+            "Orchestrator", "asset_added",
+            asset_id=asset.id, host=asset.host, port=asset.port,
+            service=asset.service, source=asset.source,
+        )
+        return asset
 
     def add_hypothesis(
         self,
@@ -890,6 +972,7 @@ class MissionState:
             "historical_context": {
                 "counts": {
                     "facts": len(self.facts), "evidence": len(self.evidence_records),
+                    "assets": len(self.assets),
                     "actions": len(self.action_history),
                     "failed_paths": len(self.failed_paths),
                     "hypotheses": len(self.hypotheses),
@@ -910,7 +993,7 @@ class MissionState:
 
 # MissionStore 持久化 schema 版本。旧文件缺字段时由 load() 自动迁移，
 # 不回写（保持旧任务只读兼容）。
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # v1: 初始字段（target/goal/phase/plan/findings/attack_chain/flag/...）
 # v2: v0.2.0 新增 target_spec/category_decision/category_history/
@@ -925,6 +1008,7 @@ SCHEMA_VERSION = 8
 # v6: RAG 有界 Knowledge Context、查询指纹与共享缓存状态
 # v7: 人工利用审批改为可恢复的多态状态，不再以 false 代表所有未批准情况
 # v8: 任务模式、声明/有效范围及独立范围审批状态
+# v9: 资产台账 assets（测绘/侦察发现的结构化主机清单）
 
 
 class MissionStoreCorruptedError(OSError):
@@ -1028,6 +1112,10 @@ class MissionStore:
         merged["facts"] = [
             item if isinstance(item, FactRecord) else FactRecord(**item)
             for item in merged.get("facts") or []
+        ]
+        merged["assets"] = [
+            item if isinstance(item, AssetRecord) else AssetRecord(**item)
+            for item in merged.get("assets") or []
         ]
         merged["evidence_records"] = [
             item if isinstance(item, EvidenceRecord) else EvidenceRecord(**item)

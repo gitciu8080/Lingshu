@@ -12,6 +12,7 @@ REVERSE_EXPERT = "Ryan - 逆向程序专家"
 SCOPE_AUDITOR_EXPERT = "Grace - 授权范围审计专家"
 
 _ATTACK_EXPERTS = {
+    "mlps": "Grace - 等保测评专家",
     "web": "Mike - WEB渗透专家",
     "pwn": "Victor - 二进制利用专家",
     "reverse": "Ryan - 逆向利用专家",

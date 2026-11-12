@@ -45,10 +45,12 @@ def create_network_recon_agent(
     offloader=None,
     context_config=None,
     state=None,
+    owner_id: int | None = None,
     artifact_root: str | Path | None = None,
     vision_model=None,
     vision_roots: tuple[str | Path, ...] = (),
     include_cve_search: bool = True,
+    include_intel: bool = False,
 ) -> Agent:
     # ``workdir`` 是网络 Recon 的任务命令工作目录：API 的 v2
     # 会传入会话 WorkDir，legacy 模式传入全局 WorkDir，禁止回退到源码根目录。
@@ -63,6 +65,10 @@ def create_network_recon_agent(
             scope_registry, workspace_root=artifact_root, workdir=workdir,
             timeout=min(timeout, 90), role="recon",
         ))
+    if include_intel:
+        from Tools.AssetIntel import create_intel_search_tool
+
+        tools.append(create_intel_search_tool(owner_id))
     if include_cve_search:
         tools.append(create_cve_search_tool())
     if vision_model is not None and vision_roots:

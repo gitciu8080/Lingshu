@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
-  Bot, BrainCircuit, Coins, KeyRound, LogOut, Plus, RotateCcw, Search, ShieldAlert, Trash2, UserCog,
+  Bot, BrainCircuit, Coins, Globe, KeyRound, LogOut, Plus, RotateCcw, Search, ShieldAlert, Trash2, UserCog,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -19,9 +19,10 @@ import { ProviderWizardDialog } from "./ProviderWizard";
 
 // 用户设置页（/settings）：个人版管理台，复用 superadmin 页面的视觉体系。
 // Tab1 大模型供应商（私有池）；Tab2 Agent 模型分工；Tab3 用量统计；Tab4 账号安全。
-type Tab = "providers" | "bindings" | "usage" | "account";
+type Tab = "providers" | "bindings" | "usage" | "intel" | "account";
 
 const TITLES: Record<Tab, [string, string]> = {
+  intel: ["资产测绘引擎", "INTEL SEARCH / FOFA·Hunter·Shodan·ZoomEye API Key"],
   providers: ["大模型供应商管理", "MY LLM PROVIDERS / 私有供应商、模型列表与凭据"],
   bindings: ["Agent 模型分工", "AGENT MODEL BINDINGS / 每个 Agent 角色使用的模型"],
   usage: ["Token 用量统计", "TOKEN USAGE / 模型推理消耗的输入与输出 Token"],
@@ -110,6 +111,89 @@ export function UsageDayPicker({ days, onChange }: { days: number; onChange: (da
         ))}
       </select>
     </div>
+  );
+}
+
+const INTEL_PLATFORMS: { id: string; label: string; needsEmail: boolean; hint: string }[] = [
+  { id: "fofa", label: "FOFA", needsEmail: true, hint: 'email + key；查询如 title="登录"' },
+  { id: "hunter", label: "Hunter 奇安信", needsEmail: false, hint: "api-key；每日免费配额" },
+  { id: "shodan", label: "Shodan", needsEmail: false, hint: "api-key；按 credit 计费" },
+  { id: "zoomeye", label: "ZoomEye", needsEmail: false, hint: "API-KEY（国际版）" },
+];
+
+function IntelCard() {
+  const [state, setState] = useState<Record<string, { configured: boolean; email: string; hint: string; source: string }>>({});
+  const [drafts, setDrafts] = useState<Record<string, { key: string; email: string }>>({});
+  const [busy, setBusy] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const load = () => {
+    api.intelKeys().then((r) => setState(r.keys.platforms || {})).catch(() => setState({}));
+  };
+  useEffect(load, []);
+
+  const save = async (platform: string) => {
+    const draft = drafts[platform];
+    if (!draft?.key?.trim()) { setNotice("请输入 API Key"); return; }
+    setBusy(platform);
+    try {
+      await api.setIntelKey(platform, draft.key.trim(), draft.email?.trim() || "");
+      setNotice(`${platform} 已保存`);
+      setDrafts((d) => ({ ...d, [platform]: { key: "", email: draft.email || "" } }));
+      load();
+    } catch (e) { setNotice(String(e)); }
+    setBusy("");
+  };
+  const remove = async (platform: string) => {
+    setBusy(platform);
+    try { await api.deleteIntelKey(platform); setNotice(`${platform} 已删除`); load(); }
+    catch (e) { setNotice(String(e)); }
+    setBusy("");
+  };
+  const test = async (platform: string) => {
+    setBusy(platform); setNotice(`${platform} 测试中…`);
+    try {
+      const r = await api.testIntelKey(platform);
+      setNotice(`${platform}: ${r.ok ? "✅ 可用" : "❌ " + (r.error || "不可用")}`);
+    } catch (e) { setNotice(String(e)); }
+    setBusy("");
+  };
+
+  return (
+    <section className="superadmin-database">
+      <header><div><h2>资产测绘引擎 API Key</h2>
+        <em>FOFA / Hunter / Shodan / ZoomEye；key 加密存储，仅测绘查询使用（结果属情报，测试目标仍需授权审批）</em></div></header>
+      <div className="superadmin-form" style={{ display: "grid", gap: 14 }}>
+        {notice && <p className="mini" style={{ margin: 0 }}>{notice}</p>}
+        {INTEL_PLATFORMS.map((p) => {
+          const st = state[p.id] || { configured: false, email: "", hint: "", source: "" };
+          const draft = drafts[p.id] || { key: "", email: "" };
+          return (
+            <div key={p.id} style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "10px 12px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <b>{p.label}</b>
+                {st.configured
+                  ? <span className="mini ok">已配置 {st.email ? `(${st.email})` : st.hint} {st.source === "platform" ? "· 平台池" : ""}</span>
+                  : <span className="mini muted">未配置 · {p.hint}</span>}
+                <span style={{ flex: 1 }} />
+                {st.configured && <button className="quiet-button" disabled={busy === p.id} onClick={() => remove(p.id)}>删除</button>}
+                <button className="quiet-button" disabled={busy === p.id || !st.configured} onClick={() => test(p.id)}>测试连接</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: p.needsEmail ? "1fr 1fr auto" : "1fr auto", gap: 8, marginTop: 8 }}>
+                {p.needsEmail && (
+                  <input placeholder="email" value={draft.email || ""} onChange={(e) => setDrafts((d) => ({ ...d, [p.id]: { ...draft, email: e.target.value } }))} />
+                )}
+                <input type="password" placeholder={st.configured ? "输入新 key 覆盖" : "API Key"}
+                  value={draft.key || ""} onChange={(e) => setDrafts((d) => ({ ...d, [p.id]: { ...draft, key: e.target.value } }))} />
+                <button className="danger-button" disabled={busy === p.id || !draft.key?.trim()} onClick={() => save(p.id)}>
+                  {busy === p.id ? "保存中…" : "保存"}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -284,6 +368,9 @@ export default function UserSettingsPage() {
         </button>
         <button className={tab === "usage" ? "active" : ""} onClick={() => { setTab("usage"); }}>
           <Coins size={17} /><span>用量统计</span>
+        </button>
+        <button className={tab === "intel" ? "active" : ""} onClick={() => { setTab("intel"); }}>
+          <Globe size={17} /><span>资产测绘引擎</span>
         </button>
         <button className={tab === "account" ? "active" : ""} onClick={() => { setTab("account"); }}>
           <ShieldAlert size={17} /><span>账号安全</span>
@@ -495,6 +582,8 @@ export default function UserSettingsPage() {
             )}
           </>
         )}
+
+        {tab === "intel" && <IntelCard />}
 
         {tab === "account" && profile && (
           <>

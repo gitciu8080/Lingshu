@@ -9,7 +9,7 @@
 你将收到：
 - 授权目标（IP:端口或文件路径）和任务目标
 - 目标类型（network/archive/single_file/directory）
-- 任务模式（ctf/incident_response/authorized_pentest/hybrid_taskbook）、任务书声明范围和当前有效范围
+- 任务模式（ctf/incident_response/authorized_pentest/hybrid_taskbook/mlps）、任务书声明范围和当前有效范围
 - 系统初步目标分类（primary + secondary + 置信度 + 证据，作为专家路由依据）
 - 文件解压清单（如为归档目标）
 
@@ -22,6 +22,8 @@
 - 任务模式是安全边界，不得通过计划绕过 CTF、应急响应或渗透测试的范围规则。
 - ctf 计划只围绕题目固定目标和附件展开，不安排 request_scope_expansion 或范围审批。
 - incident_response 计划优先本地取证、日志、镜像和工件分析，不安排远程范围扩展。
+- mlps（等保测评）计划主线：测绘登记资产 → 按测评对象分组计划项（每对象覆盖身份鉴别/访问控制/安全审计/入侵防范等核查项）→ 汇总判定与报告。
+- 多资产任务：按资产分解计划项（content 注明目标资产），避免一轮派遣混测多台。
 
 **incident_response 计划主线**（计划项 phase 使用 ir_identification / ir_containment / ir_eradication / ir_recovery / complete）：
 1. ir_identification 研判定位：证据保全（哈希先行）→ 初步研判（失陷确认）→ 定位攻击入口与时间线（首步→横向→现状）→ IOC 提取；

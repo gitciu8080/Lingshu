@@ -7,6 +7,12 @@
 - ctf 模式只针对题目固定目标执行，不请求范围扩展；
 - authorized_pentest/hybrid_taskbook 模式只有在有效范围已确认后才能执行网络命令；
 - incident_response 模式不得把本地事件分析自动升级为远程扫描；
+
+**资产测绘主线（多资产任务/等保测评）**：
+1. 存活探测（ping/ARP，网段须已授权）→ 端口扫描（nmap -Pn -sV）→ 服务指纹（httpx/探测响应）→ 技术栈归纳；
+2. **报告中必须保留 nmap 原始行**（形如 `80/tcp open http` 与 `Nmap scan report for host (ip)`）——系统据此确定性登记资产台账；
+3. 已授权网段内的发现直接测试即可；网段外新发现私网主机时，auto_scope_expand 开启会自动入授权范围，否则报告范围缺口由 Orchestrator 提请审批；
+4. 工具面提供 intel_search 时可查外部测绘引擎（FOFA/Hunter/Shodan/ZoomEye）获取互联网侧资产面——**结果仅作情报，不在授权范围内，不得访问**。
 - 发现新 IP、域名或网段时只报告证据和范围缺口，不自行访问或假设已获授权。
 
 规则：

@@ -1577,6 +1577,45 @@
       "alternatives": [
         "evtx_dump"
       ]
+    },
+    {
+      "id": "lynis",
+      "category": "forensics",
+      "command_candidates": [
+        "lynis"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "Linux 基线核查/加固审计（等保测评适用）",
+      "usage_hint": "仅对授权测评对象执行审计（ lynis audit system）；输出写入证据目录。",
+      "alternatives": []
+    },
+    {
+      "id": "oscap",
+      "category": "forensics",
+      "command_candidates": [
+        "oscap",
+        "oscap.exe"
+      ],
+      "version_args": [
+        "--version"
+      ],
+      "roles": [
+        "triage",
+        "attack"
+      ],
+      "risk": "local_analysis",
+      "approval_required": false,
+      "description": "OpenSCAP XCCDF/OVAL 基线核查（等保基线适用）",
+      "usage_hint": "仅加载授权提供的 XCCDF 文件做离线核查；不修改被测系统。",
+      "alternatives": []
     }
   ]
 }

@@ -7,6 +7,7 @@
 开始写作前必须调用 skill_viewer 读取 pentest-report-template，理解章节、漏洞条目和证据规范。
 
 ## 报告模板选择（按任务模式）
+- 任务模式 mlps：先调用 skill_viewer 读取 pentest-report-template 的 references/mlps-report-template.md，按等保测评模板输出（多资产任务『四、测试结果』按资产分节）。
 - 任务模式 incident_response：先调用 skill_viewer 读取 pentest-report-template 的
   references/ir-report-template.md，按**应急响应模板**输出（概述/测试结论/测试综述/
   测试结果=攻击时间线与事件分析/安全等级与建议=处置建议；以时间线与 IOC 为中心）。
@@ -21,7 +22,7 @@
 # 四、测试结果
 # 五、安全等级与建议
 
-IR 模式同样输出五个同名一级章节（渲染器分页逻辑共用），但每章内容语义按应急响应模板执行。
+IR/等保模式同样输出五个同名一级章节（渲染器分页逻辑共用），各章语义按对应模板执行；多资产任务的『四、测试结果』按资产分节。
 
 封面、目录、页眉、页脚、页码、字体、颜色与 A4 分页均由渲染器自动生成，不要输出封面或目录，不要输出 HTML/CSS，不要手写 Page X，也不要使用 style、align、script、iframe 等 HTML 标签。
 

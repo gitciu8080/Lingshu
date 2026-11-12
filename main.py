@@ -41,6 +41,7 @@ from core.model_bindings import (  # 用户级 Agent 模型分工（角色 → �
     get_agent_model_bindings,
     resolve_role_models,
 )
+from core.intel_config import get_intel_keys  # 资产测绘引擎凭据
 from LLM.model import (  # 创建 LLM 模型实例（供应商目录驱动）
     QwenModelUnavailableError,
     clear_session_token_total,
@@ -1417,6 +1418,11 @@ def _mission_mode(target_spec: TargetSpec, goal: str, taskbook_text: str = "") -
     if any(token in text for token in ("nssctf", "ctf", "题目附件", "challenge")):
         return "ctf"
     if any(token in text for token in (
+        "等保测评", "等级保护测评", "等级保护", "等保三级", "等保二级",
+        "gb/t 28448", "基线核查", "测评指标", "安全测评",
+    )):
+        return "mlps"
+    if any(token in text for token in (
         "应急响应", "incident response", "incident_response", "取证",
         "日志分析", "内存镜像", "溯源", "失陷", "入侵排查", "入侵检测",
         "webshell", "网站后门", "挖矿", "勒索", "持久化后门", "权限维持",
@@ -1439,6 +1445,9 @@ def _default_goal_for(run_mode: str, mission_mode: str) -> str:
     """
     if mission_mode == "ctf":
         return "获取 Flag"
+    if mission_mode == "mlps":
+        return ("完成等保等级测评：对测评对象执行安全计算环境基线核查，"
+                "逐项判定符合程度并输出测评报告")
     if mission_mode == "incident_response":
         # fast 模式收到的 IR 任务同样以应急研判为目标（历史缺陷：fast+IR
         # 曾错误返回"获取 Flag"，IR 语义下没有 Flag）
@@ -1641,6 +1650,7 @@ async def run_mission(
     fast_summary: bool = True,
     token_soft_budget: int = 0,
     mission_mode: str = "",
+    auto_scope_expand: bool = False,
 ) -> MissionState:
     """执行一次有明确授权范围的安全测试任务（核心工作流）。
 
@@ -1703,7 +1713,7 @@ async def run_mission(
     # authorized_pentest，无循环依赖；再按 运行模式×任务模式 推导默认目标：
     # fast/ctf 维持「获取 Flag」，standard 渗透/应急给出评估目标。
     if mission_mode in {"ctf", "incident_response", "authorized_pentest",
-                        "hybrid_taskbook"}:
+                        "hybrid_taskbook", "mlps"}:
         mission_mode = mission_mode.strip()   # 显式指定优先（CLI/API/前端下拉）
     else:
         mission_mode = _mission_mode(target_spec, goal.strip(), taskbook_text)
@@ -1819,6 +1829,7 @@ async def run_mission(
             goal=goal_text,
             authorized=True,  # 系统默认所有操作均需授权
             mission_mode=mission_mode,
+            auto_scope_expand=bool(auto_scope_expand),
             target_spec={
                 "kind": target_spec.kind,
                 "host": target_spec.host,
@@ -1850,7 +1861,7 @@ async def run_mission(
             # 用户亲手填写的授权目标视为直接授权输入，不弹审批（5e19dc2a 复盘）。
             scope_approval_status=(
                 "not_required"
-                if mission_mode in {"ctf", "incident_response"}
+                if mission_mode in {"ctf", "incident_response", "mlps"}
                 else "pending" if taskbook_pending_targets else "not_required"
             ),
         )
@@ -2737,6 +2748,13 @@ async def run_mission(
                 artifact_root=ws_root,
                 vision_model=vision_model,
                 vision_roots=vision_roots,
+                include_intel=(
+                    mission_mode in {"mlps", "authorized_pentest", "hybrid_taskbook"}
+                    and any(
+                        get_intel_keys(user_id, platform)
+                        for platform in ("fofa", "hunter", "shodan", "zoomeye")
+                    )
+                ),
                 include_cve_search=bool(re.search(r"\bCVE-\d{4}-\d+\b", goal_text, re.IGNORECASE)),
             )
             recon = network_recon
@@ -2771,6 +2789,13 @@ async def run_mission(
                     artifact_root=ws_root,
                     vision_model=vision_model,
                     vision_roots=vision_roots,
+                    include_intel=(
+                        mission_mode in {"mlps", "authorized_pentest", "hybrid_taskbook"}
+                        and any(
+                            get_intel_keys(user_id, platform)
+                            for platform in ("fofa", "hunter", "shodan", "zoomeye")
+                        )
+                    ),
                     include_cve_search=bool(re.search(r"\bCVE-\d{4}-\d+\b", goal_text, re.IGNORECASE)),
                 )
 
@@ -2988,6 +3013,13 @@ async def run_mission(
                             artifact_root=ws_root,
                             vision_model=vision_model,
                             vision_roots=vision_roots,
+                            include_intel=(
+                                mission_mode in {"mlps", "authorized_pentest", "hybrid_taskbook"}
+                                and any(
+                                    get_intel_keys(user_id, platform)
+                                    for platform in ("fofa", "hunter", "shodan", "zoomeye")
+                                )
+                            ),
                             include_cve_search=bool(re.search(r"\bCVE-\d{4}-\d+\b", goal_text, re.IGNORECASE)),
                         )
                         print(f"[系统] 已动态挂载 NetworkRecon，目标：{execution_target}")
@@ -3417,6 +3449,7 @@ async def run_mission(
             "incident_response": "应急响应模式：以本地证据、日志和镜像分析为主，不进行远程范围扩展。",
             "authorized_pentest": "授权渗透模式：按信息收集→漏洞分析→审批后最小化验证→后渗透评估（当前权限确认/提权路径验证/横向与数据可达性证明，仅证明可达不外带数据）→定级与修复建议的主线推进；网络侦察前必须确认任务书声明范围，新增目标必须先通过独立范围审批再调用 request_scope_expansion；收尾 success 判据=已验证漏洞与评估结论，不以获取 Flag 为唯一标准。",
             "hybrid_taskbook": "混合任务书模式：本地附件分析可先行；涉及任务书声明的网络目标须先通过独立范围审批，新增目标仍需再次审批；网络主线同样按渗透评估流程推进，收尾判据同授权渗透模式。",
+            "mlps": "等保测评模式：以授权测评对象清单为边界执行只读基线核查（身份鉴别/访问控制/安全审计/入侵防范等测评单元），逐项判定符合程度；不修改被测系统配置，处置建议仅供整改参考；测绘发现自动登记资产台账（auto_scope_expand 开启时私网新主机自动入授权范围）；收尾判据=测评单元判定覆盖与明确测评结论。",
         }.get(mission.mission_mode, "按当前任务声明范围执行，任何新增网络目标均不得默认视为已授权。")
         # 经验注入（记忆闭环）：fast 模式不走 Brain，此前完全无历史经验
         # 可参考；这里把脱敏经验提示并入首条指令（standard 由 Brain 注入）
@@ -3925,9 +3958,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mission-mode",
-        choices=["ctf", "incident_response", "authorized_pentest", "hybrid_taskbook"],
+        choices=["ctf", "incident_response", "authorized_pentest", "hybrid_taskbook",
+                 "mlps"],
         default=None,
         help="任务模式：显式指定后跳过 goal 文本推断（不指定则按目标/任务书自动判定）",
+    )
+    parser.add_argument(
+        "--auto-scope-expand",
+        action="store_true",
+        help="测绘发现的私网新主机自动加入授权范围（仅 mlps/渗透系模式；公网永不自动）",
     )
     parser.add_argument(
         "--token-budget",
@@ -3954,6 +3993,7 @@ def main() -> None:
                 fast_summary=not args.no_fast_summary,
                 token_soft_budget=args.token_budget,
                 mission_mode=args.mission_mode or "",
+                auto_scope_expand=args.auto_scope_expand,
             ),
         )
     except (ValueError, RuntimeError) as exc:

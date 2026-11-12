@@ -23,6 +23,7 @@
   逐字级重复）、crypto/misc→[ctf-sandbox-orchestrator]、forensics→[digital-forensics]、
   malware→[malware-analysis]、osint→[pentest-tools]、ai-ml→[llm-security]；
   attack-chain 无条件附加
+- mlps-assessment（等保测评方法论，挂载于 mlps 分类）——2026-11-13 新增
 - **未挂载的 bundle（约 110 个）**：完整快照保留备用。其中 vulnerabilities-\*（22 个
   pentest 方法论）、tooling-\*（9 个单工具速查）、competition-\*（40 个，被
   ctf-sandbox-orchestrator 文档引用）为主题互补资料，需要时在映射表加一行即可挂载。

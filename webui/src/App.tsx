@@ -1197,6 +1197,7 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
     [qwenToolMode, setQwenToolMode] = useState("simple");
   const [fastSummary, setFastSummary] = useState(false);
   const [missionMode, setMissionMode] = useState("auto");
+  const [autoScopeExpand, setAutoScopeExpand] = useState(false);
   // 单任务模式（默认跟随全局，对话框内可改）
   const [mode, setMode] = useState<RunMode>("standard");
   useEffect(() => { if (open) setMode(runMode); }, [open, runMode]);
@@ -1244,6 +1245,7 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
         thinking_intensity: intensity,
         ...(mode === "fast" ? { mode: "fast", fast_summary: fastSummary } : {}),
         ...(missionMode !== "auto" ? { mission_mode: missionMode } : {}),
+        ...(autoScopeExpand ? { auto_scope_expand: true } : {}),
         ...(provider === "qwen" || provider.startsWith("qwen::")
           ? { qwen_tool_call_mode: qwenToolMode } : {}),
       });
@@ -1351,6 +1353,7 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
               任务模式
               <select value={missionMode} onChange={(e) => setMissionMode(e.target.value)}>
                 <option value="auto">自动判定（按目标与任务描述）</option>
+                <option value="mlps">等保测评（三级计算环境基线核查）</option>
                 <option value="incident_response">应急响应（本地取证/日志/镜像分析）</option>
                 <option value="authorized_pentest">授权渗透测试</option>
                 <option value="hybrid_taskbook">混合任务书</option>
@@ -1375,6 +1378,17 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
                 <small>默认关闭省 token；需要验证报告生成链路时勾选。</small>
               </span>
             </label>}
+            <label className="fast-summary-toggle">
+              <input
+                type="checkbox"
+                checked={autoScopeExpand}
+                onChange={(e) => setAutoScopeExpand(e.target.checked)}
+              />
+              <span>
+                <b>测绘发现自动入授权范围</b>
+                <small>仅私网新主机且限 mlps/渗透任务；公网地址仍需人工审批。</small>
+              </span>
+            </label>
             </fieldset>
             <div className="modal-actions">
               <Dialog.Close className="quiet-button" disabled={submitting}>取消</Dialog.Close>
@@ -1410,6 +1424,7 @@ function RerunMission({
     [intensity, setIntensity] = useState("medium"),
     [qwenToolMode, setQwenToolMode] = useState("simple"),
     [fastSummary, setFastSummary] = useState(false),
+    [autoScopeExpand, setAutoScopeExpand] = useState(false),
     [missionMode, setMissionMode] = useState("auto"),
     [withContext, setWithContext] = useState(true),
     [submitting, setSubmitting] = useState(false),
@@ -1485,6 +1500,7 @@ function RerunMission({
         thinking_intensity: intensity,
         ...(mode === "fast" ? { mode: "fast", fast_summary: fastSummary } : {}),
         ...(missionMode !== "auto" ? { mission_mode: missionMode } : {}),
+        ...(autoScopeExpand ? { auto_scope_expand: true } : {}),
         ...(provider === "qwen" || provider.startsWith("qwen::")
           ? { qwen_tool_call_mode: qwenToolMode } : {}),
         ...(withContext ? { source_session_id: source.id } : {}),
@@ -1582,6 +1598,7 @@ function RerunMission({
               任务模式
               <select value={missionMode} onChange={(event) => setMissionMode(event.target.value)}>
                 <option value="auto">自动判定</option>
+                <option value="mlps">等保测评</option>
                 <option value="incident_response">应急响应</option>
                 <option value="authorized_pentest">授权渗透测试</option>
                 <option value="hybrid_taskbook">混合任务书</option>
@@ -1606,6 +1623,17 @@ function RerunMission({
                 <small>默认关闭省 token；需要验证报告生成链路时勾选。</small>
               </span>
             </label>}
+            <label className="fast-summary-toggle">
+              <input
+                type="checkbox"
+                checked={autoScopeExpand}
+                onChange={(event) => setAutoScopeExpand(event.target.checked)}
+              />
+              <span>
+                <b>测绘发现自动入授权范围</b>
+                <small>仅私网新主机且限 mlps/渗透任务。</small>
+              </span>
+            </label>
             <label className="rerun-context">
               <input
                 type="checkbox"
@@ -3518,6 +3546,14 @@ function ConsoleApp() {
                 >
                   <Zap size={13} className={sessionRunMode === "fast" ? "" : "off"} />
                   {sessionRunMode === "fast" ? "FAST" : "STANDARD"}
+                </span>
+              )}
+              {active && String(detail.mission_mode || "") === "mlps" && (
+                <span
+                  className="mode-badge ir-badge"
+                  title="当前会话任务模式：等保测评（只读基线核查，逐单元判定）"
+                >
+                  等保
                 </span>
               )}
               {active && String(detail.mission_mode || "") === "incident_response" && (

@@ -30,12 +30,12 @@ def _keyword_matches(keyword: str, text: str) -> bool:
 
 CategoryName = Literal[
     "web", "pwn", "reverse", "crypto", "forensics",
-    "malware", "ir", "misc", "osint", "ai-ml", "unknown",
+    "malware", "ir", "mlps", "misc", "osint", "ai-ml", "unknown",
 ]
 
 ALL_CATEGORIES: list[CategoryName] = [
     "web", "pwn", "reverse", "crypto", "forensics",
-    "malware", "ir", "misc", "osint", "ai-ml",
+    "malware", "ir", "mlps", "misc", "osint", "ai-ml",
 ]
 
 # 关键词权重（弱信号，每命中 +1）
@@ -66,6 +66,11 @@ _KEYWORD_WEIGHTS: dict[CategoryName, list[str]] = {
         "pcap", "网络包", "volatility", "autopsy",
         "镜像", "扇区", "stego", "隐写", "exif",
         "memory dump", "磁盘镜像",
+    ],
+    "mlps": [
+        "等保测评", "等级保护测评", "等级保护", "等保三级", "等保二级",
+        "gb/t 28448", "基线核查", "测评指标", "安全测评", "测评单元",
+        "符合程度", "基线审计",
     ],
     "ir": [
         "应急响应", "incident response", "incident_response",
@@ -714,4 +719,136 @@ def extract_iocs(report: str, *, limit: int = 20) -> list[dict]:
         _push("ip", value)
     for match in _DOMAIN_RE.finditer(report):
         _push("domain", match.group(0))
+    return found
+
+
+# ────────────────────────────────────────────────────────────────
+# 资产台账：侦察报告中的结构化资产提取（内网 IP 是资产本体，不做私网排除）
+# ────────────────────────────────────────────────────────────────
+
+# nmap 正常输出行：`80/tcp   open  http        2.4.49`
+_NMAP_PORT_RE = re.compile(
+    r"^\s*(\d{1,5})/(tcp|udp)\s+open[^\n]*?(?:([a-zA-Z][\w.-]*)\s*(?:\([^\n]*\))?)?$",
+    re.MULTILINE)
+# nmap 主机行：`Nmap scan report for host (10.0.0.5)` 或 `for 10.0.0.5`
+_NMAP_HOST_RE = re.compile(
+    r"Nmap scan report for (?:([\w.-]+) \()?((?:\d{1,3}\.){3}\d{1,3})\)?")
+# httpx 风格行：`http://10.0.0.5:8080 [200] [登录页] [nginx]`
+_HTTPX_RE = re.compile(
+    r"(https?://([A-Za-z0-9.\-]+)(?::(\d{1,5}))?)(?:/[^\s]*)?\s*"
+    r"\[(\d{3})\](?:\s*\[([^\]]+)\])?(?:\s*\[([^\]]+)\])?")
+# 报告表格行：`| 10.0.0.5 | 8080 | http | 登录页 |`（专家常把输出压成表格）
+_TABLE_ROW_RE = re.compile(
+    r"\|\s*((?:\d{1,3}\.){3}\d{1,3}|[\w.-]+)\s*\|\s*(\d{1,5})\s*\|\s*"
+    r"(https?|http|ssh|ftp|smtp|dns|mysql|redis|rdp|telnet|[\w-]{2,20})\s*\|")
+_HOSTNAME_PORT_RE = re.compile(
+    r"\b((?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
+    r"(?:com|net|org|cn|io|top|xyz|internal|local|corp|lan)):(\d{1,5})\b")
+_RESOLVED_HOST_RE = re.compile(
+    r"\b([\w.-]+)\s*[(（]\s*((?:\d{1,3}\.){3}\d{1,3})\s*[)）]")
+_SERVICE_BY_PORT = {80: "http", 443: "https", 22: "ssh", 21: "ftp",
+                    3389: "rdp", 3306: "mysql", 6379: "redis", 23: "telnet",
+                    8000: "http", 8080: "http", 8443: "https"}
+
+
+def extract_assets(reports, *, limit: int = 100) -> list[dict]:
+    """从侦察/测绘报告文本提取资产（host+port+service），确定性正则。
+
+    与 IOC 相反：内网/私网 IP 正是资产本体，不做排除。返回
+    [{host, port, service}]，按 (host.lower(), port) 去重，host 不带端口。
+    """
+    if isinstance(reports, str):
+        reports = [reports]
+    if not reports:
+        return []
+    found: list[dict] = []
+    seen: set[tuple[str, int | None]] = set()
+
+    def _push(host: str, port: int | None, service: str) -> None:
+        host = str(host or "").strip().rstrip(".").lower()
+        if not host or len(host) < 3 or len(found) >= limit:
+            return
+        try:
+            port_value = int(port) if port else None
+        except (TypeError, ValueError):
+            port_value = None
+        if port_value is not None and not (0 < port_value <= 65535):
+            port_value = None
+        key = (host, port_value)
+        if key in seen:
+            return
+        seen.add(key)
+        found.append({
+            "host": host, "port": port_value,
+            "service": str(service or "").strip()[:60] or
+            (_SERVICE_BY_PORT.get(port_value, "") if port_value else ""),
+        })
+
+    for report in reports:
+        if not isinstance(report, str) or not report:
+            continue
+        text = report[:120_000]
+        # 1) nmap：主机行建立 host 上下文，其后紧随的端口行归属该主机
+        current_host = ""
+        for line in text.splitlines():
+            host_match = _NMAP_HOST_RE.search(line)
+            if host_match:
+                current_host = (host_match.group(2) or host_match.group(1) or "").lower()
+                if current_host:
+                    _push(current_host, None, "")
+                continue
+            port_match = _NMAP_PORT_RE.match(line)
+            if port_match and current_host:
+                _push(current_host, port_match.group(1),
+                      port_match.group(3) or "")
+        # 2) httpx 风格行
+        for match in _HTTPX_RE.finditer(text):
+            _push(match.group(2), match.group(3) or
+                  (80 if str(match.group(1)).startswith("http:") else 443),
+                  "http" if str(match.group(1)).startswith("http:") else "https")
+        # 3) 主机名:端口
+        for match in _HOSTNAME_PORT_RE.finditer(text):
+            _push(match.group(1), match.group(2), "")
+        # 4) 主机名(解析 IP) ——以解析 IP 为主键、主机名为 service 备注
+        for match in _RESOLVED_HOST_RE.finditer(text):
+            _push(match.group(2), None, match.group(1))
+        # 5) 报告表格行
+        for match in _TABLE_ROW_RE.finditer(text):
+            _push(match.group(1), match.group(2), match.group(3))
+    return found
+
+
+# ────────────────────────────────────────────────────────────────
+# 等保测评：判定行确定性提取（mlps）
+# ────────────────────────────────────────────────────────────────
+
+_VERDICT_RE = re.compile(
+    r"^\s*(?:\d+[.、)]?\s*)?(?:\*\*)?([\u4e00-\u9fff\w()（）/\-—]{2,40}?)"
+    r"(?:\*\*)?\s*[:：]\s*(?:\*)?(符合|基本符合|部分符合|不符合)(?:\*)?"
+    r".{0,160}$", re.MULTILINE)
+
+
+def extract_verdicts(report: str, *, limit: int = 60) -> list[dict]:
+    """从等保核查报告提取测评单元判定行 → [{content}]（确定性正则）。
+
+    匹配『单元名: 判定词』结构（判定词限 符合/基本符合/部分符合/不符合），
+    排除明显否定语境（"不符合要求，判定为符合"类句子按最后出现的判定词记）。
+    """
+    if not isinstance(report, str) or not report:
+        return []
+    found: list[dict] = []
+    seen: set[str] = set()
+    for match in _VERDICT_RE.finditer(report[:120_000]):
+        unit = match.group(1).strip().strip("*")
+        verdict_word = match.group(2)
+        line = match.group(0).strip()[:200]
+        if not unit or unit in seen:
+            continue
+        seen.add(unit)
+        found.append({
+            "unit": unit, "verdict": verdict_word,
+            "content": f"测评判定[{unit}]: {verdict_word}（{line}）",
+        })
+        if len(found) >= limit:
+            break
     return found

@@ -45,7 +45,9 @@ from agent.experts import ORCHESTRATOR_EXPERT
 from agent.categorize import (
     CategoryDecision,
     evaluate_reclassification,
+    extract_assets,
     extract_iocs,
+    extract_verdicts,
     extract_recon_signals,
     extract_verify_block,
     verify_output_matches,
@@ -72,6 +74,73 @@ _IR_PHASES = {
     Phase.IR_IDENTIFICATION, Phase.IR_CONTAINMENT,
     Phase.IR_ERADICATION, Phase.IR_RECOVERY,
 }
+
+
+def _auto_expand_scope_for_asset(
+    mission: MissionState,
+    scope_registry: ScopeRegistry | None,
+    host: str,
+    *,
+    evidence_note: str = "",
+) -> bool:
+    """测绘发现的主机自动扩容（严格边界）。
+
+    - 已可测（在白名单或已授权网段内）→ False，无需动作；
+    - mission.auto_scope_expand 为 False（默认）→ False，走人工审批链；
+    - 仅 RFC1918 私网 IPv4 且 mission_mode ∈ {mlps, authorized_pentest,
+      hybrid_taskbook} → add_ip(approved_by="auto:mission-flag")；
+    - 公网地址/主机名/其他模式永不自动扩容（公网资产一律人工审批）。
+    """
+    import ipaddress as _ipaddress
+
+    if scope_registry is None or not getattr(mission, "auto_scope_expand", False):
+        return False
+    if mission.mission_mode not in {"mlps", "authorized_pentest", "hybrid_taskbook"}:
+        return False
+    host = str(host or "").strip()
+    try:
+        addr = _ipaddress.ip_address(host)
+    except ValueError:
+        return False            # 主机名走人工审批
+    if not addr.is_private or addr.is_loopback:
+        return False            # 公网/回环永不自动扩容
+    if scope_registry.is_ip_allowed(host):
+        return False            # 已在白名单或授权网段内
+    scope_registry.add_ip(
+        host,
+        evidence=f"测绘发现自动扩容（auto_scope_expand）{evidence_note}"[:400],
+        approved_by="auto:mission-flag",
+    )
+    mission.record("Orchestrator", "scope_auto_expanded",
+                   host=str(addr), source="asset_mapping")
+    return True
+
+
+def mlps_completion_gate(mission: MissionState, success: bool) -> str | None:
+    """等保测评收尾闸门：success 需 ≥10 条测评单元判定 + 资产台账非空。
+
+    机序判据（防 LLM 自评放水）；返回 None 放行，否则返回补充指引。
+    """
+    if not success or mission.mission_mode != "mlps":
+        return None
+    verdicts = [
+        fact for fact in mission.facts
+        if str(fact.category or "") == "verdict"
+    ]
+    if len(verdicts) >= 10 and mission.assets:
+        return None
+    missing = []
+    if len(verdicts) < 10:
+        missing.append(
+            f"测评单元判定仅 {len(verdicts)} 条（需 ≥10 条，形如"
+            "『身份鉴别-a: 符合/部分符合/不符合』的结论）")
+    if not mission.assets:
+        missing.append("资产台账为空（需先完成测绘并登记测评对象）")
+    return (
+        "[等保判据未满足] 以成功收尾需要：\n- " + "\n- ".join(missing)
+        + "\n请继续对测评对象执行核查（可再派 Attack/Triage），"
+        "或以 success=false 记录当前进度。"
+    )
 
 
 def ir_completion_gate(mission: MissionState, success: bool) -> str | None:
@@ -355,7 +424,14 @@ def create_orchestrator_agent(
                     name="Orchestrator",
                     content=(
                         f"授权目标：{mission.target}\n本轮重点：{focus[:2000]}\n"
-                        "收集到足够证据后立即输出最终报告，禁止继续调用工具。"
+                        + (f"已登记资产（{len(mission.assets)} 项，自动登记；"
+                           "auto_scope_expand 开启时私网新主机自动入授权范围）："
+                           + "; ".join(
+                               f"{item.host}" + (f":{item.port}" if item.port else "")
+                               for item in mission.assets[:10]
+                           ) + ("…" if len(mission.assets) > 10 else "") + "\n"
+                           if mission.assets else "")
+                        + "收集到足够证据后立即输出最终报告，禁止继续调用工具。"
                     ),
                 ),
                 prefix="[Recon] ",
@@ -411,6 +487,19 @@ def create_orchestrator_agent(
                 category=signal.category,
                 confidence=signal.confidence,
             )
+        # 资产台账：测绘/侦察发现确定性入表（(host, port) 去重），并按
+        # auto_scope_expand 开关自动扩容授权范围（网段内 IP 本就可测）
+        for asset in extract_assets([report]):
+            mission.add_asset(
+                asset["host"], asset.get("port"), asset.get("service", ""),
+                source=selected_recon.name, evidence_ids=[evidence.id],
+                confidence=0.9,
+            )
+            if _auto_expand_scope_for_asset(
+                mission, scope_registry, asset["host"],
+                evidence_note=f"evidence={evidence.id}",
+            ):
+                store.save(mission)
         mission.add_finding("Recon", report)
         mission.finish_attempt(
             attempt,
@@ -611,13 +700,23 @@ def create_orchestrator_agent(
                 "\n\n自上次 Attack 派遣以来的新增 Facts（最近 5 条，完整历史"
                 "已在你此前的会话上下文中）：\n" + delta_lines
             )
+        asset_note = ""
+        if mission.assets:
+            asset_lines = "; ".join(
+                f"{item.host}" + (f":{item.port}" if item.port else "")
+                for item in mission.assets[:15]
+            )
+            asset_note = (
+                f"\n本轮资产范围（多资产任务：objective 中指明本轮资产，"
+                f"报告按资产分节）：{asset_lines}"
+                + ("…等" if len(mission.assets) > 15 else ""))
         try:
             report = await run_expert_reply_with_continuation(
                 attack_agent,
                 UserMsg(
                     name="Orchestrator",
                     content=(
-                        f"授权目标：{mission.target}\n本轮目标：{objective[:1500]}\n\n"
+                        f"授权目标：{mission.target}{asset_note}\n本轮目标：{objective[:1500]}\n\n"
                         f"本轮新增关键证据（调用方筛选，勿重复历史）：\n{target_info[:2000]}\n"
                         f"{delta_section}"
                         f"{knowledge_section}\n\n"
@@ -677,6 +776,13 @@ def create_orchestrator_agent(
             category=str((mission.category_decision or {}).get("primary") or ""),
             confidence=0.8,
         )
+        # 等保测评：提取测评单元判定行（…符合/部分符合/不符合）为 verdict 事实
+        if mission.mission_mode == "mlps":
+            for verdict in extract_verdicts(report):
+                mission.add_fact(
+                    verdict["content"], attack_agent.name, [evidence.id],
+                    category="verdict", confidence=0.85,
+                )
         # 应急响应：从报告确定性提取 IOC（外部 IP/域名/哈希）为独立事实
         if mission.mission_mode == "incident_response":
             iocs = extract_iocs(report)
@@ -1497,8 +1603,10 @@ def create_orchestrator_agent(
         """
         if mission.phase in {Phase.COMPLETED, Phase.FAILED}:
             return "[拒绝] 任务已经结束"
-        # 应急响应 success 闸门（机序化判据，详见 ir_completion_gate）
+        # 机序化收尾闸门：应急响应（时间线+IOC）/ 等保测评（判定覆盖+台账）
         gate_message = ir_completion_gate(mission, success)
+        if gate_message is None:
+            gate_message = mlps_completion_gate(mission, success)
         if gate_message is not None:
             return gate_message
         # 验证闭环：终态迁移前独立重放已登记 PoC（不阻断收尾）
