@@ -172,3 +172,33 @@ class IRCategoryRoutingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnalysisFactorySignatureTest(unittest.TestCase):
+    """回归：main.py 向 create_analysis_agent 传 mission_mode——
+    IR 提交时曾漏加该参数导致标准模式 analysis 工具报「内部错误」
+    （LazyAgent 惰性创建，单测未覆盖直到真实会话触发）。"""
+
+    def test_accepts_mission_mode_kwarg(self) -> None:
+        from agent.Analysis import create_analysis_agent
+
+        class FakeModel:
+            pass
+
+        # 与 main.py:2711 完全一致的调用形态
+        agent = create_analysis_agent(
+            FakeModel(),
+            offloader=None,
+            context_config=None,
+            state=None,
+            mission_mode="incident_response",
+        )
+        self.assertIsNotNone(agent)
+
+    def test_ir_discipline_in_prompt_only_for_ir(self) -> None:
+        from agent import Analysis
+
+        self.assertIn("应急响应模式附加纪律", Analysis._IR_ANALYSIS_DISCIPLINE)
+        self.assertIn("处置红线", Analysis._IR_ANALYSIS_DISCIPLINE)
+        # 默认提示词本身不含 IR 纪律（按模式拼接，而非全局污染）
+        self.assertNotIn("应急响应模式附加纪律", Analysis.ANALYSIS_SYS_PROMPT)

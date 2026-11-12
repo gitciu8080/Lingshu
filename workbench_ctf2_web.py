@@ -54,6 +54,14 @@ from workbench_nssctf_agent import (
     auto_arena as nss_auto_arena,
     solve_attempt as nss_solve_attempt,
 )
+import workbench_nwpucat_agent as nw
+from workbench_nwpucat_agent import (
+    NwpucatClient,
+    NwpuError,
+    credentials_brief as nw_credentials_brief,
+    solve_entry as nw_solve_entry,
+    auto_chain as nw_auto_chain,
+)
 import workbench_agwars_agent as ag
 from workbench_agwars_agent import (
     AgWarsClient,
@@ -163,6 +171,7 @@ class Config:
     fast_summary: str = os.environ.get("CTF2_FAST_SUMMARY", "0")
     nssctf_token: str = os.environ.get("NSSCTF_AGENT_TOKEN", "")
     # AgWars 注册元信息（凭据本身存 data/agwars/credentials.json）
+    nwpucat_join_code: str = os.environ.get("NWPUCAT_JOIN_CODE", "f705ad5161e1aeed")
     agwars_model_group: str = os.environ.get("AGWARS_MODEL_GROUP", "other")
     agwars_model_url: str = os.environ.get("AGWARS_MODEL_URL", "")
     agwars_model_name: str = os.environ.get("AGWARS_MODEL_NAME", "")
@@ -178,7 +187,7 @@ class Config:
                             "lingshu_pass", "provider", "model", "mode",
                             "fast_summary", "nssctf_token",
                             "agwars_model_group", "agwars_model_url",
-                            "agwars_model_name"):
+                            "agwars_model_name", "nwpucat_join_code"):
                     value = str(data.get(key) or "").strip()
                     if value:
                         setattr(cfg, key, value)
@@ -191,7 +200,8 @@ class Config:
         payload = {k: getattr(self, k) for k in (
             "ctf2_token", "lingshu_url", "lingshu_user", "lingshu_pass",
             "provider", "model", "mode", "fast_summary", "nssctf_token",
-            "agwars_model_group", "agwars_model_url", "agwars_model_name")}
+            "agwars_model_group", "agwars_model_url", "agwars_model_name",
+            "nwpucat_join_code")}
         tmp = CONFIG_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                        encoding="utf-8")
@@ -272,6 +282,16 @@ STATE = {
             "solved": 0, "failed": 0, "current": "", "results": [],
         },
         "jobs": {},                  # job_id → Job（NSS 解题任务）
+        "job_order": deque(maxlen=50),
+        "stop_event": asyncio.Event(),
+        "task": None,
+    },
+    "nwpucat": {                     # 内网渗透链路（企业网络 Agent 测试）
+        "auto": {
+            "running": False, "mode": "fast", "limit": 3,
+            "solved": 0, "failed": 0, "current": "", "results": [],
+        },
+        "jobs": {},
         "job_order": deque(maxlen=50),
         "stop_event": asyncio.Event(),
         "task": None,
@@ -1876,6 +1896,291 @@ async def agwars_proxy(proxy_id: str, rest: str, request: Request):
     return StreamingResponse(
         iter([response.content]), status_code=response.status_code,
         headers=out_headers, media_type=response.headers.get("content-type"))
+
+
+# ════════════════════════════════════════════════════════════════
+# 内网渗透链路（Nwpucat 企业网络 Agent 测试）
+# ════════════════════════════════════════════════════════════════
+
+def nwpucat_snapshot() -> dict[str, Any]:
+    state: dict[str, Any] = STATE["nwpucat"]
+    return {
+        "auto": dict(state["auto"]),
+        "jobs": [state["jobs"][jid].snapshot() for jid in list(state["job_order"])[-20:]],
+        "credentials": nw_credentials_brief(),
+        "task": state.get("task"),
+    }
+
+
+@app.get("/api/nwpucat/state")
+async def api_nwpucat_state(refresh_task: bool = False):
+    state: dict[str, Any] = STATE["nwpucat"]
+    # 任务书缓存：摘要展示用，避免每次刷新都拉远端
+    if refresh_task or not state.get("task"):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10)) as client:
+                body = await NwpucatClient().task(client)
+            text = str(body.get("task") or "")
+            state["task"] = {
+                "head": text[:4000],
+                "entries": nw.NWPU_ENTRIES,
+                "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        except Exception as exc:  # noqa: BLE001 — 任务书拉取失败不影响页面
+            state["task"] = state.get("task") or {"head": "", "entries": nw.NWPU_ENTRIES,
+                                                  "error": str(exc)[:160]}
+    return nwpucat_snapshot()
+
+
+class NwpuRegisterIn(BaseModel):
+    display_name: str
+    join_code: str = ""
+
+
+@app.post("/api/nwpucat/register")
+async def api_nwpucat_register(data: NwpuRegisterIn):
+    """注册 Agent。display_name 由主人指定（平台会公示到排行榜）。"""
+    cfg: Config = STATE["config"]
+    name = (data.display_name or "").strip()
+    code = (data.join_code or cfg.nwpucat_join_code or "").strip()
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="display_name 至少 2 个字符")
+    if not code:
+        raise HTTPException(status_code=400, detail="join_code 不能为空")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20)) as client:
+        try:
+            body = await NwpucatClient().register(
+                client, display_name=name, join_code=code)
+        except NwpuError as exc:
+            raise HTTPException(status_code=502,
+                                detail=f"Nwpucat 平台错误：{exc}") from exc
+    cfg.nwpucat_join_code = code
+    cfg.save()
+    brief = nw_credentials_brief()
+    # 任务书要求：注册后把完整路径回报给主人
+    return {"ok": True, "agent": body.get("agent"),
+            "identity_path": brief.get("identity_path"),
+            "score_url": brief.get("score_url"),
+            "board_url": brief.get("board_url"),
+            "credentials": brief}
+
+
+class NwpuSolveIn(BaseModel):
+    entry: str | None = None
+    mode: str | None = None
+
+
+async def nwpucat_run_job(job: Job, entry: dict[str, str], mode: str) -> None:
+    cfg: Config = STATE["config"]
+    state: dict[str, Any] = STATE["nwpucat"]
+    job.status = "running"
+
+    def emit(event: dict[str, Any]) -> None:
+        event = {"job_id": job.id, "ts": time.time(), **event}
+        job.events.append(event)
+        if event.get("type") == "session_started" and event.get("session_id"):
+            job.session_id = event["session_id"]
+        broadcast({"type": "job_event", "job_id": job.id, "event": event})
+
+    lingshu = make_lingshu(cfg)
+    try:
+        await ensure_lingshu(cfg, lingshu)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=30)) as client:
+            result = await nw_solve_entry(
+                lingshu, args_like(cfg, entry["name"]),
+                NwpucatClient(), client, entry, mode=mode, on_event=emit)
+        job.flag = result.get("flag")
+        job.submitted = bool(result.get("submitted"))
+        job.accepted = result.get("accepted")
+        job.error = result.get("error")
+        job.status = "done" if (job.accepted or not job.error) else "error"
+    except asyncio.CancelledError:
+        job.status = "cancelled"
+        job.error = "已取消"
+        raise
+    except Exception as exc:  # noqa: BLE001
+        job.error = str(exc)
+        job.status = "error"
+    finally:
+        active_release(f"nwpu:{entry.get('name')}")
+        broadcast({"type": "nwpucat", "nwpucat": nwpucat_snapshot()})
+        broadcast({"type": "job_event", "job_id": job.id,
+                   "event": {"job_id": job.id, "ts": time.time(), "type": "log",
+                             "message": f"任务结束：{job.status}"}})
+
+
+def _nwpu_pick_entry(name: str | None) -> dict[str, str]:
+    entries = nw.NWPU_ENTRIES
+    if not name:
+        return entries[0]
+    for entry in entries:
+        if entry["name"] == name or entry["target"] == name:
+            return entry
+    raise HTTPException(status_code=400, detail=f"未知入口：{name}")
+
+
+@app.post("/api/nwpucat/solve")
+async def api_nwpucat_solve(data: NwpuSolveIn):
+    cfg: Config = STATE["config"]
+    state: dict[str, Any] = STATE["nwpucat"]
+    if not nw_credentials_brief().get("registered"):
+        raise HTTPException(status_code=400,
+                            detail="尚未注册：请先填写 display_name 与加入码并注册")
+    if state["auto"]["running"]:
+        raise HTTPException(status_code=409, detail="全链挂机运行中，请先停止")
+    if any(j.status in {"queued", "running"} for j in state["jobs"].values()):
+        raise HTTPException(status_code=409, detail="已有解题任务在运行")
+    entry = _nwpu_pick_entry(data.entry)
+    claimed = active_claim(f"nwpu:{entry['name']}")
+    if claimed:
+        raise HTTPException(status_code=409,
+                            detail=f"该入口已有进行中的会话（{claimed[:8]}）")
+    mode = data.mode or cfg.mode or "fast"
+    job = Job(id=f"w{int(time.time() * 1000) % 10**10}",
+              challenge_id=entry["name"], title=f"Nwpucat {entry['name']}",
+              mode=mode, source="nwpucat")
+    state["jobs"][job.id] = job
+    state["job_order"].append(job.id)
+    job.task = asyncio.create_task(nwpucat_run_job(job, entry, mode))
+    broadcast({"type": "nwpucat", "nwpucat": nwpucat_snapshot()})
+    return {"job_id": job.id}
+
+
+class NwpuFlagIn(BaseModel):
+    flag: str
+
+
+@app.post("/api/nwpucat/submit")
+async def api_nwpucat_submit(data: NwpuFlagIn):
+    flag = extract_flag(data.flag) or data.flag.strip()
+    if not flag:
+        raise HTTPException(status_code=400, detail="flag 为空")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20)) as client:
+        try:
+            result = await NwpucatClient().submit(client, flag)
+        except NwpuError as exc:
+            raise HTTPException(status_code=502,
+                                detail=f"Nwpucat 平台错误：{exc}") from exc
+    return result
+
+
+class NwpuAutoIn(BaseModel):
+    mode: str | None = None
+    limit: int | None = None
+
+
+async def nwpucat_run_auto(mode: str, limit: int) -> None:
+    cfg: Config = STATE["config"]
+    state: dict[str, Any] = STATE["nwpucat"]
+    auto = state["auto"]
+    stop_event: asyncio.Event = state["stop_event"]
+    stop_event.clear()
+    auto.update({"running": True, "solved": 0, "failed": 0,
+                 "current": "", "results": []})
+    broadcast({"type": "nwpucat", "nwpucat": nwpucat_snapshot()})
+    lingshu = make_lingshu(cfg)
+    holder: dict[str, Any] = {"job": None}
+
+    def on_event(event: dict[str, Any]) -> None:
+        job = holder.get("job")
+        if job is None:
+            return
+        item = {"job_id": job.id, "ts": time.time(), **event}
+        job.events.append(item)
+        if event.get("type") == "session_started" and event.get("session_id"):
+            job.session_id = event["session_id"]
+        broadcast({"type": "job_event", "job_id": job.id, "event": item})
+
+    def on_progress(info: dict[str, Any]) -> None:
+        job = Job(id=f"w{int(time.time() * 1000) % 10**10}",
+                  challenge_id=str(info.get("current") or "auto"),
+                  title=f"Nwpucat {info.get('current') or ''}",
+                  mode=mode, source="nwpucat")
+        job.status = "running"
+        state["jobs"][job.id] = job
+        state["job_order"].append(job.id)
+        holder["job"] = job
+        auto["current"] = str(info.get("current") or "")
+        auto["solved"] = info.get("solved", auto["solved"])
+        auto["failed"] = info.get("failed", auto["failed"])
+        broadcast({"type": "nwpucat", "nwpucat": nwpucat_snapshot()})
+
+    def on_result(result: dict[str, Any]) -> None:
+        auto["results"].append({
+            "entry": result.get("entry"), "flag": result.get("flag"),
+            "accepted": result.get("accepted"), "layer": result.get("layer"),
+            "score": result.get("score"), "error": result.get("error"),
+        })
+        job = holder.get("job")
+        if job is not None:
+            job.status = "done" if result.get("accepted") else "error"
+            job.flag = result.get("flag")
+            job.accepted = result.get("accepted")
+            job.error = result.get("error")
+        broadcast({"type": "nwpucat", "nwpucat": nwpucat_snapshot()})
+
+    try:
+        await ensure_lingshu(cfg, lingshu)
+        await nw_auto_chain(
+            lingshu, args_like(cfg, "nwpu-auto"), NwpucatClient(),
+            mode=mode, limit=limit,
+            on_result=on_result, on_progress=on_progress, on_event=on_event,
+            stop_event=stop_event)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        out(f"[nwpu-auto] 挂机异常终止: {exc}")
+        auto["results"].append({"entry": auto.get("current") or "-",
+                                "accepted": False, "error": str(exc)[:160]})
+    finally:
+        for job in state["jobs"].values():
+            if job.status == "running":
+                job.status = "cancelled"
+        auto["running"] = False
+        auto["current"] = ""
+        broadcast({"type": "nwpucat", "nwpucat": nwpucat_snapshot()})
+
+
+@app.post("/api/nwpucat/auto")
+async def api_nwpucat_auto(data: NwpuAutoIn):
+    cfg: Config = STATE["config"]
+    state: dict[str, Any] = STATE["nwpucat"]
+    if not nw_credentials_brief().get("registered"):
+        raise HTTPException(status_code=400, detail="尚未注册：请先注册 Agent")
+    if state["auto"]["running"]:
+        raise HTTPException(status_code=409, detail="全链挂机已在运行")
+    if any(j.status in {"queued", "running"} for j in state["jobs"].values()):
+        raise HTTPException(status_code=409, detail="已有解题任务在运行")
+    mode = data.mode or cfg.mode or "fast"
+    limit = max(1, min(10, data.limit or 3))
+    state["task"] = state.get("task")
+    state["auto_task"] = asyncio.create_task(nwpucat_run_auto(mode, limit))
+    return {"ok": True}
+
+
+@app.post("/api/nwpucat/auto/stop")
+async def api_nwpucat_auto_stop():
+    state: dict[str, Any] = STATE["nwpucat"]
+    if state["auto"]["running"]:
+        state["stop_event"].set()
+        task = state.get("auto_task")
+        if task is not None and not task.done():
+            task.cancel()
+        state["auto"]["running"] = False
+        return {"ok": True, "message": "已停止（当前解题已中断）"}
+    return {"ok": True, "message": "挂机未在运行"}
+
+
+@app.get("/api/nwpucat/me")
+async def api_nwpucat_me():
+    if not nw_credentials_brief().get("registered"):
+        raise HTTPException(status_code=400, detail="尚未注册")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(40, connect=15)) as client:
+        try:
+            return await NwpucatClient().me(client)
+        except NwpuError as exc:
+            raise HTTPException(status_code=502,
+                                detail=f"Nwpucat 平台错误：{exc}") from exc
 
 
 @app.get("/api/stream")
