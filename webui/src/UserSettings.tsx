@@ -160,7 +160,7 @@ function IntelCard() {
   };
 
   return (
-    <section className="superadmin-database">
+    <section className="superadmin-database intel-card">
       <header><div><h2>资产测绘引擎 API Key</h2>
         <em>FOFA / Hunter / Shodan / ZoomEye；key 加密存储，仅测绘查询使用（结果属情报，测试目标仍需授权审批）</em></div></header>
       <div className="superadmin-form" style={{ display: "grid", gap: 14 }}>
