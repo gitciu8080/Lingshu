@@ -62,3 +62,6 @@ Tools/AntSword-Loader-v4.0.3-linux-x64/
 Skills/beautiful-mermaid/node_modules/
 Skills/beautiful-mermaid/.git/
 data/ctf2_workbench_active.json
+
+# AgWars 凭据与身份文件（含 api_secret，绝不入库）
+data/agwars/

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import secrets
 import json
 import os
 import time
@@ -28,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -52,6 +53,14 @@ from workbench_nssctf_agent import (
     attempt_brief as nss_attempt_brief,
     auto_arena as nss_auto_arena,
     solve_attempt as nss_solve_attempt,
+)
+import workbench_agwars_agent as ag
+from workbench_agwars_agent import (
+    AgWarsClient,
+    AgWarsError,
+    credentials_brief as ag_credentials_brief,
+    solve_hill as ag_solve_hill,
+    auto_arena as ag_auto_arena,
 )
 
 
@@ -153,6 +162,10 @@ class Config:
     mode: str = os.environ.get("CTF2_MODE", "fast")
     fast_summary: str = os.environ.get("CTF2_FAST_SUMMARY", "0")
     nssctf_token: str = os.environ.get("NSSCTF_AGENT_TOKEN", "")
+    # AgWars 注册元信息（凭据本身存 data/agwars/credentials.json）
+    agwars_model_group: str = os.environ.get("AGWARS_MODEL_GROUP", "other")
+    agwars_model_url: str = os.environ.get("AGWARS_MODEL_URL", "")
+    agwars_model_name: str = os.environ.get("AGWARS_MODEL_NAME", "")
 
     @classmethod
     def load(cls) -> "Config":
@@ -163,7 +176,9 @@ class Config:
                 data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
                 for key in ("ctf2_token", "lingshu_url", "lingshu_user",
                             "lingshu_pass", "provider", "model", "mode",
-                            "fast_summary", "nssctf_token"):
+                            "fast_summary", "nssctf_token",
+                            "agwars_model_group", "agwars_model_url",
+                            "agwars_model_name"):
                     value = str(data.get(key) or "").strip()
                     if value:
                         setattr(cfg, key, value)
@@ -175,7 +190,8 @@ class Config:
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         payload = {k: getattr(self, k) for k in (
             "ctf2_token", "lingshu_url", "lingshu_user", "lingshu_pass",
-            "provider", "model", "mode", "fast_summary", "nssctf_token")}
+            "provider", "model", "mode", "fast_summary", "nssctf_token",
+            "agwars_model_group", "agwars_model_url", "agwars_model_name")}
         tmp = CONFIG_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                        encoding="utf-8")
@@ -259,6 +275,17 @@ STATE = {
         "job_order": deque(maxlen=50),
         "stop_event": asyncio.Event(),
         "task": None,
+    },
+    "agwars": {                      # AgWars 攻防 Benchmark 分区
+        "auto": {
+            "running": False, "mode": "fast", "limit": 5,
+            "solved": 0, "failed": 0, "current": "", "results": [],
+        },
+        "jobs": {},
+        "job_order": deque(maxlen=50),
+        "stop_event": asyncio.Event(),
+        "task": None,
+        "proxies": {},               # proxy_id → {slot_url, hill, created_at}
     },
     "subscribers": set(),            # asyncio.Queue
     "agent_cache": {"data": None, "at": 0.0},
@@ -1338,6 +1365,519 @@ async def api_nss_auto_stop():
     return {"ok": True, "message": "挂机未在运行"}
 
 
+# ════════════════════════════════════════════════════════════════
+# AgWars 智能渗透 Agent 攻防 Benchmark（独立子页面）
+# ════════════════════════════════════════════════════════════════
+
+def require_agwars() -> AgWarsClient:
+    aw = AgWarsClient()
+    if not (aw.token and aw.secret and aw.trace):
+        raise HTTPException(
+            status_code=400,
+            detail="尚未注册 AgWars Agent：请在本页填写模型信息后点「注册 Agent」"
+                   "（每设备最多 2 个，api_secret 仅本机 0600 保存）")
+    return aw
+
+
+def agwars_http_error(exc: Exception) -> HTTPException:
+    import logging
+
+    logging.getLogger("ctf2_workbench").warning("AgWars 调用失败: %r", exc)
+    detail = str(exc) or exc.__class__.__name__
+    if isinstance(exc, AgWarsError) and exc.status == 403 and "verification" in detail.lower():
+        detail += "（请先完成模型验证）"
+    return HTTPException(status_code=502, detail=f"AgWars 平台错误：{detail}")
+
+
+def agwars_snapshot() -> dict[str, Any]:
+    state: dict[str, Any] = STATE["agwars"]
+    return {
+        "auto": dict(state["auto"]),
+        "jobs": [state["jobs"][jid].snapshot() for jid in list(state["job_order"])[-20:]],
+        "credentials": ag_credentials_brief(),
+    }
+
+
+async def agwars_public_config(client: httpx.AsyncClient) -> dict[str, Any]:
+    try:
+        return await AgWarsClient().public_config(client)
+    except Exception:  # noqa: BLE001 — 公开配置失败不影响页面
+        return {}
+
+
+@app.get("/api/agwars/state")
+async def api_agwars_state():
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=15)) as client:
+        config = await agwars_public_config(client)
+    payload = agwars_snapshot()
+    active = config.get("active_hills") or {}
+    creds = payload["credentials"]
+    shard = str(creds.get("shard") or "")
+    # 未注册时不知道分片，绝不能猜测——跨分片访问会被平台判定违规
+    hills = active.get(shard) if (shard and isinstance(active, dict)) else None
+    payload["platform"] = {
+        "active_hills": list(hills or []),
+        "shards": sorted(active.keys()) if isinstance(active, dict) else [],
+        "hills_by_shard": active if isinstance(active, dict) else {},
+        "rounds": config.get("rounds"),
+        "capacity": (config.get("capacity") or {}).get("slots"),
+        "formal_end": config.get("formal_end"),
+        "slot_required": config.get("slot_required"),
+        "shard": shard,
+    }
+    return payload
+
+
+class AgWarsRegisterIn(BaseModel):
+    model_group: str
+    model_url: str = ""
+    model_name: str = ""
+
+
+@app.post("/api/agwars/register")
+async def api_agwars_register(data: AgWarsRegisterIn):
+    """注册 Agent（无签名，带设备标识）。每设备最多 2 个，失败会明确报错。"""
+    cfg: Config = STATE["config"]
+    group = (data.model_group or "").strip().lower()
+    if group not in ag.MODEL_GROUPS:
+        raise HTTPException(status_code=400,
+                            detail=f"model_group 不在支持列表：{', '.join(ag.MODEL_GROUPS)}")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20)) as client:
+        try:
+            body = await AgWarsClient().register(
+                client, model_group=group,
+                model_url=(data.model_url or cfg.agwars_model_url).strip(),
+                model_name=(data.model_name or cfg.agwars_model_name).strip())
+        except AgWarsError as exc:
+            raise agwars_http_error(exc) from exc
+    cfg.agwars_model_group = group
+    cfg.agwars_model_url = (data.model_url or cfg.agwars_model_url).strip()
+    cfg.agwars_model_name = (data.model_name or cfg.agwars_model_name).strip()
+    cfg.save()
+    return {"ok": True, "credentials": ag_credentials_brief(),
+            "shard": body.get("shard"), "score_total": body.get("score_total"),
+            "identity_path": str(ag.IDENTITY_FILE)}
+
+
+async def _attest_model_answer(cfg: Config, prompt: str) -> str:
+    """用灵枢同款模型回答平台的模型验证题（关闭思考，避免只出 reasoning）。"""
+    from agentscope.message import UserMsg
+
+    from core.auth import get_user_by_username
+    from core.config import RuntimeConfig
+    from LLM.model import create_model
+
+    user = get_user_by_username(cfg.lingshu_user) or {}
+    runtime = RuntimeConfig.from_env(user_id=user.get("id"))
+    model = create_model(
+        provider=cfg.provider, model=cfg.model or None,
+        thinking_intensity="off", temperature=0.0,
+        web_search=False, config=runtime)
+
+    async def _collect() -> str:
+        result = await model([UserMsg(name="user", content=prompt)])
+        if hasattr(result, "get_text_content"):
+            return str(result.get_text_content() or "")
+        parts: list[str] = []
+        async for chunk in result:
+            content = getattr(chunk, "content", None)
+            if not content:
+                continue
+            for item in (content if isinstance(content, list) else [content]):
+                kind = str(getattr(item, "type", ""))
+                if "thinking" in kind:
+                    continue
+                parts.append(str(getattr(item, "text", "") or ""))
+        return "".join(parts)
+
+    return (await asyncio.wait_for(_collect(), timeout=120)).strip()
+
+
+@app.post("/api/agwars/verify-model")
+async def api_agwars_verify_model():
+    """模型验证：challenge → 本方模型作答 → verify（平台据此放行 slot/flag_submit）。"""
+    cfg: Config = STATE["config"]
+    aw = require_agwars()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20)) as client:
+        try:
+            challenge = await aw.model_challenge(client)
+            nonce = str(challenge.get("nonce") or "")
+            prompt = str(challenge.get("prompt") or "")
+            if not nonce or not prompt:
+                raise HTTPException(status_code=502, detail="平台未返回模型验证题")
+            answer = await _attest_model_answer(cfg, prompt)
+            if not answer:
+                raise HTTPException(
+                    status_code=502,
+                    detail="本地模型未返回答案（检查 provider/model 配置与思考开关）")
+            verified = await aw.model_verify(client, nonce=nonce, answer=answer)
+        except AgWarsError as exc:
+            raise agwars_http_error(exc) from exc
+        except asyncio.TimeoutError as exc:
+            raise HTTPException(status_code=504, detail="模型作答超时（120s）") from exc
+    return {"ok": True, "verified": bool(verified.get("verified")),
+            "vendor": verified.get("vendor"), "answer_preview": answer[:80]}
+
+
+class AgWarsHillIn(BaseModel):
+    hill: str
+
+
+@app.post("/api/agwars/slot/acquire")
+async def api_agwars_slot_acquire(data: AgWarsHillIn):
+    aw = require_agwars()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20)) as client:
+        try:
+            return await aw.slot_acquire(client, data.hill.strip())
+        except AgWarsError as exc:
+            raise agwars_http_error(exc) from exc
+
+
+@app.post("/api/agwars/slot/poll")
+async def api_agwars_slot_poll():
+    aw = require_agwars()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=15)) as client:
+        try:
+            return await aw.slot_poll(client)
+        except AgWarsError as exc:
+            raise agwars_http_error(exc) from exc
+
+
+@app.post("/api/agwars/slot/keepalive")
+async def api_agwars_slot_keepalive():
+    aw = require_agwars()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=15)) as client:
+        try:
+            return await aw.slot_keepalive(client)
+        except AgWarsError as exc:
+            raise agwars_http_error(exc) from exc
+
+
+@app.post("/api/agwars/slot/release")
+async def api_agwars_slot_release():
+    aw = require_agwars()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=15)) as client:
+        try:
+            return await aw.slot_release(client)
+        except AgWarsError as exc:
+            raise agwars_http_error(exc) from exc
+
+
+class AgWarsSolveIn(BaseModel):
+    hill: str
+    mode: str | None = None
+
+
+def agwars_self_base() -> str:
+    """灵枢访问本工作台的地址（代理入口）。"""
+    port = STATE.get("self_port") or int(os.environ.get("WORKBENCH_PORT", "8081"))
+    return f"http://127.0.0.1:{port}"
+
+
+async def agwars_run_job(job: Job, hill: str, mode: str) -> None:
+    cfg: Config = STATE["config"]
+    state: dict[str, Any] = STATE["agwars"]
+    job.status = "running"
+
+    def emit(event: dict[str, Any]) -> None:
+        event = {"job_id": job.id, "ts": time.time(), **event}
+        job.events.append(event)
+        if event.get("type") == "session_started" and event.get("session_id"):
+            job.session_id = event["session_id"]
+        broadcast({"type": "job_event", "job_id": job.id, "event": event})
+
+    lingshu = make_lingshu(cfg)
+    aw = require_agwars()
+    proxy_holder: dict[str, str] = {}   # finally 需要，必须在 try 之前绑定
+    try:
+        await ensure_lingshu(cfg, lingshu)
+
+        def _expose(slot_url: str) -> str:
+            proxy_id = agwars_proxy_register(hill, slot_url)
+            proxy_holder["id"] = proxy_id
+            return f"{agwars_self_base()}/agwars/proxy/{proxy_id}"
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=30)) as client:
+            result = await ag_solve_hill(
+                lingshu, args_like(cfg, hill), aw, client, hill,
+                mode=mode, on_event=emit, expose_url_factory=_expose)
+        job.flag = result.get("flag")
+        job.submitted = bool(result.get("submitted"))
+        job.accepted = result.get("accepted")
+        job.error = result.get("error")
+        job.status = "done" if (job.accepted or not job.error) else "error"
+        if job.accepted is False:
+            job.status = "done"
+    except asyncio.CancelledError:
+        job.status = "cancelled"
+        job.error = "已取消"
+        raise
+    except Exception as exc:  # noqa: BLE001
+        job.error = str(exc)
+        job.status = "error"
+    finally:
+        active_release(hill)
+        if proxy_holder.get("id"):
+            agwars_proxy_release(proxy_holder["id"])
+        broadcast({"type": "agwars", "agwars": agwars_snapshot()})
+        broadcast({"type": "job_event", "job_id": job.id,
+                   "event": {"job_id": job.id, "ts": time.time(), "type": "log",
+                             "message": f"任务结束：{job.status}"}})
+
+
+@app.post("/api/agwars/solve")
+async def api_agwars_solve(data: AgWarsSolveIn):
+    cfg = require_agwars()
+    state: dict[str, Any] = STATE["agwars"]
+    if state["auto"]["running"]:
+        raise HTTPException(status_code=409, detail="AgWars 挂机运行中，请先停止")
+    if any(j.status in {"queued", "running"} for j in state["jobs"].values()):
+        raise HTTPException(status_code=409, detail="已有 AgWars 解题任务在运行")
+    hill = data.hill.strip()
+    if not hill:
+        raise HTTPException(status_code=400, detail="hill 不能为空")
+    claimed = active_claim(f"agwars:{hill}")
+    if claimed:
+        raise HTTPException(status_code=409,
+                            detail=f"该题号已有进行中的会话（{claimed[:8]}）")
+    mode = data.mode or cfg.mode or "fast"
+    job = Job(id=f"g{int(time.time() * 1000) % 10**10}", challenge_id=hill,
+              title=f"AgWars {hill}", mode=mode, source="agwars")
+    state["jobs"][job.id] = job
+    state["job_order"].append(job.id)
+    job.task = asyncio.create_task(agwars_run_job(job, hill, mode))
+    broadcast({"type": "agwars", "agwars": agwars_snapshot()})
+    return {"job_id": job.id}
+
+
+class AgWarsFlagIn(BaseModel):
+    flag: str
+
+
+@app.post("/api/agwars/submit")
+async def api_agwars_submit(data: AgWarsFlagIn):
+    aw = require_agwars()
+    flag = extract_flag(data.flag) or data.flag.strip()
+    if not flag:
+        raise HTTPException(status_code=400, detail="flag 为空")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20)) as client:
+        try:
+            result = await aw.submit_flag(client, flag)
+        except AgWarsError as exc:
+            raise agwars_http_error(exc) from exc
+    return {"ok": True, "raw": result}
+
+
+class AgWarsAutoIn(BaseModel):
+    mode: str | None = None
+    limit: int | None = None
+    hills: list[str] | None = None
+
+
+async def agwars_run_auto(mode: str, limit: int, hills: list[str] | None) -> None:
+    state: dict[str, Any] = STATE["agwars"]
+    cfg: Config = STATE["config"]
+    auto = state["auto"]
+    stop_event: asyncio.Event = state["stop_event"]
+    stop_event.clear()
+    auto.update({"running": True, "solved": 0, "failed": 0,
+                 "current": "", "results": []})
+    broadcast({"type": "agwars", "agwars": agwars_snapshot()})
+    lingshu = make_lingshu(cfg)
+    holder: dict[str, Any] = {"job": None}
+
+    def on_event(event: dict[str, Any]) -> None:
+        job = holder.get("job")
+        if job is None:
+            return
+        item = {"job_id": job.id, "ts": time.time(), **event}
+        job.events.append(item)
+        if event.get("type") == "session_started" and event.get("session_id"):
+            job.session_id = event["session_id"]
+        broadcast({"type": "job_event", "job_id": job.id, "event": item})
+
+    def on_progress(info: dict[str, Any]) -> None:
+        job = Job(id=f"g{int(time.time() * 1000) % 10**10}",
+                  challenge_id=str(info.get("current") or "auto"),
+                  title=f"AgWars {info.get('current') or ''}",
+                  mode=mode, source="agwars")
+        job.status = "running"
+        state["jobs"][job.id] = job
+        state["job_order"].append(job.id)
+        holder["job"] = job
+        auto["current"] = str(info.get("current") or "")
+        auto["solved"] = info.get("solved", auto["solved"])
+        auto["failed"] = info.get("failed", auto["failed"])
+        broadcast({"type": "agwars", "agwars": agwars_snapshot()})
+
+    def on_result(result: dict[str, Any]) -> None:
+        auto["results"].append({
+            "hill": result.get("hill"), "flag": result.get("flag"),
+            "accepted": result.get("accepted"), "error": result.get("error"),
+            "slot_url": result.get("slot_url"),
+        })
+        job = holder.get("job")
+        if job is not None:
+            job.status = "done" if result.get("accepted") else "error"
+            job.flag = result.get("flag")
+            job.accepted = result.get("accepted")
+            job.error = result.get("error")
+        broadcast({"type": "agwars", "agwars": agwars_snapshot()})
+
+    created_proxies: list[str] = []
+
+    def _expose_auto(slot_url: str) -> str:
+        proxy_id = agwars_proxy_register("auto", slot_url)
+        created_proxies.append(proxy_id)
+        return f"{agwars_self_base()}/agwars/proxy/{proxy_id}"
+
+    try:
+        await ensure_lingshu(cfg, lingshu)
+        await ag_auto_arena(
+            lingshu, args_like(cfg, "agwars-auto"), require_agwars(),
+            mode=mode, limit=limit, hills=hills,
+            on_result=on_result, on_progress=on_progress, on_event=on_event,
+            stop_event=stop_event, expose_url_factory=_expose_auto)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        out(f"[agwars-auto] 挂机异常终止: {exc}")
+        auto["results"].append({"hill": auto.get("current") or "-",
+                                "accepted": False, "error": str(exc)[:160]})
+    finally:
+        for proxy_id in created_proxies:
+            agwars_proxy_release(proxy_id)
+        for job in state["jobs"].values():
+            if job.status == "running":
+                job.status = "cancelled"
+        auto["running"] = False
+        auto["current"] = ""
+        broadcast({"type": "agwars", "agwars": agwars_snapshot()})
+
+
+@app.post("/api/agwars/auto")
+async def api_agwars_auto(data: AgWarsAutoIn):
+    cfg: Config = STATE["config"]
+    state: dict[str, Any] = STATE["agwars"]
+    require_agwars()
+    if state["auto"]["running"]:
+        raise HTTPException(status_code=409, detail="AgWars 挂机已在运行")
+    if any(j.status in {"queued", "running"} for j in state["jobs"].values()):
+        raise HTTPException(status_code=409, detail="已有 AgWars 解题任务在运行")
+    mode = data.mode or cfg.mode or "fast"
+    limit = max(1, min(50, data.limit or 5))
+    state["task"] = asyncio.create_task(
+        agwars_run_auto(mode, limit, data.hills or None))
+    return {"ok": True}
+
+
+@app.post("/api/agwars/auto/stop")
+async def api_agwars_auto_stop():
+    state: dict[str, Any] = STATE["agwars"]
+    if state["auto"]["running"]:
+        state["stop_event"].set()
+        task = state.get("task")
+        if task is not None and not task.done():
+            task.cancel()
+        state["auto"]["running"] = False
+        return {"ok": True, "message": "已停止（当前解题已中断）"}
+    return {"ok": True, "message": "挂机未在运行"}
+
+
+class AgWarsControlIn(BaseModel):
+    action: str
+    hours: int = 6
+
+
+@app.post("/api/agwars/control")
+async def api_agwars_control(data: AgWarsControlIn):
+    """参赛状态控制：暂停 / 恢复 / 弃赛 / 申诉。"""
+    aw = require_agwars()
+    action = (data.action or "").strip().lower()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20)) as client:
+        try:
+            if action == "pause":
+                return await aw.pause(client, hours=max(1, min(72, data.hours)))
+            if action == "resume":
+                return await aw.resume(client)
+            if action == "forfeit":
+                return await aw.forfeit(client)
+            if action == "appeal":
+                return await aw.appeal(client)
+        except AgWarsError as exc:
+            raise agwars_http_error(exc) from exc
+    raise HTTPException(status_code=400,
+                        detail="action 仅支持 pause / resume / forfeit / appeal")
+
+
+AGWARS_PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
+
+
+def agwars_proxy_register(hill: str, slot_url: str) -> str:
+    """为本次解题登记一个本地注入代理：token 不进入模型上下文。"""
+    state: dict[str, Any] = STATE["agwars"]
+    proxies: dict[str, Any] = state.setdefault("proxies", {})
+    # 清理陈旧代理（超过 2 小时）
+    now = time.time()
+    for pid, info in list(proxies.items()):
+        if now - float(info.get("created_at") or 0) > 7200:
+            proxies.pop(pid, None)
+    proxy_id = secrets.token_hex(8)
+    proxies[proxy_id] = {"slot_url": slot_url.rstrip("/"), "hill": hill,
+                         "created_at": now}
+    return proxy_id
+
+
+def agwars_proxy_release(proxy_id: str) -> None:
+    STATE["agwars"].get("proxies", {}).pop(proxy_id, None)
+
+
+@app.api_route("/agwars/proxy/{proxy_id}/{rest:path}", methods=AGWARS_PROXY_METHODS)
+async def agwars_proxy(proxy_id: str, rest: str, request: Request):
+    """把灵枢的请求转发到本题实例，并注入平台要求的认证头。
+
+    平台规定实例请求需 ``X-Agent-Token`` + ``X-Trace-Id``（不需 HMAC）。
+    由工作台代注入可以让 api_token 完全不进入模型上下文与命令历史；
+    响应中的绝对 Location 会被改写回代理路径，避免模型直连实例域名。
+    """
+    info = STATE["agwars"].get("proxies", {}).get(proxy_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="代理不存在或已过期")
+    slot_url = str(info["slot_url"]).rstrip("/")
+    target = f"{slot_url}/{rest}" if rest else f"{slot_url}/"
+    query = request.url.query
+    if query:
+        target = f"{target}?{query}"
+    aw = AgWarsClient()
+    headers = {
+        key: value for key, value in request.headers.items()
+        if key.lower() not in {"host", "content-length", "connection",
+                               "accept-encoding"}
+    }
+    headers["X-Agent-Token"] = aw.token
+    headers["X-Trace-Id"] = aw.trace
+    body = await request.body()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=20),
+                                 follow_redirects=False) as client:
+        response = await client.request(
+            request.method, target, headers=headers, content=body or None)
+    out_headers = {
+        key: value for key, value in response.headers.items()
+        if key.lower() not in {"content-encoding", "content-length",
+                               "transfer-encoding", "connection"}
+    }
+    location = out_headers.get("location") or out_headers.get("Location")
+    if location:
+        prefix = f"/agwars/proxy/{proxy_id}"
+        if location.startswith(slot_url):
+            out_headers["location"] = prefix + location[len(slot_url):]
+        elif location.startswith("/"):
+            out_headers["location"] = prefix + location
+    return StreamingResponse(
+        iter([response.content]), status_code=response.status_code,
+        headers=out_headers, media_type=response.headers.get("content-type"))
+
+
 @app.get("/api/stream")
 async def api_stream():
     queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
@@ -1440,7 +1980,7 @@ border-radius:10px;padding:20px}
 <body>
 <div class="top">
   <b>灵枢 × CTF 竞技场工作台</b>
-  <span class="chip" id="chip-ver">v2.6</span>
+  <span class="chip" id="chip-ver">v2.7</span>
   <span class="chip" id="chip-conn">● 未连接</span>
   <span class="chip" id="chip-agent">AGENT —</span>
   <span class="chip" id="chip-score">SCORE —</span>
@@ -1452,6 +1992,7 @@ border-radius:10px;padding:20px}
 <div class="tabs">
   <button class="tab active" id="tab-ctf2" onclick="switchTab('ctf2')">CTF2 竞技场</button>
   <button class="tab" id="tab-nss" onclick="switchTab('nss')">NSSCTF 竞技场</button>
+  <button class="tab" id="tab-agwars" onclick="switchTab('agwars')">AgWars 攻防场</button>
   <span class="mini" id="nss-chip" style="margin-left:10px"></span>
 </div>
 <div id="page-ctf2">
@@ -1613,6 +2154,126 @@ border-radius:10px;padding:20px}
   </div>
 </div>
 </div>
+<div id="page-agwars" style="display:none">
+<div class="wrap">
+  <div style="display:grid;gap:14px;min-width:0">
+    <div class="card">
+      <header>Agent 身份 <span class="right mini" id="ag-id-hint"></span></header>
+      <div class="body" id="ag-identity">
+        <span class="muted">尚未注册 AgWars Agent</span>
+      </div>
+    </div>
+    <div class="card">
+      <header>注册 / 模型验证</header>
+      <div class="body">
+        <div class="filters" style="flex-wrap:wrap">
+          <select id="ag-group" title="model_group">
+            <option value="other">other</option>
+            <option value="deepseek">deepseek</option>
+            <option value="qwen">qwen</option>
+            <option value="glm">glm</option>
+            <option value="claude">claude</option>
+            <option value="gpt">gpt</option>
+            <option value="gemini">gemini</option>
+            <option value="kimi">kimi</option>
+            <option value="doubao">doubao</option>
+            <option value="siliconflow">siliconflow</option>
+            <option value="hunyuan">hunyuan</option>
+            <option value="minimax">minimax</option>
+          </select>
+          <input type="text" id="ag-url" placeholder="model_url（如 http://10.8.20.116:8201/v1）" style="flex:1;min-width:220px">
+          <input type="text" id="ag-model" placeholder="model_name" style="width:170px">
+        </div>
+        <div class="filters" style="margin-top:8px">
+          <button class="btn primary" onclick="agwarsRegister()">注册 Agent</button>
+          <button class="btn" onclick="agwarsVerifyModel()">模型验证</button>
+          <span class="mini" id="ag-verify-hint"></span>
+        </div>
+        <p class="mini muted" style="margin:6px 0 0">
+          每设备最多注册 2 个 Agent；api_secret 仅本机 0600 保存，不会显示在页面。
+          注册后请把 API Token 交给主人，用于 agwars.hxorz.com 的「我的排队」。
+        </p>
+      </div>
+    </div>
+    <div class="card">
+      <header>激活题号 <span class="right mini" id="ag-round"></span></header>
+      <div class="body">
+        <div class="filters" style="flex-wrap:wrap">
+          <select id="ag-hill" style="min-width:110px"></select>
+          <select id="ag-mode"><option value="fast">快速 ⚡</option><option value="standard">标准</option></select>
+          <button class="btn primary" onclick="agwarsSolve()">排队并解题</button>
+          <button class="btn" onclick="agwarsRefresh()">刷新</button>
+        </div>
+        <div class="filters" style="margin-top:8px">
+          <button class="btn" onclick="agwarsSlot('poll')">查询槽位</button>
+          <button class="btn" onclick="agwarsSlot('keepalive')">保活</button>
+          <button class="btn danger" onclick="agwarsSlot('release')">释放槽位</button>
+          <span class="mini" id="ag-slot-hint"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div style="display:grid;gap:14px;min-width:0">
+    <div class="card">
+      <header>实时解题 <span class="right mini" id="ag-job-title"></span></header>
+      <div class="body">
+        <div class="stream" id="ag-stream">等待任务事件…</div>
+        <div class="flagline">FLAG: <span class="v" id="ag-job-flag">—</span>
+          <span id="ag-job-result"></span></div>
+        <div class="filters" style="margin-top:10px">
+          <input type="text" id="ag-flag" placeholder="手动提交 flag（可选）" style="flex:1">
+          <button class="btn" onclick="agwarsSubmit()">提交 Flag</button>
+        </div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <header>AgWars 全自动
+          <div class="right">
+            <button class="btn primary" id="ag-auto-start" onclick="agwarsAutoStart()">启动</button>
+            <button class="btn danger" id="ag-auto-stop" onclick="agwarsAutoStop()" disabled>停止</button>
+          </div>
+        </header>
+        <div class="body">
+          <div class="filters">
+            <input type="number" id="ag-limit" value="3" min="1" max="50" style="width:70px" title="题数上限">
+            <span class="mini">按激活题号顺序排队解题（错题扣分，勿刷错误 Flag）</span>
+          </div>
+          <div>
+            <span class="stat">✅ <b id="ag-solved" class="ok">0</b></span>
+            <span class="stat">❌ <b id="ag-failed" class="bad">0</b></span>
+            <span class="stat mini" id="ag-current">空闲</span>
+          </div>
+          <table><tbody id="ag-results"></tbody></table>
+        </div>
+      </div>
+      <div class="card">
+        <header>参赛控制</header>
+        <div class="body">
+          <div class="filters" style="flex-wrap:wrap">
+            <button class="btn" onclick="agwarsControl('pause')">暂停 6h</button>
+            <button class="btn" onclick="agwarsControl('resume')">恢复</button>
+            <button class="btn" onclick="agwarsControl('appeal')">申诉</button>
+            <button class="btn danger" onclick="agwarsControl('forfeit')">弃赛</button>
+          </div>
+          <p class="mini muted" style="margin:8px 0 0">
+            罚则：蜜罐 -3%、反扫描/模板 -5%、错误 Flag -5%（同一 Flag 10 分钟不重复扣）；
+            每 30 分钟无有效活动计躺平窗口。弃赛会释放山头并永久免罚，不可逆。
+          </p>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <header>任务记录</header>
+      <div class="body">
+        <table><thead><tr><th>题号</th><th>模式</th><th>Flag</th><th>判定</th></tr></thead>
+        <tbody id="ag-history"><tr><td colspan="4" class="muted">暂无</td></tr></tbody></table>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
 <div class="overlay" id="cfg-modal" style="display:none">
   <div class="modal">
     <h3>连接设置</h3>
@@ -1896,9 +2557,12 @@ function switchTab(t){
   activeTab = t;
   $("page-ctf2").style.display = t === "ctf2" ? "" : "none";
   $("page-nss").style.display = t === "nss" ? "" : "none";
+  $("page-agwars").style.display = t === "agwars" ? "" : "none";
   $("tab-ctf2").classList.toggle("active", t === "ctf2");
   $("tab-nss").classList.toggle("active", t === "nss");
+  $("tab-agwars").classList.toggle("active", t === "agwars");
   if (t === "nss") nssRefresh();
+  if (t === "agwars") agwarsRefresh();
 }
 function nssEsc(s){ return esc(String(s ?? "")); }
 function renderNss(st){
@@ -1997,6 +2661,132 @@ async function nssAutoStop(){
   if (d.message) toast.info(d.message);
   nssRefresh();
 }
+
+// ── AgWars 攻防场 ──
+let agJobId = null;
+const agStreams = {};
+function renderAgwars(st){
+  const c = st.credentials || {};
+  const p = st.platform || {};
+  $("ag-id-hint").textContent = c.registered
+    ? (c.player_name + " · " + (c.shard || "")) : "未注册";
+  $("ag-identity").innerHTML = c.registered ? (
+    "<table>" +
+    "<tr><td class='mini' style='width:96px'>用户名</td><td><b>" + nssEsc(c.player_name) + "</b></td></tr>" +
+    "<tr><td class='mini'>Agent ID</td><td><b>" + nssEsc(c.agent_id) + "</b></td></tr>" +
+    "<tr><td class='mini'>分片</td><td>" + nssEsc(c.shard) + "</td></tr>" +
+    "<tr><td class='mini'>得分</td><td>" + nssEsc(String(c.score_total ?? "—")) + "</td></tr>" +
+    "<tr><td class='mini'>Token</td><td><code>" + nssEsc(c.token_hint) + "</code>（完整值见身份文件）</td></tr>" +
+    "<tr><td class='mini'>Secret</td><td><code>" + nssEsc(c.secret_hint) + "</code> 仅本机 0600</td></tr>" +
+    "<tr><td class='mini'>身份文件</td><td class='mini'>" + nssEsc(c.identity_path) + "</td></tr>" +
+    "</table>"
+  ) : "<span class='muted'>尚未注册：填写下方模型信息后点「注册 Agent」</span>";
+
+  // 激活题号下拉
+  const hills = p.active_hills || [];
+  const sel = $("ag-hill"); const prev = sel.value;
+  sel.innerHTML = hills.length
+    ? hills.map(h => "<option value='" + nssEsc(h) + "'>" + nssEsc(h) + "</option>").join("")
+    : "<option value=''>（无激活题号）</option>";
+  if (prev && hills.includes(prev)) sel.value = prev;
+  $("ag-round").textContent = p.formal_end
+    ? ("关服 " + nssEsc(p.formal_end) + (p.capacity ? " · 容量 " + p.capacity : ""))
+    : (hills.length ? "" : "读取中…");
+
+  const au = st.auto || {};
+  $("ag-auto-start").disabled = !!au.running;
+  $("ag-auto-stop").disabled = !au.running;
+  $("ag-solved").textContent = au.solved ?? 0;
+  $("ag-failed").textContent = au.failed ?? 0;
+  $("ag-current").textContent = au.current || "空闲";
+  $("ag-results").innerHTML = (au.results || []).slice(-10).reverse().map(r =>
+    "<tr><td>" + nssEsc(r.hill || "?") + "</td><td><code>" + nssEsc(r.flag || "—") +
+    "</code></td><td>" + (r.accepted ? '<span class="tag ok">✓</span>'
+      : '<span class="tag err">✗</span>') +
+    "<span class='mini'> " + nssEsc((r.error || "").slice(0, 40)) + "</span></td></tr>").join("");
+  $("ag-history").innerHTML = (st.jobs || []).slice().reverse().map(j =>
+    "<tr><td>" + nssEsc(j.challenge_id || "?") + "</td><td>" +
+    (j.mode === "fast" ? '<span class="tag fast">FAST</span>' : '<span class="tag">STD</span>') +
+    "</td><td><code>" + nssEsc(j.flag || "—") + "</code></td><td>" +
+    (j.accepted === true ? '<span class="tag ok">正确</span>'
+      : j.accepted === false ? '<span class="tag err">未通过</span>'
+      : '<span class="tag err">' + nssEsc(j.error || j.status) + "</span>") + "</td></tr>").join("")
+    || '<tr><td colspan="4" class="muted">暂无</td></tr>';
+}
+async function agwarsRefresh(){
+  const r = await fetch("/api/agwars/state");
+  if (!r.ok){ const t = await readError(r);
+    $("ag-identity").innerHTML = "<span class='muted'>" + nssEsc(t) + "</span>"; return; }
+  renderAgwars(await r.json());
+}
+async function agwarsRegister(){
+  if (!confirm("确认注册新 Agent？每设备最多 2 个，注册后不可撤销。")) return;
+  const r = await fetch("/api/agwars/register", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({model_group: $("ag-group").value,
+      model_url: $("ag-url").value.trim(), model_name: $("ag-model").value.trim()})});
+  if (!r.ok){ alert(await readError(r)); return; }
+  toast.info("注册成功，身份文件已生成");
+  agwarsRefresh();
+}
+async function agwarsVerifyModel(){
+  $("ag-verify-hint").textContent = "验证中…";
+  const r = await fetch("/api/agwars/verify-model", {method: "POST"});
+  if (!r.ok){ $("ag-verify-hint").textContent = ""; alert(await readError(r)); return; }
+  const d = await r.json();
+  $("ag-verify-hint").textContent = d.verified
+    ? ("✅ 已验证（" + (d.vendor || "?") + "）") : "❌ 未通过（可重试）";
+  toast.info(d.verified ? "模型验证通过" : "模型验证未通过");
+}
+async function agwarsSolve(){
+  const hill = $("ag-hill").value;
+  if (!hill){ alert("请先选择激活题号"); return; }
+  const r = await fetch("/api/agwars/solve", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({hill, mode: $("ag-mode").value})});
+  if (!r.ok){ alert(await readError(r)); return; }
+  const d = await r.json();
+  agJobId = d.job_id; agStreams[agJobId] = "";
+  $("ag-stream").textContent = ""; $("ag-job-flag").textContent = "—";
+  $("ag-job-title").textContent = "AgWars " + hill;
+}
+async function agwarsSlot(action){
+  const r = await fetch("/api/agwars/slot/" + action, {method: "POST"});
+  if (!r.ok){ $("ag-slot-hint").textContent = ""; alert(await readError(r)); return; }
+  const d = await r.json();
+  $("ag-slot-hint").textContent = d.state
+    ? ("槽位 " + d.state + (d.position ? " / 第 " + d.position + " 位" : "") + (d.url ? " · " + d.url : ""))
+    : ("ok" + (d.slot ? " · " + d.slot : ""));
+}
+async function agwarsSubmit(){
+  const flag = $("ag-flag").value.trim();
+  if (!flag){ alert("请输入 flag"); return; }
+  const r = await fetch("/api/agwars/submit", {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify({flag})});
+  if (!r.ok){ alert(await readError(r)); return; }
+  toast.info("已提交，平台判定见「我的排队」");
+}
+async function agwarsAutoStart(){
+  const r = await fetch("/api/agwars/auto", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({mode: $("ag-mode").value, limit: Number($("ag-limit").value)})});
+  if (!r.ok){ alert(await readError(r)); return; }
+  agwarsRefresh();
+}
+async function agwarsAutoStop(){
+  const r = await fetch("/api/agwars/auto/stop", {method: "POST"});
+  const d = await r.json().catch(() => ({}));
+  if (d.message) toast.info(d.message);
+  agwarsRefresh();
+}
+async function agwarsControl(action){
+  if (action === "forfeit" && !confirm("弃赛会释放山头并永久免罚，且不可撤销。确认？")) return;
+  const r = await fetch("/api/agwars/control", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({action, hours: 6})});
+  if (!r.ok){ alert(await readError(r)); return; }
+  toast.info("已提交：" + action);
+}
 const es = new EventSource("/api/stream");
 es.onmessage = (ev) => {
   let msg; try{ msg = JSON.parse(ev.data); }catch(e){ return; }
@@ -2004,7 +2794,16 @@ es.onmessage = (ev) => {
     const e = msg.event || {};
     const line = e.type === "delta" ? (e.message || "")
       : "[" + (e.agent || "workbench") + "] " + (e.message || e.flag || "");
-    if (msg.job_id.startsWith("n")){
+    if (msg.job_id.startsWith("g")){
+      // AgWars 事件流
+      if (line){ agStreams[msg.job_id] = (agStreams[msg.job_id] || "") + line;
+        const gb = $("ag-stream");
+        gb.textContent = agStreams[msg.job_id].slice(-8000);
+        gb.scrollTop = gb.scrollHeight; }
+      if (e.type === "flag" && e.flag) $("ag-job-flag").textContent = e.flag;
+      if (e.type === "submit") $("ag-job-result").textContent =
+        e.accepted ? "✅ 正确" : "❌ 未通过";
+    } else if (msg.job_id.startsWith("n")){
       // NSSCTF 竞技场事件流（独立面板）
       if (line){ nssStreams[msg.job_id] = (nssStreams[msg.job_id] || "") + line;
         const nb = $("nss-stream");
@@ -2028,6 +2827,27 @@ es.onmessage = (ev) => {
     renderAuto(msg.auto);
   } else if (msg.type === "queue"){
     renderQueue(msg.queue);
+  } else if (msg.type === "agwars"){
+    const st = msg.agwars || {};
+    const au = st.auto || {};
+    $("ag-auto-start").disabled = !!au.running;
+    $("ag-auto-stop").disabled = !au.running;
+    $("ag-solved").textContent = au.solved ?? 0;
+    $("ag-failed").textContent = au.failed ?? 0;
+    $("ag-current").textContent = au.current || "空闲";
+    $("ag-results").innerHTML = (au.results || []).slice(-10).reverse().map(r =>
+      "<tr><td>" + nssEsc(r.hill || "?") + "</td><td><code>" + nssEsc(r.flag || "—") +
+      "</code></td><td>" + (r.accepted ? '<span class="tag ok">✓</span>'
+        : '<span class="tag err">✗</span>') +
+      "<span class='mini'> " + nssEsc((r.error || "").slice(0, 40)) + "</span></td></tr>").join("");
+    $("ag-history").innerHTML = (st.jobs || []).slice().reverse().map(j =>
+      "<tr><td>" + nssEsc(j.challenge_id || "?") + "</td><td>" +
+      (j.mode === "fast" ? '<span class="tag fast">FAST</span>' : '<span class="tag">STD</span>') +
+      "</td><td><code>" + nssEsc(j.flag || "—") + "</code></td><td>" +
+      (j.accepted === true ? '<span class="tag ok">正确</span>'
+        : j.accepted === false ? '<span class="tag err">未通过</span>'
+        : '<span class="tag err">' + nssEsc(j.error || j.status) + "</span>") + "</td></tr>").join("")
+      || '<tr><td colspan="4" class="muted">暂无</td></tr>';
   } else if (msg.type === "nss"){
     const st = msg.nss || {};
     const au = st.auto || {};
@@ -2066,6 +2886,7 @@ function renderJobsStateless(job){
 refreshState();
 setInterval(refreshState, 15000);
 setInterval(() => { if (activeTab === "nss") nssRefresh(); }, 8000);
+setInterval(() => { if (activeTab === "agwars") agwarsRefresh(); }, 10000);
 </script>
 </body>
 </html>
@@ -2075,12 +2896,13 @@ setInterval(() => { if (activeTab === "nss") nssRefresh(); }, 8000);
 def main() -> None:
     import uvicorn
 
-    print("workbench web v2.6 starting")
+    print("workbench web v2.7 starting")
 
     parser = argparse.ArgumentParser(description="灵枢 × CTF2 Agent 竞技场 WebUI 工作台")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认仅本机）")
     parser.add_argument("--port", type=int, default=8081)
     args = parser.parse_args()
+    STATE["self_port"] = args.port   # 代理入口需要灵枢回连本进程
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
