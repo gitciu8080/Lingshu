@@ -551,6 +551,13 @@ class GatewayChatModel(OpenAIChatModel):
         elif self.thinking_style == "effort":
             if self.parameters.thinking_enable and self.parameters.reasoning_effort:
                 kwargs["reasoning_effort"] = self.parameters.reasoning_effort
+        elif self.thinking_style == "none" and not self.parameters.thinking_enable:
+            # 本地 llama.cpp / vLLM 等自行控制思考模板：关闭思考必须显式下发
+            # chat_template_kwargs.enable_thinking，否则 Qwen3 系模型会把全部
+            # 预算花在 reasoning_content 上，正文 content 返回空（Summary 报告
+            # 因此报"未返回报告正文"而降级）。仅在实际要求关闭时注入，不影响
+            # 默认思考行为。
+            kwargs["chat_template_kwargs"] = {"enable_thinking": False}
         if self.extra_body:
             kwargs.update(self.extra_body)
         kwargs.update(generate_kwargs)

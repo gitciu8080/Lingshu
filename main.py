@@ -700,6 +700,86 @@ def _summary_mission_context(mission: MissionState) -> dict[str, Any]:
     return data
 
 
+# 中文文本约 1 token ≈ 1 字符（含 Markdown 表格/命令回显时更接近 1:1，
+# 按 1.5 折算会低估 token 数导致小上下文模型被撑爆）。本地小模型上长输入
+# 的 prefill 耗时是超线性增长，因此预算按 token 数严格折算，并预留 50%
+# 给系统提示、模板与报告正文输出。
+_SUMMARY_CHARS_PER_TOKEN = 1.0
+_SUMMARY_OUTPUT_RESERVE_RATIO = 0.5
+_SUMMARY_MIN_TRANSCRIPT_CHARS = 6_000
+_SUMMARY_MAX_TRANSCRIPT_CHARS = 120_000
+# 报告生成超时：本地小模型长文输出可能极慢，超时即走结构化兜底
+# （绝不无限期挂住收尾阶段，导致前端长时间看不到报告）。
+_SUMMARY_TIMEOUT_SECONDS = float(os.environ.get("LINGSHU_SUMMARY_TIMEOUT", "300"))
+
+
+def _summary_input_budget(provider: str, model_name: str | None) -> int:
+    """按目标模型的 context_size 折算 Summary 输入的字符预算。
+
+    取不到配置时回退 128k token 的保守值。最小值兜底保证短任务仍可总结。
+    """
+    context_tokens = 128_000
+    try:
+        from core.model_registry import list_llm_providers
+        wanted = (model_name or "").strip()
+        for entry in list_llm_providers(owner_is_superadmin=True):
+            if str(entry.get("provider") or "") != str(provider or ""):
+                continue
+            models = entry.get("models") or []
+            chosen = None
+            for model in models:
+                if wanted and str(model.get("name") or "") == wanted:
+                    chosen = model
+                    break
+            if chosen is None and models:
+                chosen = models[0]
+            settings = (chosen or {}).get("settings") or {}
+            size = int(settings.get("context_size") or 0)
+            if size > 0:
+                context_tokens = size
+                break
+    except Exception:  # noqa: BLE001 — 预算探测失败回退保守值
+        pass
+    usable_tokens = int(context_tokens * (1 - _SUMMARY_OUTPUT_RESERVE_RATIO))
+    return max(
+        _SUMMARY_MIN_TRANSCRIPT_CHARS,
+        min(int(usable_tokens * _SUMMARY_CHARS_PER_TOKEN), _SUMMARY_MAX_TRANSCRIPT_CHARS),
+    )
+
+
+def _summary_inputs_within_budget(
+    mission: MissionState,
+    messages: list[dict],
+    *,
+    provider: str,
+    model_name: str | None,
+    user_id: int | None,
+) -> tuple[str, dict[str, Any]]:
+    """按模型上下文预算裁剪 Summary 输入，返回 (transcript, mission_data)。
+
+    结构化状态与会话记录共享同一预算：状态优先（保证判据/证据完整），
+    剩余额度给会话记录（从最新往回取，见 _build_summary_transcript）。
+    """
+    budget = _summary_input_budget(provider, model_name)
+    mission_data = _summary_mission_context(mission)
+    state_text = json.dumps(mission_data, ensure_ascii=False, indent=2)
+    # 状态最多占预算的 45%，避免大任务把会话记录挤成零
+    state_limit = max(4_000, int(budget * 0.45))
+    if len(state_text) > state_limit:
+        # 超限时裁剪高体积明细（证据全文/事实列表），保留判据关键字段
+        trimmed = dict(mission_data)
+        for key in ("evidence_records", "facts", "findings", "attack_chain",
+                    "failed_paths", "action_history"):
+            values = trimmed.get(key)
+            if isinstance(values, list) and len(values) > 40:
+                trimmed[key] = values[-40:]
+        state_text = json.dumps(trimmed, ensure_ascii=False, indent=2)[:state_limit]
+        mission_data = trimmed
+    transcript_budget = max(_SUMMARY_MIN_TRANSCRIPT_CHARS, budget - len(state_text))
+    transcript = _build_summary_transcript(messages, maximum_chars=transcript_budget)
+    return transcript, mission_data
+
+
 async def run_summary_report(
     mission: MissionState,
     *,
@@ -733,11 +813,17 @@ async def run_summary_report(
     Returns:
         生成的报告正文 Markdown
     """
-    transcript = _build_summary_transcript(messages)
-    mission_data = _summary_mission_context(mission)
+    # 输入预算按模型上下文自适应：本地小上下文模型（如 llama.cpp 32k）在
+    # 5 万+12 万字符的固定上限下会直接超时或截断（思考模式更甚），导致
+    # "Summary Agent 未返回报告正文"降级。这里按 context_size 折算字符预算
+    # （中文约 1 token ≈ 1.5 字符，留 40% 给输出与系统提示）。
+    transcript, mission_data = _summary_inputs_within_budget(
+        mission, messages, provider=provider, model_name=model_name,
+        user_id=user_id,
+    )
     prompt = (
         "请总结以下一次完整授权安全测试。\n\n"
-        f"【结构化任务状态】\n{json.dumps(mission_data, ensure_ascii=False, indent=2)[:50000]}\n\n"
+        f"【结构化任务状态】\n{json.dumps(mission_data, ensure_ascii=False, indent=2)}\n\n"
         f"【完整会话记录】\n{transcript}\n\n"
         "【写作约束】会话记录中的条目是实际发生的对话、动作与工具结果。"
         "报告必须基于这些事实撰写，不得复述、引用或编造任何 Agent 的"
@@ -765,10 +851,13 @@ async def run_summary_report(
                 summary_model_name = str(binding["model"])
                 if binding.get("thinking_intensity"):
                     summary_intensity = str(binding["thinking_intensity"])
+        # 报告生成是"结构化转写"任务，不需要长链推理：关闭思考可避免本地
+        # 模型把预算耗在 reasoning_content 上（实测 Qwen3 长输入下思考会吃满
+        # max_tokens 导致正文为空/超时），并显著缩短出报告时间。
         model = create_model(
             provider=summary_provider,
             model=summary_model_name,
-            thinking_intensity=summary_intensity,
+            thinking_intensity="off",
             temperature=0.2,
             web_search=False,
             config=runtime,
@@ -787,11 +876,14 @@ async def run_summary_report(
         if _suspended:
             event_callback.suspend()
         try:
-            result = await stream_agent_reply(
-                summary_agent,
-                UserMsg(name="Orchestrator", content=prompt),
-                prefix="[Summary] ",
-                on_event=event_callback,
+            result = await asyncio.wait_for(
+                stream_agent_reply(
+                    summary_agent,
+                    UserMsg(name="Orchestrator", content=prompt),
+                    prefix="[Summary] ",
+                    on_event=event_callback,
+                ),
+                timeout=_SUMMARY_TIMEOUT_SECONDS,
             )
         finally:
             if _suspended and hasattr(event_callback, "resume"):

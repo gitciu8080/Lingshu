@@ -87,6 +87,61 @@ def envs_save(reg: dict[str, dict[str, Any]]) -> None:
     os.replace(tmp, ENVS_FILE)
 
 
+ACTIVE_FILE = Path(__file__).resolve().parent / "data" / "ctf2_workbench_active.json"
+# 同一题目的会话保护窗口：会话创建后在该窗口内不允许再次拉起新会话。
+# 覆盖本地模型单题动辄十几分钟的解题时长；进程重启后依然生效（落盘）。
+_ACTIVE_TTL_SECONDS = int(os.environ.get("CTF2_ACTIVE_TTL_SECONDS", "3600"))
+
+
+def active_load() -> dict[str, dict[str, Any]]:
+    """题目 → {session_id, started_at} 活跃会话登记（跨进程重启生效）。"""
+    try:
+        if ACTIVE_FILE.is_file():
+            data = json.loads(ACTIVE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:  # noqa: BLE001 — 登记损坏按空处理
+        pass
+    return {}
+
+
+def active_save(reg: dict[str, dict[str, Any]]) -> None:
+    ACTIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ACTIVE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, ACTIVE_FILE)
+
+
+def active_claim(challenge_id: str) -> str | None:
+    """抢占题目解题权；已被占用时返回现有 session_id（None=抢占成功）。"""
+    reg = active_load()
+    now = time.time()
+    for cid, info in list(reg.items()):
+        if now - float(info.get("started_at") or 0) > _ACTIVE_TTL_SECONDS:
+            reg.pop(cid, None)
+    existing = reg.get(challenge_id)
+    if existing and existing.get("session_id"):
+        return str(existing["session_id"])
+    reg[challenge_id] = {"session_id": "", "started_at": now}
+    active_save(reg)
+    return None
+
+
+def active_bind(challenge_id: str, session_id: str) -> None:
+    reg = active_load()
+    entry = reg.get(challenge_id) or {"started_at": time.time()}
+    entry["session_id"] = str(session_id)
+    reg[challenge_id] = entry
+    active_save(reg)
+
+
+def active_release(challenge_id: str) -> None:
+    reg = active_load()
+    if reg.pop(challenge_id, None) is not None:
+        active_save(reg)
+
+
 @dataclass
 class Config:
     ctf2_token: str = os.environ.get("CTF2_API_TOKEN", "")
@@ -260,6 +315,7 @@ async def run_job(job: Job) -> None:
         job.events.append(event)
         if event.get("type") == "session_started" and event.get("session_id"):
             job.session_id = event["session_id"]   # 会话创建即回报（诊断用）
+            active_bind(job.challenge_id, job.session_id)   # 题目级活跃会话登记
         if event.get("type") == "env_ready":
             reg = envs_load()
             reg[job.challenge_id] = {
@@ -299,6 +355,8 @@ async def run_job(job: Job) -> None:
         job.error = str(exc)
         job.status = "error"
     finally:
+        # 任务终结即释放题目占位：允许下一次解题（失败重试/换模式重跑）
+        active_release(job.challenge_id)
         broadcast({"type": "job", "job": job.snapshot()})
         emit({"type": "log", "message": f"任务结束：{job.status}"})
 
@@ -348,6 +406,14 @@ async def run_auto() -> None:
                                          "message": f"题目解析失败: {exc}"}})
                 if resolved is None:
                     auto.exclude.add(challenge_id)
+                    continue
+                claimed = active_claim(challenge_id)
+                if claimed:
+                    # 该题已有存活会话（例如上一轮遗留仍在跑）：跳过，避免一题多会话
+                    auto.exclude.add(challenge_id)
+                    broadcast({"type": "auto", "auto": auto.snapshot(),
+                               "event": {"type": "log",
+                                         "message": f"跳过 {challenge_id[:8]}：已有会话 {claimed[:8]} 在运行"}})
                     continue
                 item, challenge = resolved
                 job = Job(
@@ -568,6 +634,13 @@ async def api_solve(data: SolveIn):
     if running or STATE["queue"]["running"] or STATE["auto"].running:
         raise HTTPException(status_code=409,
                             detail="已有解题任务/队列/挂机在运行（环境配额默认 1）；请等待完成或先停止")
+    # 题目级防重：该题已有存活会话（含 workbench 重启前的会话）时拒绝再次拉起
+    claimed = active_claim(data.challenge_id)
+    if claimed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该题目已有进行中的灵枢会话（{claimed[:8]}）；"
+                   "请等待其完成，或在灵枢会话列表停止该会话后重试")
     resolved = None
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=30)) as client:
@@ -577,6 +650,7 @@ async def api_solve(data: SolveIn):
     except (CTF2Error, PermissionError, httpx.HTTPError) as exc:
         raise ctf2_http_error(exc) from exc
     if resolved is None:
+        active_release(data.challenge_id)   # 未建会话，归还题目占位
         raise HTTPException(status_code=404, detail=f"未找到题目 {data.challenge_id}")
     item, challenge = resolved
     job = Job(
@@ -689,6 +763,15 @@ async def run_queue() -> None:
                 job.item = entry["item"]            # type: ignore[attr-defined]
                 job.challenge = entry["challenge"]  # type: ignore[attr-defined]
                 job.no_submit = bool(queue.get("no_submit"))
+                claimed = active_claim(entry["challenge_id"])
+                if claimed:
+                    msg = (f"[queue] {entry['title'][:22]} 已有会话 {claimed[:8]} 在运行，"
+                           "60s 后再试")
+                    out(msg)
+                    broadcast({"type": "queue", "queue": queue_snapshot(),
+                               "event": {"type": "log", "message": msg}})
+                    await asyncio.sleep(60)
+                    continue
                 STATE["jobs"][job.id] = job
                 STATE["job_order"].append(job.id)
                 # 入队时只存了条目摘要：执行前按权威场地拉取完整题面与附件清单
