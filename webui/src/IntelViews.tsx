@@ -8,7 +8,7 @@ import darkLogo from "./logored.png";
 
 export type IntelView =
   | "console" | "dashboard" | "assets" | "threats" | "mapping" | "reports"
-  | "settings" | "tooling" | "knowledge";
+  | "agent_settings" | "settings" | "tooling" | "knowledge";
 
 /* ── 导航栏 ── */
 
@@ -19,6 +19,7 @@ const NAV_ITEMS: { id: IntelView; label: string; icon: typeof Gauge }[] = [
   { id: "threats", label: "威胁建模", icon: ShieldAlert },
   { id: "mapping", label: "资产测绘", icon: Network },
   { id: "reports", label: "发现与报告", icon: FileText },
+  { id: "agent_settings", label: "Agent 设置", icon: UserCog },
   { id: "settings", label: "用户与系统设置", icon: Settings },
   { id: "tooling", label: "系统工具状态", icon: Wrench },
   { id: "knowledge", label: "本地知识库", icon: Database },

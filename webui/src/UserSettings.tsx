@@ -19,12 +19,11 @@ import { ProviderWizardDialog } from "./ProviderWizard";
 
 // 用户设置页（/settings）：个人版管理台，复用 superadmin 页面的视觉体系。
 // Tab1 大模型供应商（私有池）；Tab2 Agent 模型分工；Tab3 用量统计；Tab4 账号安全。
-type Tab = "providers" | "bindings" | "usage" | "intel" | "account";
+type Tab = "providers" | "usage" | "intel" | "account";
 
 const TITLES: Record<Tab, [string, string]> = {
   intel: ["资产测绘引擎", "INTEL SEARCH / FOFA·Hunter·Shodan·ZoomEye API Key"],
   providers: ["大模型供应商管理", "MY LLM PROVIDERS / 私有供应商、模型列表与凭据"],
-  bindings: ["Agent 模型分工", "AGENT MODEL BINDINGS / 每个 Agent 角色使用的模型"],
   usage: ["Token 用量统计", "TOKEN USAGE / 模型推理消耗的输入与输出 Token"],
   account: ["账号安全", "ACCOUNT SECURITY / 登录名、邮箱与密码"],
 };
@@ -459,44 +458,24 @@ export default function UserSettingsPage() {
   const enabledCount = providers.filter((item) => item.enabled).length;
 
   return (
-    <main className="superadmin-page">
-      <aside className="superadmin-sidebar">
-        <div className="superadmin-logo"><span>LS</span><b>LINGSHU<br /><small>USER</small></b></div>
-        <p>USER PANEL</p>
-        <button className={tab === "providers" ? "active" : ""} onClick={() => { setTab("providers"); setSearch(""); }}>
-          <BrainCircuit size={17} /><span>大模型供应商</span>
-        </button>
-        <button className={tab === "usage" ? "active" : ""} onClick={() => { setTab("usage"); }}>
-          <Coins size={17} /><span>用量统计</span>
-        </button>
-        <button className={tab === "intel" ? "active" : ""} onClick={() => { setTab("intel"); }}>
-          <Globe size={17} /><span>资产测绘引擎</span>
-        </button>
-        <button className={tab === "account" ? "active" : ""} onClick={() => { setTab("account"); }}>
-          <ShieldAlert size={17} /><span>账号安全</span>
-        </button>
-        <button onClick={() => void load()}>
-          <RotateCcw size={17} /><span>{loading ? "同步中" : "同步数据"}</span>
-        </button>
-        <div className="superadmin-sidebar-bottom">
-          <button onClick={() => { window.location.href = "/"; }}>
-            <UserCog size={17} /><span>返回控制台</span>
-          </button>
-          <button onClick={() => { auth.clear(); window.location.replace("/"); }}>
-            <LogOut size={17} /><span>安全退出</span>
+    <div className="settings-view">
+      <header className="page-head">
+        <div>
+          <h1>{TITLES[tab][0]}</h1>
+          <small>{TITLES[tab][1]}</small>
+        </div>
+        <div className="page-head-extra">
+          <button className="quiet-button" onClick={() => void load()} disabled={loading}>
+            {loading ? "同步中…" : "同步数据"}
           </button>
         </div>
-      </aside>
-
-      <section className="superadmin-content">
-        <header className="superadmin-header">
-          <div>
-            <p className="kicker">LINGSHU · USER SETTINGS</p>
-            <h1>{TITLES[tab][0]}</h1>
-            <small>{TITLES[tab][1]}</small>
-          </div>
-          <span className="superadmin-live"><i /> SYSTEM ONLINE</span>
-        </header>
+      </header>
+      <nav className="asset-tabs settings-tabs">
+        <button className={tab === "providers" ? "active" : ""} onClick={() => { setTab("providers"); setSearch(""); }}>大模型供应商</button>
+        <button className={tab === "usage" ? "active" : ""} onClick={() => { setTab("usage"); }}>Token 用量</button>
+        <button className={tab === "intel" ? "active" : ""} onClick={() => { setTab("intel"); }}>资产测绘引擎</button>
+        <button className={tab === "account" ? "active" : ""} onClick={() => { setTab("account"); }}>账号安全</button>
+      </nav>
 
         {tab === "providers" && (
           <>
@@ -658,7 +637,6 @@ export default function UserSettingsPage() {
             </section>
           </>
         )}
-      </section>
 
       {editor !== undefined && (
         <ProviderWizardDialog
@@ -669,6 +647,6 @@ export default function UserSettingsPage() {
           onSaved={() => void load()}
         />
       )}
-    </main>
+    </div>
   );
 }

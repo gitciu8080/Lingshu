@@ -3717,7 +3717,8 @@ function ConsoleApp() {
           {view === "reports" && (
             <ReportsView sessions={sessions} activeId={intelSession || active} onSelect={setIntelSession} />
           )}
-                  {view === "settings" && <AgentSettingsView />}
+                  {view === "agent_settings" && <AgentSettingsView />}
+          {view === "settings" && <UserSettingsPage />}
           {view === "tooling" && <ToolingView />}
           {view === "knowledge" && <KnowledgeView />}
         </main>
