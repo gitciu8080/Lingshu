@@ -3428,6 +3428,7 @@ function ConsoleApp() {
           onOpenSettings={() => { window.location.href = "/settings"; }}
           onOpenTooling={() => setTooling(true)}
           onOpenKnowledge={() => setKnowledge(true)}
+          onLogout={() => { auth.clear(); setReady(false); }}
           theme={theme}
           onToggleTheme={() => setTheme((currentTheme) =>
             currentTheme === "light" ? "dark"
@@ -3478,17 +3479,6 @@ function ConsoleApp() {
                 </button>
               )}
             </div>
-            <footer>
-              <button
-                onClick={() => {
-                  auth.clear();
-                  setReady(false);
-                }}
-              >
-                <LogOut size={15} />
-                退出登录
-              </button>
-            </footer>
         </aside>
         )}
         {view === "console" ? (

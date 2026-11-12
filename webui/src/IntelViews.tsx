@@ -1,7 +1,7 @@
 /* 灵枢情报视图：导航栏 / 仪表板 / 资产管理 / 威胁建模 / 资产测绘。
    数据源：/api/dashboard 与 /api/session/{id}/intel；图表全部内联 SVG。 */
 import { useEffect, useMemo, useState } from "react";
-import { Activity, ChevronLeft, ChevronRight, Crosshair, Database, FileText, Gauge, LayoutDashboard, Moon, Network, Radar, Search, Settings, ShieldAlert, Sparkles, Sun, Target, TrendingUp, UserCog, Wrench } from "lucide-react";
+import { Activity, ChevronLeft, ChevronRight, Crosshair, Database, FileText, Gauge, LayoutDashboard, LogOut, Moon, Network, Radar, Search, Settings, ShieldAlert, Sparkles, Sun, Target, TrendingUp, UserCog, Wrench } from "lucide-react";
 import { api, Session } from "./api";
 import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
@@ -21,11 +21,11 @@ const NAV_ITEMS: { id: IntelView; label: string; icon: typeof Gauge }[] = [
 ];
 
 export function NavRail({ view, onChange, onOpenSettings, onOpenTooling,
-  onOpenKnowledge, theme, onToggleTheme,
+  onOpenKnowledge, onLogout, theme, onToggleTheme,
 }: {
   view: IntelView; onChange: (v: IntelView) => void;
   onOpenSettings: () => void; onOpenTooling: () => void;
-  onOpenKnowledge: () => void;
+  onOpenKnowledge: () => void; onLogout: () => void;
   theme: string; onToggleTheme: () => void;
 }) {
   const [open, setOpen] = useState(true);
@@ -71,6 +71,10 @@ export function NavRail({ view, onChange, onOpenSettings, onOpenTooling,
         ))}
       </nav>
       <footer className="nav-footer">
+        <button className="nav-logout" onClick={onLogout} title="退出登录">
+          <LogOut size={16} />
+          {open && <span>退出登录</span>}
+        </button>
         <button onClick={onOpenSettings} title="用户与系统设置">
           <UserCog size={16} />
           {open && <span>用户与系统设置</span>}
