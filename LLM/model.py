@@ -20,6 +20,7 @@
 调用完成后把 ChatResponse.usage 写入 users.db 的 model_token_usage 表。
 """
 import asyncio
+import json
 import logging
 from typing import Any, AsyncGenerator, Literal
 from urllib.parse import urlsplit
@@ -504,6 +505,7 @@ class GatewayChatModel(OpenAIChatModel):
         native_tools: list[dict[str, Any]] | None = None,
         thinking_style: str = "effort",
         extra_body: dict[str, Any] | None = None,
+        thinking_off_payload: dict[str, Any] | None = None,
         **kwargs,
     ) -> None:
         if gateway_mode not in {"base_url", "full_endpoint"}:
@@ -514,6 +516,8 @@ class GatewayChatModel(OpenAIChatModel):
         self.native_tools = list(native_tools or [])
         self.thinking_style = thinking_style
         self.extra_body = dict(extra_body or {})
+        # 关闭思考时额外下发的请求体（自建服务需要 enable_thinking=false）
+        self.thinking_off_payload = dict(thinking_off_payload or {})
         super().__init__(*args, **kwargs)
 
     def _format_tools(self, tools, tool_choice):
@@ -551,13 +555,18 @@ class GatewayChatModel(OpenAIChatModel):
         elif self.thinking_style == "effort":
             if self.parameters.thinking_enable and self.parameters.reasoning_effort:
                 kwargs["reasoning_effort"] = self.parameters.reasoning_effort
-        elif self.thinking_style == "none" and not self.parameters.thinking_enable:
-            # 本地 llama.cpp / vLLM 等自行控制思考模板：关闭思考必须显式下发
-            # chat_template_kwargs.enable_thinking，否则 Qwen3 系模型会把全部
-            # 预算花在 reasoning_content 上，正文 content 返回空（Summary 报告
-            # 因此报"未返回报告正文"而降级）。仅在实际要求关闭时注入，不影响
-            # 默认思考行为。
-            kwargs["chat_template_kwargs"] = {"enable_thinking": False}
+        if not self.parameters.thinking_enable:
+            # 自建 OpenAI 兼容服务（llama.cpp/vLLM）关闭思考必须显式下发
+            # chat_template_kwargs.enable_thinking=false，否则 Qwen3 系会把
+            # 预算全花在 reasoning_content 上，正文可能为空（Summary 报告
+            # 因此报"未返回报告正文"而降级）。payload 由供应商/模型设置或
+            # 私有端点自动探测决定，云端供应商不会收到该字段。
+            if self.thinking_off_payload:
+                for key, value in self.thinking_off_payload.items():
+                    if isinstance(value, dict) and isinstance(kwargs.get(key), dict):
+                        kwargs[key] = {**kwargs[key], **value}
+                    else:
+                        kwargs[key] = value
         if self.extra_body:
             kwargs.update(self.extra_body)
         kwargs.update(generate_kwargs)
@@ -644,6 +653,54 @@ def _select_model_with_settings(
         detail.get("settings") if detail else entry.get("settings"),
     )
     return selected, settings
+
+
+_DEFAULT_THINKING_OFF_PAYLOAD = {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def _is_local_endpoint(base_url: str) -> bool:
+    """判断 base_url 是否指向本机/私有网段（自建 llama.cpp、vLLM 等）。"""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    host = (urlsplit(str(base_url or "")).hostname or "").strip().lower()
+    if not host:
+        return False
+    if host in {"localhost", "host.docker.internal"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback
+
+
+def _thinking_off_payload(entry: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any] | None:
+    """返回"关闭思考"时需要额外下发的请求体片段。
+
+    自建 OpenAI 兼容服务（llama.cpp/vLLM）不认 ``reasoning_effort``，
+    必须用 ``chat_template_kwargs.enable_thinking=false`` 才会真正停止
+    思考；否则 Qwen3 系会把预算全花在 reasoning_content 上，正文可能为空
+    （Summary 报告因此降级）。云端供应商不接受该字段，故仅对私有地址
+    或显式配置生效。
+
+    settings["thinking_off_payload"]（dict 或 JSON 字符串）可覆盖默认值；
+    显式设为 ``{}`` 表示不注入。
+    """
+    raw = settings.get("thinking_off_payload")
+    if raw is not None:
+        if isinstance(raw, dict):
+            return dict(raw) or None
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                return None
+            return dict(parsed) if isinstance(parsed, dict) and parsed else None
+        return None
+    if _is_local_endpoint(str(entry.get("base_url") or "")):
+        return dict(_DEFAULT_THINKING_OFF_PAYLOAD)
+    return None
 
 
 def _common_kwargs(settings: dict[str, Any]) -> dict[str, Any]:
@@ -858,6 +915,7 @@ def _build_model_from_entry(
         native_tools=native_tools,
         thinking_style=str(spec.get("thinking_style") or "effort"),
         extra_body=extra_body or None,
+        thinking_off_payload=_thinking_off_payload(entry, settings),
         **common,
     )
 

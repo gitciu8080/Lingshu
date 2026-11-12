@@ -72,6 +72,48 @@ class SummaryBudgetTest(unittest.TestCase):
         self.assertEqual(transcript.count("[text_end]"), 50)
 
 
+class ThinkingOffPayloadTest(unittest.TestCase):
+    """自建 OpenAI 兼容服务关闭思考时必须下发 enable_thinking=false。
+
+    用户实际 provider 是 openai-compatible（thinking_style=effort），
+    只认 reasoning_effort 的旧逻辑对它无效——这是本地 Qwen 报告降级的根因。
+    """
+
+    def test_private_endpoint_gets_payload(self) -> None:
+        from LLM.model import _thinking_off_payload
+        payload = _thinking_off_payload(
+            {"base_url": "http://10.8.20.116:8201/v1"}, {})
+        self.assertEqual(payload, {"chat_template_kwargs": {"enable_thinking": False}})
+
+    def test_cloud_endpoint_untouched(self) -> None:
+        from LLM.model import _thinking_off_payload
+        self.assertIsNone(_thinking_off_payload({"base_url": "https://api.deepseek.com"}, {}))
+        self.assertIsNone(_thinking_off_payload({"base_url": "https://api.openai.com/v1"}, {}))
+
+    def test_loopback_and_localhost(self) -> None:
+        from LLM.model import _is_local_endpoint
+        for url in ("http://127.0.0.1:8200/v1", "http://localhost:8200/v1",
+                    "http://192.168.1.5:8200", "http://172.16.0.9:8200"):
+            self.assertTrue(_is_local_endpoint(url), url)
+        for url in ("https://api.deepseek.com", "https://open.bigmodel.cn/api/paas/v4"):
+            self.assertFalse(_is_local_endpoint(url), url)
+
+    def test_explicit_override_and_disable(self) -> None:
+        from LLM.model import _thinking_off_payload
+        entry = {"base_url": "http://10.8.20.116:8201/v1"}
+        # 显式自定义负载
+        custom = _thinking_off_payload(entry, {
+            "thinking_off_payload": {"chat_template_kwargs": {"enable_thinking": False},
+                                     "extra": 1}})
+        self.assertEqual(custom.get("extra"), 1)
+        # 显式空 dict → 不注入
+        self.assertIsNone(_thinking_off_payload(entry, {"thinking_off_payload": {}}))
+        # JSON 字符串形式
+        parsed = _thinking_off_payload(entry, {
+            "thinking_off_payload": '{"chat_template_kwargs": {"enable_thinking": false}}'})
+        self.assertIsNotNone(parsed)
+
+
 class ThinkingStyleNoneTest(unittest.TestCase):
     """thinking_style=none 的供应商在要求关闭思考时必须显式下发开关。"""
 
