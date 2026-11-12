@@ -197,22 +197,171 @@ function IntelCard() {
   );
 }
 
+export function AgentSettingsView() {
+  const [roles, setRoles] = useState<AgentModelBindingRole[]>([]);
+  const [options, setOptions] = useState<ModelProviderOption[]>([]);
+  const [draftBindings, setDraftBindings] = useState<
+    Record<string, { provider: string; model: string; thinking_intensity: string }>
+  >({});
+  const [savingBindings, setSavingBindings] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [bindingsResult, optionsResult] = await Promise.all([
+        api.agentModelBindings(),
+        api.modelProviders(),
+      ]);
+      setRoles(bindingsResult.roles);
+      setOptions(optionsResult.providers);
+      setDraftBindings(Object.fromEntries(
+        bindingsResult.roles
+          .filter((role) => role.provider)
+          .map((role) => [role.role, {
+            provider: role.provider,
+            model: role.model,
+            thinking_intensity: role.thinking_intensity || "",
+          }]),
+      ));
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { void load(); }, []);
+
+  const setBinding = (
+    role: string,
+    patch: Partial<{ provider: string; model: string; thinking_intensity: string }>,
+  ) => {
+    setDraftBindings((old) => {
+      const current = old[role] || { provider: "", model: "", thinking_intensity: "" };
+      const next = { ...current, ...patch };
+      if (patch.provider !== undefined && patch.provider !== current.provider) {
+        const models = options.find((option) => option.id === patch.provider)?.models || [];
+        next.model = models[0] || "";
+      }
+      return { ...old, [role]: next };
+    });
+  };
+
+  const saveBindings = async () => {
+    setSavingBindings(true);
+    try {
+      const payload: Record<string, { provider: string; model: string; thinking_intensity: string | null } | null> = {};
+      for (const role of roles) {
+        const draft = draftBindings[role.role];
+        payload[role.role] = draft && draft.provider && draft.model
+          ? { provider: draft.provider, model: draft.model, thinking_intensity: draft.thinking_intensity || null }
+          : null;
+      }
+      await api.saveAgentModelBindings(payload);
+      toast.success("Agent 模型分工已保存");
+      void load();
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setSavingBindings(false);
+    }
+  };
+
+  const boundCount = Object.values(draftBindings).filter((item) => item.provider && item.model).length;
+
+  return (
+    <>
+      <header className="superadmin-header">
+        <div>
+          <p className="kicker">LINGSHU · AGENT SETTINGS</p>
+          <h1>Agent 模型分工</h1>
+          <small>AGENT MODEL BINDINGS / 每个 Agent 角色使用的模型与思考强度</small>
+        </div>
+        <span className="superadmin-live"><i /> SYSTEM ONLINE</span>
+      </header>
+      <section className="superadmin-stats">
+        <article><span>ROLES</span><b>{roles.length}</b><i /></article>
+        <article><span>BOUND</span><b>{boundCount}</b><i /></article>
+        <article><span>AVAILABLE_MODELS</span><b>{options.reduce((sum, option) => sum + (option.models?.length || 0), 0)}</b><i /></article>
+        <article className="danger"><span>FOLLOW_MAIN</span><b>{roles.length - boundCount}</b><i /></article>
+      </section>
+      <section className="superadmin-database">
+        <header>
+          <div><h2>AGENT_BINDINGS</h2><em>未绑定的角色跟随任务创建时选择的主模型；绑定失效自动回退主模型</em></div>
+          <div className="superadmin-toolbar">
+            <button className="danger-button compact add-model" disabled={savingBindings || !options.length} onClick={() => void saveBindings()}>
+              {savingBindings ? "保存中…" : "保存分工"}
+            </button>
+          </div>
+        </header>
+        <div className="superadmin-table-wrap">
+          <table className="superadmin-table">
+            <thead><tr><th>Agent 角色</th><th>供应商</th><th>模型</th><th>思考强度</th></tr></thead>
+            <tbody>
+              {roles.map((role) => {
+                const draft = draftBindings[role.role] || { provider: "", model: "", thinking_intensity: "" };
+                const models = options.find((option) => option.id === draft.provider)?.models || [];
+                return (
+                  <tr key={role.role}>
+                    <td>
+                      <div className="superadmin-user">
+                        <span>{role.label.replace(/[^一-龥A-Za-z]/g, "").slice(0, 2) || "AI"}</span>
+                        <div><b>{role.label}</b><small>{role.role}</small></div>
+                      </div>
+                    </td>
+                    <td>
+                      <select value={draft.provider} onChange={(e) => setBinding(role.role, { provider: e.target.value })}>
+                        <option value="">跟随主模型</option>
+                        {options.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}{option.owner === "platform" ? "（平台）" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <select value={draft.model} disabled={!draft.provider} onChange={(e) => setBinding(role.role, { model: e.target.value })}>
+                        <option value="">{draft.provider ? "（默认模型）" : "—"}</option>
+                        {models.map((name) => <option key={name} value={name}>{name}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        value={draft.thinking_intensity}
+                        disabled={!draft.provider}
+                        onChange={(e) => setBinding(role.role, { thinking_intensity: e.target.value })}
+                      >
+                        <option value="">跟随主模型</option>
+                        <option value="off">off（无思考）</option>
+                        <option value="low">low</option>
+                        <option value="medium">medium</option>
+                        <option value="high">high</option>
+                      </select>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {!options.length && !loading && (
+            <p className="empty-note">请先在「用户与系统设置 → 大模型供应商」添加至少一个可用的供应商配置</p>
+          )}
+        </div>
+        <footer><span>BINDINGS: USER SCOPED</span><span>ROLES {roles.length}</span></footer>
+      </section>
+    </>
+  );
+}
+
 export default function UserSettingsPage() {
   const [tab, setTab] = useState<Tab>("providers");
   const [loading, setLoading] = useState(true);
   const [providers, setProviders] = useState<ManagedProvider[]>([]);
   const [catalog, setCatalog] = useState<ProviderCatalogEntry[]>([]);
   const [options, setOptions] = useState<ModelProviderOption[]>([]);
-  const [roles, setRoles] = useState<AgentModelBindingRole[]>([]);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [search, setSearch] = useState("");
   const [editor, setEditor] = useState<ManagedProvider | null | undefined>(undefined);
-
-  // ── 分工草稿 ──
-  const [draftBindings, setDraftBindings] = useState<
-    Record<string, { provider: string; model: string; thinking_intensity: string }>
-  >({});
-  const [savingBindings, setSavingBindings] = useState(false);
 
   // ── 用量统计 ──
   const [usage, setUsage] = useState<UserUsageSummary | null>(null);
@@ -229,24 +378,13 @@ export default function UserSettingsPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const [providersResult, bindingsResult, profileResult] = await Promise.all([
+      const [providersResult, profileResult] = await Promise.all([
         api.myLLMProviders(),
-        api.agentModelBindings(),
         api.profile(),
       ]);
       setProviders(providersResult.providers);
-      setRoles(bindingsResult.roles);
       setProfile(profileResult);
       setDraftProfile({ username: profileResult.username, email: profileResult.email || "" });
-      setDraftBindings(Object.fromEntries(
-        bindingsResult.roles
-          .filter((role) => role.provider)
-          .map((role) => [role.role, {
-            provider: role.provider,
-            model: role.model,
-            thinking_intensity: role.thinking_intensity || "",
-          }]),
-      ));
       if (!catalog.length) {
         const catalogResult = await api.userProviderCatalog();
         setCatalog(catalogResult.providers);
@@ -288,40 +426,6 @@ export default function UserSettingsPage() {
     catch (error) { toast.error(String(error)); }
   };
 
-  const setBinding = (
-    role: string,
-    patch: Partial<{ provider: string; model: string; thinking_intensity: string }>,
-  ) => {
-    setDraftBindings((old) => {
-      const current = old[role] || { provider: "", model: "", thinking_intensity: "" };
-      const next = { ...current, ...patch };
-      if (patch.provider !== undefined && patch.provider !== current.provider) {
-        const models = options.find((option) => option.id === patch.provider)?.models || [];
-        next.model = models[0] || "";
-      }
-      return { ...old, [role]: next };
-    });
-  };
-
-  const saveBindings = async () => {
-    setSavingBindings(true);
-    try {
-      const payload: Record<string, { provider: string; model: string; thinking_intensity: string | null } | null> = {};
-      for (const role of roles) {
-        const draft = draftBindings[role.role];
-        payload[role.role] = draft && draft.provider && draft.model
-          ? { provider: draft.provider, model: draft.model, thinking_intensity: draft.thinking_intensity || null }
-          : null;
-      }
-      await api.saveAgentModelBindings(payload);
-      toast.success("Agent 模型分工已保存");
-      void load();
-    } catch (error) {
-      toast.error(String(error));
-    } finally {
-      setSavingBindings(false);
-    }
-  };
 
   const submitProfile = async (event: FormEvent) => {
     event.preventDefault();
@@ -353,7 +457,6 @@ export default function UserSettingsPage() {
   };
 
   const enabledCount = providers.filter((item) => item.enabled).length;
-  const boundCount = Object.values(draftBindings).filter((item) => item.provider && item.model).length;
 
   return (
     <main className="superadmin-page">
@@ -362,9 +465,6 @@ export default function UserSettingsPage() {
         <p>USER PANEL</p>
         <button className={tab === "providers" ? "active" : ""} onClick={() => { setTab("providers"); setSearch(""); }}>
           <BrainCircuit size={17} /><span>大模型供应商</span>
-        </button>
-        <button className={tab === "bindings" ? "active" : ""} onClick={() => { setTab("bindings"); setSearch(""); }}>
-          <Bot size={17} /><span>Agent 模型分工</span>
         </button>
         <button className={tab === "usage" ? "active" : ""} onClick={() => { setTab("usage"); }}>
           <Coins size={17} /><span>用量统计</span>
@@ -461,81 +561,6 @@ export default function UserSettingsPage() {
                 <span>SECRETS: ENCRYPTED AT REST</span>
                 <span>DISPLAYING {visibleProviders.length} / {providers.length}</span>
               </footer>
-            </section>
-          </>
-        )}
-
-        {tab === "bindings" && (
-          <>
-            <section className="superadmin-stats">
-              <article><span>ROLES</span><b>{roles.length}</b><i /></article>
-              <article><span>BOUND</span><b>{boundCount}</b><i /></article>
-              <article><span>AVAILABLE_MODELS</span><b>{options.reduce((sum, option) => sum + (option.models?.length || 0), 0)}</b><i /></article>
-              <article className="danger"><span>FOLLOW_MAIN</span><b>{roles.length - boundCount}</b><i /></article>
-            </section>
-            <section className="superadmin-database">
-              <header>
-                <div><h2>AGENT_BINDINGS</h2><em>未绑定的角色跟随任务创建时选择的主模型；绑定失效自动回退主模型</em></div>
-                <div className="superadmin-toolbar">
-                  <button className="danger-button compact add-model" disabled={savingBindings || !options.length} onClick={() => void saveBindings()}>
-                    {savingBindings ? "保存中…" : "保存分工"}
-                  </button>
-                </div>
-              </header>
-              <div className="superadmin-table-wrap">
-                <table className="superadmin-table">
-                  <thead><tr><th>Agent 角色</th><th>供应商</th><th>模型</th><th>思考强度</th></tr></thead>
-                  <tbody>
-                    {roles.map((role) => {
-                      const draft = draftBindings[role.role] || { provider: "", model: "", thinking_intensity: "" };
-                      const models = options.find((option) => option.id === draft.provider)?.models || [];
-                      return (
-                        <tr key={role.role}>
-                          <td>
-                            <div className="superadmin-user">
-                              <span>{role.label.replace(/[^一-龥A-Za-z]/g, "").slice(0, 2) || "AI"}</span>
-                              <div><b>{role.label}</b><small>{role.role}</small></div>
-                            </div>
-                          </td>
-                          <td>
-                            <select value={draft.provider} onChange={(e) => setBinding(role.role, { provider: e.target.value })}>
-                              <option value="">跟随主模型</option>
-                              {options.map((option) => (
-                                <option key={option.id} value={option.id}>
-                                  {option.label}{option.owner === "platform" ? "（平台）" : ""}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                          <td>
-                            <select value={draft.model} disabled={!draft.provider} onChange={(e) => setBinding(role.role, { model: e.target.value })}>
-                              <option value="">{draft.provider ? "（默认模型）" : "—"}</option>
-                              {models.map((name) => <option key={name} value={name}>{name}</option>)}
-                            </select>
-                          </td>
-                          <td>
-                            <select
-                              value={draft.thinking_intensity}
-                              disabled={!draft.provider}
-                              onChange={(e) => setBinding(role.role, { thinking_intensity: e.target.value })}
-                            >
-                              <option value="">跟随主模型</option>
-                              <option value="off">off（无思考）</option>
-                              <option value="low">low</option>
-                              <option value="medium">medium</option>
-                              <option value="high">high</option>
-                            </select>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-                {!options.length && !loading && (
-                  <p className="empty-note">请先在「大模型供应商」页添加至少一个可用的供应商配置</p>
-                )}
-              </div>
-              <footer><span>BINDINGS: USER SCOPED</span><span>ROLES {roles.length}</span></footer>
             </section>
           </>
         )}

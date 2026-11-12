@@ -916,10 +916,54 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 .session-list-panel .session-list{padding:4px 8px 10px;overflow:auto;flex:1;max-height:calc(100vh - 220px)}
 .intel-content{min-width:0;display:flex;flex-direction:column;gap:12px}
 
-/* 资产测绘引擎卡片：主题无关显式配色（修复亮色主题下白底白字） */
-.intel-card .quiet-button{background:#191919;color:#aaa;border:1px solid #444;border-radius:0;font:11px ui-monospace,SFMono-Regular,monospace}
-.intel-card .quiet-button:hover{color:var(--sa-accent,var(--accent));border-color:var(--sa-accent,var(--accent))}
-.intel-card .danger-button{border-radius:0;font:11px ui-monospace,SFMono-Regular,monospace}
-.intel-card input{background:#101010;color:#eee;border:1px solid var(--sa-line,#333);border-radius:0;height:34px;padding:0 10px;font:11px ui-monospace,SFMono-Regular,monospace;outline:none}
-.intel-card input:focus{border-color:var(--sa-accent,var(--accent))}
-.intel-card select{background:#101010;color:#eee;border:1px solid var(--sa-line,#333);border-radius:0;height:34px;font:11px ui-monospace,SFMono-Regular,monospace}
+/* 资产测绘引擎卡片：跟随主题配色 */
+.intel-card .quiet-button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:5px;font-size:11px}
+.intel-card .quiet-button:hover{color:var(--accent);border-color:var(--accent)}
+.intel-card .danger-button{font-size:11px}
+.intel-card input{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:5px;height:34px;padding:0 10px;font-size:11px;outline:none}
+.intel-card input:focus{border-color:var(--accent)}
+.intel-card select{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:5px;height:34px;font-size:11px}
+
+/* ═══ 设置/工具/知识库三页面：统一控制台风格 ═══ */
+/* 用户与系统设置：嵌入 page-main 时跟随主题变量 */
+.page-main .superadmin-page{height:100%;min-height:0;overflow:auto;padding:0;
+  background:var(--bg);color:var(--text);
+  --sa-panel:var(--panel);--sa-panel-2:var(--panel2);--sa-line:var(--line);
+  --sa-muted:var(--dim)}
+.page-main .superadmin-sidebar{background:var(--side);border-right-color:var(--line)}
+.page-main .superadmin-sidebar button{color:var(--dim)}
+.page-main .superadmin-sidebar button:hover{color:var(--text);background:var(--panel2)}
+.page-main .superadmin-sidebar button.active{color:var(--accent);border-left-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.page-main .superadmin-sidebar .superadmin-logo b{color:var(--accent)}
+.page-main .superadmin-sidebar .superadmin-logo>span{background:var(--accent)}
+.page-main .superadmin-sidebar-bottom{display:none}   /* 退出/返回由左侧导航负责 */
+.page-main .superadmin-content{background:transparent}
+.page-main .superadmin-stats article{background:var(--panel);border-color:var(--line);border-radius:8px}
+.page-main .superadmin-database{background:var(--panel);border-color:var(--line);box-shadow:none;border-radius:8px}
+.page-main .superadmin-database>header{background:var(--panel2);border-bottom-color:var(--line)}
+.page-main .superadmin-table th{background:var(--panel2);color:var(--dim)}
+.page-main .superadmin-table td{color:var(--text);border-top-color:var(--line2)}
+.page-main .superadmin-toolbar label{background:var(--panel2);border-color:var(--line)}
+.page-main .superadmin-toolbar input{color:var(--text)}
+.page-main .superadmin-toolbar .quiet-button,
+.page-main .user-actions .quiet-button{background:var(--panel2);color:var(--dim);border-color:var(--line)}
+.page-main .superadmin-toolbar .quiet-button:hover,
+.page-main .user-actions .quiet-button:hover{color:var(--accent);border-color:var(--accent)}
+.page-main .superadmin-form input{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:5px}
+.page-main .superadmin-form input:focus{border-color:var(--accent)}
+.page-main .superadmin-form select{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:5px}
+
+/* 系统工具状态 / 本地知识库：页面框架 */
+.page-tooling,.page-knowledge{border:1px solid var(--line);background:var(--panel);
+  border-radius:8px;padding:16px;display:flex;flex-direction:column;min-height:0;overflow:auto}
+.page-tooling>header,.page-knowledge>header{display:flex;align-items:center;gap:9px;
+  padding-bottom:10px;border-bottom:1px solid var(--line);margin-bottom:4px;
+  color:var(--text)}
+.page-tooling>header b,.page-knowledge>header b{font-size:13px;letter-spacing:.4px}
+.page-tooling>header svg,.page-knowledge>header svg{color:var(--accent)}
+.page-tooling .tooling-list section h3{color:var(--dim);letter-spacing:1px}
+.page-knowledge .knowledge-search input{background:var(--bg);color:var(--text);
+  border:1px solid var(--line);border-radius:5px}
+.page-knowledge .knowledge-search button{border-radius:5px}
+.page-knowledge .hits article{border-bottom-color:var(--line2);border-radius:6px}
+.page-knowledge .hits article:hover{background:var(--panel2)}

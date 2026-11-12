@@ -46,7 +46,7 @@ import remarkGfm from "remark-gfm";
 import { accountStream, api, auth, Event, ManagedProvider, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, PlatformUsageSummary, ProviderCatalogEntry, PythonEnvironmentStatus, Session, stream, SystemUser, ToolStatus } from "./api";
 import { DashboardView, AssetsView, ThreatsView, MappingView, ReportsView, NavRail, type IntelView } from "./IntelViews";
 import { ProviderWizardDialog } from "./ProviderWizard";
-import UserSettingsPage, { UsageDayPicker, UsageGroupTable, UsageStatCards } from "./UserSettings";
+import UserSettingsPage, { AgentSettingsView, UsageDayPicker, UsageGroupTable, UsageStatCards } from "./UserSettings";
 import OnboardingWizard, { onboardingResumeStep } from "./OnboardingWizard";
 import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
@@ -3717,7 +3717,7 @@ function ConsoleApp() {
           {view === "reports" && (
             <ReportsView sessions={sessions} activeId={intelSession || active} onSelect={setIntelSession} />
           )}
-                  {view === "settings" && <UserSettingsPage />}
+                  {view === "settings" && <AgentSettingsView />}
           {view === "tooling" && <ToolingView />}
           {view === "knowledge" && <KnowledgeView />}
         </main>
