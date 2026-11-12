@@ -2265,7 +2265,7 @@ const PYTHON_PACKAGE_STATUS_LABELS: Record<string, string> = {
 };
 const SYSTEM_TOOL_CATEGORIES = new Set(["runtime", "python_runtime", "mcp"]);
 
-function Tooling({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function ToolingView() {
   const [tools, setTools] = useState<ToolStatus[]>([]),
     [pythonEnvironment, setPythonEnvironment] = useState<PythonEnvironmentStatus | null>(null),
     [tab, setTab] = useState<"ctf" | "system">("ctf"),
@@ -2286,8 +2286,8 @@ function Tooling({ open, onClose }: { open: boolean; onClose: () => void }) {
     }
   };
   useEffect(() => {
-    if (open) void load();
-  }, [open]);
+    void load();
+  }, []);
   const ctfTools = useMemo(
     () => tools.filter((tool) => !SYSTEM_TOOL_CATEGORIES.has(tool.category || "other")),
     [tools],
@@ -2318,14 +2318,7 @@ function Tooling({ open, onClose }: { open: boolean; onClose: () => void }) {
       : packages;
   }, [packageSearch, pythonEnvironment]);
   return (
-    <Dialog.Root open={open} onOpenChange={(v) => !v && onClose()}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="overlay" />
-        <Dialog.Content className="knowledge-drawer tooling-drawer">
-          <header>
-            <div><Wrench size={18} /><b>工具与系统环境</b></div>
-            <button onClick={onClose} aria-label="关闭工具状态"><X size={18} /></button>
-          </header>
+    <div className="page-tooling">
           <div className="tooling-tabs" role="tablist" aria-label="工具状态分类">
             <button className={tab === "ctf" ? "active" : ""} onClick={() => setTab("ctf")} role="tab" aria-selected={tab === "ctf"}>
               CTF 工具 <span>{ctfTools.length}</span>
@@ -2403,13 +2396,12 @@ function Tooling({ open, onClose }: { open: boolean; onClose: () => void }) {
             {!loading && !visibleTools.length && tab === "ctf" && <p className="empty-note">暂无 CTF 工具目录数据</p>}
             {!loading && !visibleTools.length && tab === "system" && !pythonEnvironment && <p className="empty-note">暂无系统环境数据</p>}
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+
+    </div>
   );
 }
 
-function Knowledge({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function KnowledgeView() {
   const [status, setStatus] = useState<Record<string, unknown>>({}),
     [query, setQuery] = useState(""),
     [results, setResults] = useState<
@@ -2421,22 +2413,10 @@ function Knowledge({ open, onClose }: { open: boolean; onClose: () => void }) {
       .then(setStatus)
       .catch((err) => setStatus({ error: String(err) }));
   useEffect(() => {
-    if (open) void load();
-  }, [open]);
+    void load();
+  }, []);
   return (
-    <Dialog.Root open={open} onOpenChange={(v) => !v && onClose()}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="overlay" />
-        <Dialog.Content className="knowledge-drawer">
-          <header>
-            <div>
-              <Database size={18} />
-              <b>本地知识库</b>
-            </div>
-            <button onClick={onClose}>
-              <X size={18} />
-            </button>
-          </header>
+    <div className="page-knowledge">
           <div className="rag-health">
             <span className={status.available === true ? "ok" : "off"} />
             <div>
@@ -2490,9 +2470,8 @@ function Knowledge({ open, onClose }: { open: boolean; onClose: () => void }) {
               </article>
             ))}
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+
+    </div>
   );
 }
 
@@ -3425,9 +3404,6 @@ function ConsoleApp() {
       </div>
       <div className={"app-frame with-nav " + (view !== "console" ? "page-mode" : "")}>
         <NavRail view={view} onChange={setView}
-          onOpenSettings={() => { window.location.href = "/settings"; }}
-          onOpenTooling={() => setTooling(true)}
-          onOpenKnowledge={() => setKnowledge(true)}
           onLogout={() => { auth.clear(); setReady(false); }}
           theme={theme}
           onToggleTheme={() => setTheme((currentTheme) =>
@@ -3741,6 +3717,9 @@ function ConsoleApp() {
           {view === "reports" && (
             <ReportsView sessions={sessions} activeId={intelSession || active} onSelect={setIntelSession} />
           )}
+                  {view === "settings" && <UserSettingsPage />}
+          {view === "tooling" && <ToolingView />}
+          {view === "knowledge" && <KnowledgeView />}
         </main>
         )}
         {view === "console" && (
@@ -3842,8 +3821,6 @@ function ConsoleApp() {
           />
         )}
       </div>
-      <Knowledge open={knowledge} onClose={() => setKnowledge(false)} />
-      <Tooling open={tooling} onClose={() => setTooling(false)} />
       {onboarding && (
         <OnboardingWizard
           onClose={() => setOnboarding(false)}

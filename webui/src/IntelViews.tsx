@@ -7,7 +7,8 @@ import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
 
 export type IntelView =
-  | "console" | "dashboard" | "assets" | "threats" | "mapping" | "reports";
+  | "console" | "dashboard" | "assets" | "threats" | "mapping" | "reports"
+  | "settings" | "tooling" | "knowledge";
 
 /* ── 导航栏 ── */
 
@@ -18,14 +19,15 @@ const NAV_ITEMS: { id: IntelView; label: string; icon: typeof Gauge }[] = [
   { id: "threats", label: "威胁建模", icon: ShieldAlert },
   { id: "mapping", label: "资产测绘", icon: Network },
   { id: "reports", label: "发现与报告", icon: FileText },
+  { id: "settings", label: "用户与系统设置", icon: Settings },
+  { id: "tooling", label: "系统工具状态", icon: Wrench },
+  { id: "knowledge", label: "本地知识库", icon: Database },
 ];
 
-export function NavRail({ view, onChange, onOpenSettings, onOpenTooling,
-  onOpenKnowledge, onLogout, theme, onToggleTheme,
+export function NavRail({ view, onChange, onLogout, theme, onToggleTheme,
 }: {
   view: IntelView; onChange: (v: IntelView) => void;
-  onOpenSettings: () => void; onOpenTooling: () => void;
-  onOpenKnowledge: () => void; onLogout: () => void;
+  onLogout: () => void;
   theme: string; onToggleTheme: () => void;
 }) {
   const [open, setOpen] = useState(true);
@@ -71,26 +73,14 @@ export function NavRail({ view, onChange, onOpenSettings, onOpenTooling,
         ))}
       </nav>
       <footer className="nav-footer">
-        <button className="nav-logout" onClick={onLogout} title="退出登录">
-          <LogOut size={16} />
-          {open && <span>退出登录</span>}
-        </button>
-        <button onClick={onOpenSettings} title="用户与系统设置">
-          <UserCog size={16} />
-          {open && <span>用户与系统设置</span>}
-        </button>
-        <button onClick={onOpenTooling} title="查看系统工具状态">
-          <Wrench size={16} />
-          {open && <span>系统工具状态</span>}
-        </button>
-        <button onClick={onOpenKnowledge} title="查看本地知识库">
-          <Database size={16} />
-          {open && <span>本地知识库</span>}
-        </button>
         <button onClick={onToggleTheme} title="切换显示样式">
           {theme === "light" ? <Moon size={16} /> : theme === "dark" ? (
             <Sparkles size={16} />) : (<Sun size={16} />)}
           {open && <span>主题切换</span>}
+        </button>
+        <button className="nav-logout" onClick={onLogout} title="退出登录">
+          <LogOut size={16} />
+          {open && <span>退出登录</span>}
         </button>
       </footer>
     </aside>

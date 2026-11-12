@@ -788,7 +788,7 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 @media(max-width:760px){.submission-fields.two-col{grid-template-columns:1fr}}
 
 /* ═══ 导航栏 + 情报视图（仪表板/资产/威胁建模/测绘/报告）═══ */
-.app-frame.with-nav{grid-template-columns:auto 244px minmax(0,1fr) 344px}
+.app-frame.with-nav{grid-template-columns:auto 244px minmax(0,1fr) 480px}
 .app-frame.with-nav.page-mode{grid-template-columns:auto minmax(0,1fr)}
 .nav-rail{display:flex;flex-direction:column;background:var(--side);border-right:1px solid var(--line);padding:10px 8px;transition:width .18s;overflow:hidden}
 .nav-rail.open{width:172px}
@@ -873,7 +873,7 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 
 /* 发现与报告 */
 .report-actions{display:flex;gap:10px;align-items:center}
-.reports-grid{display:grid;grid-template-columns:1.2fr 1fr;gap:12px;align-items:start}
+.reports-grid{display:flex;flex-direction:column;gap:12px}
 .report-card{border:1px solid var(--line);background:var(--panel);border-radius:8px;overflow:hidden}
 .report-card>header{padding:9px 12px;background:var(--panel2);font-size:11px;font-weight:800;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
 .report-card>header span{margin-left:auto;color:var(--dim);font-weight:400}
