@@ -778,3 +778,11 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 
 /* 应急响应徽章：与 mode-badge 同基线，橙色系区分 */
 .mode-badge.ir-badge{color:#f59e0b;border-color:rgba(245,158,11,.45);background:rgba(245,158,11,.10)}
+
+
+/* ── 新建/重跑任务对话框：双栏布局 ── */
+.two-col-modal,.rerun-modal{width:min(880px,calc(100vw - 28px))}
+.submission-fields.two-col{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 22px;align-items:start}
+.mission-col{min-width:0}
+.mission-col>.mode-picker{grid-column:auto}
+@media(max-width:760px){.submission-fields.two-col{grid-template-columns:1fr}}

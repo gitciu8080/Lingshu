@@ -1272,14 +1272,14 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="overlay" />
-        <Dialog.Content className="modal submission-modal">
+        <Dialog.Content className="modal submission-modal two-col-modal">
           <Dialog.Title>创建授权测试任务</Dialog.Title>
           <p>{mode === "fast"
             ? "快速模式：指挥官直接调度专家解题，利用审批已自动预置（CTF 沙箱场景）。"
             : "所有攻击类操作都将在利用前要求人工批准。"}</p>
           <form onSubmit={submit}>
-            <fieldset disabled={submitting} className="submission-fields">
-            <ModePicker value={mode} onChange={setMode} />
+            <fieldset disabled={submitting} className="submission-fields two-col">
+            <div className="mission-col">
             <label>
               授权目标（可与附件同时填写）
               <input
@@ -1318,6 +1318,9 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
                 placeholder="获取 Flag / 对授权目标完成渗透测试评估…（留空按任务模式自动推导）"
               />
             </label>
+            </div>
+            <div className="mission-col">
+            <ModePicker value={mode} onChange={setMode} />
             <label>
               模型提供商
               <select
@@ -1389,6 +1392,7 @@ function NewMission({ onCreated, openSignal = 0 }: { onCreated: (id: string) => 
                 <small>仅私网新主机且限 mlps/渗透任务；公网地址仍需人工审批。</small>
               </span>
             </label>
+            </div>
             </fieldset>
             <div className="modal-actions">
               <Dialog.Close className="quiet-button" disabled={submitting}>取消</Dialog.Close>
@@ -1544,8 +1548,8 @@ function RerunMission({
             )}
           </div>
           <form onSubmit={submit}>
-            <fieldset disabled={submitting} className="submission-fields">
-            <ModePicker value={mode} onChange={setMode} />
+            <fieldset disabled={submitting} className="submission-fields two-col">
+            <div className="mission-col">
             <label>
               授权目标
               <input
@@ -1563,6 +1567,9 @@ function RerunMission({
                 placeholder="留空时按任务模式自动推导"
               />
             </label>
+            </div>
+            <div className="mission-col">
+            <ModePicker value={mode} onChange={setMode} />
             <label>
               模型提供商
               <select
@@ -1645,6 +1652,7 @@ function RerunMission({
                 <small>复用已发现的服务、漏洞证据和攻击路径，避免重复侦察。</small>
               </span>
             </label>
+            </div>
             </fieldset>
             <div className="modal-actions">
               <Dialog.Close className="quiet-button" disabled={submitting}>
