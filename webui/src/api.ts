@@ -542,6 +542,34 @@ export const api = {
     request<{ pending: boolean; event?: Record<string, unknown> }>(
       `/api/session/${encodeURIComponent(id)}/pending_approval`,
     ),
+  dashboard: () =>
+    request<{ total: number; by_status: Record<string, number>;
+      by_mode: Record<string, number>;
+      by_mission: Record<string, number>; recent: { id: string; title: string;
+      target: string; status: string; created_at: string; run_mode: string }[];
+      assets_total: number; mlps_verdicts: number;
+      success_rate: number | null;
+      token_usage: { total_tokens?: number | null; calls?: number | null } }>(
+      "/api/dashboard",
+    ),
+  sessionIntel: (id: string) =>
+    request<{ session_id: string; target: string; goal: string;
+      mission_mode: string; phase: string; success: boolean | null;
+      flag: string | null;
+      assets: { id: string; host: string; port: number | null; service: string;
+        source: string; confidence: number; first_seen: string;
+        last_seen: string; evidence_ids: string[] }[];
+      attack_chain: { objective?: string; report?: string; service?: string;
+        cve?: string }[];
+      hypotheses: { id?: string; statement?: string; status?: string }[];
+      findings: { source?: string; report?: string }[];
+      iocs: { id: string; content: string }[];
+      verdicts: { id: string; content: string }[];
+      evidence_records: { id: string; source: string; kind: string;
+        summary: string; category: string; confidence: number;
+        created_at: string;
+        verification?: { status?: string } | null }[];
+    }>(`/api/session/${encodeURIComponent(id)}/intel`),
   intelKeys: () =>
     request<{ keys: { platforms: Record<string, { configured: boolean; email: string; hint: string; source: string }> } }>(
       "/api/my/intel-keys",

@@ -786,3 +786,132 @@ html{font-size:16px}body,button,input,textarea,select{font-family:Inter,-apple-s
 .mission-col{min-width:0}
 .mission-col>.mode-picker{grid-column:auto}
 @media(max-width:760px){.submission-fields.two-col{grid-template-columns:1fr}}
+
+/* ═══ 导航栏 + 情报视图（仪表板/资产/威胁建模/测绘/报告）═══ */
+.app-frame.with-nav{grid-template-columns:auto 244px minmax(0,1fr) 344px}
+.app-frame.with-nav.page-mode{grid-template-columns:auto minmax(0,1fr)}
+.nav-rail{display:flex;flex-direction:column;background:var(--side);border-right:1px solid var(--line);padding:10px 8px;transition:width .18s;overflow:hidden}
+.nav-rail.open{width:172px}
+.nav-rail:not(.open){width:52px}
+.nav-rail-head{display:flex;align-items:center;justify-content:space-between;padding:4px 6px 10px}
+.nav-rail-head b{font-size:10px;color:var(--dim);letter-spacing:1px}
+.nav-rail-head .nav-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);display:block;margin:2px auto}
+.nav-collapse{border:0;background:transparent;color:var(--dim);width:22px;height:22px;display:grid;place-items:center;border-radius:4px}
+.nav-collapse:hover{color:var(--accent);background:var(--panel2)}
+.nav-rail nav{display:flex;flex-direction:column;gap:3px}
+.nav-rail nav button{display:flex;align-items:center;gap:9px;border:1px solid transparent;background:transparent;color:var(--dim);padding:9px 10px;font-size:12px;border-radius:6px;text-align:left;white-space:nowrap;transition:.15s}
+.nav-rail nav button:hover{color:var(--text);background:var(--panel2)}
+.nav-rail nav button.active{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent);background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.nav-rail:not(.open) nav button{justify-content:center;padding:9px 6px}
+.nav-rail footer{margin-top:auto;padding:6px}
+.nav-rail footer small{font-size:9px;color:var(--dim);letter-spacing:1px}
+
+.page-main{min-height:0;overflow:auto;background:var(--bg);padding:16px 20px;display:flex;flex-direction:column;gap:14px}
+.page-head{display:flex;align-items:flex-end;gap:12px;border-bottom:1px solid var(--line);padding-bottom:10px}
+.page-head h1{margin:0;font-size:19px;letter-spacing:.5px}
+.page-head small{color:var(--dim);font:9px ui-monospace,monospace;letter-spacing:1px;display:block;margin-top:3px}
+.page-head-extra{margin-left:auto;min-width:230px}
+.intel-session-picker{display:grid;gap:4px;font-size:10px;color:var(--dim)}
+.intel-session-picker select{min-width:250px}
+.page-empty{flex:1;display:grid;place-content:center;justify-items:center;gap:8px;color:var(--dim);border:1px dashed var(--line);border-radius:8px;padding:40px;text-align:center}
+.page-empty svg{color:var(--line)}
+
+/* 仪表板 */
+.dash-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.dash-stat{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:12px;display:grid;gap:5px;position:relative;overflow:hidden}
+.dash-stat svg{color:var(--accent);opacity:.85}
+.dash-stat b{font-size:20px}
+.dash-stat span{font-size:10px;color:var(--dim);letter-spacing:.5px}
+.dash-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.dash-card{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:12px}
+.dash-card>header{font-size:11px;font-weight:800;letter-spacing:.5px;margin-bottom:10px;color:var(--text)}
+.dash-wide{grid-column:1/-1}
+.dash-donut-wrap{display:flex;align-items:center;gap:18px}
+.chart-donut{width:128px;height:128px}
+.chart-donut .donut-total{fill:var(--text);font-size:18px;font-weight:700}
+.dash-donut-wrap ul{list-style:none;margin:0;padding:0;display:grid;gap:6px;font-size:11px;color:var(--dim)}
+.dash-donut-wrap li{display:flex;align-items:center;gap:7px}
+.dash-donut-wrap li i{width:9px;height:9px;border-radius:2px;display:inline-block}
+.dash-donut-wrap li b{color:var(--text)}
+.chart-bar-row{display:grid;grid-template-columns:120px 1fr 34px;align-items:center;gap:9px;margin:8px 0}
+.chart-bar-label{font-size:11px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chart-bar-track{height:9px;background:var(--panel2);border-radius:5px;overflow:hidden}
+.chart-bar-fill{height:100%;border-radius:5px;box-shadow:0 0 8px color-mix(in srgb,var(--recon) 40%,transparent)}
+.chart-bar-row b{font-size:11px;text-align:right}
+.dash-table{width:100%;border-collapse:collapse;font-size:11px}
+.dash-table th{color:var(--dim);font-size:9px;letter-spacing:.6px;text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+.dash-table td{padding:7px 8px;border-bottom:1px solid var(--line2);cursor:pointer}
+.dash-table tr:hover td{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+
+/* 资产管理 */
+.asset-tabs{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.asset-tabs button{border:1px solid var(--line);background:var(--panel);color:var(--dim);padding:6px 12px;font-size:11px;border-radius:6px}
+.asset-tabs button.active{color:var(--accent);border-color:var(--accent)}
+.asset-search{margin-left:auto;min-width:220px;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px;outline:none}
+.asset-table{width:100%;border-collapse:collapse;font-size:12px;border:1px solid var(--line);background:var(--panel);border-radius:8px;overflow:hidden}
+.asset-table th{background:var(--panel2);color:var(--dim);font-size:9px;letter-spacing:.6px;text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+.asset-table td{padding:9px 10px;border-bottom:1px solid var(--line2)}
+.asset-table tr:hover td{background:color-mix(in srgb,var(--recon) 5%,transparent)}
+
+/* 威胁建模 / 资产测绘 画布 */
+.threat-chips,.map-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.threat-chips .chip,.map-toolbar .chip{border:1px solid var(--line);background:var(--panel2);border-radius:8px;padding:4px 10px;font-size:11px;color:var(--dim)}
+.threat-chips .chip.ok{color:var(--orchestrator);border-color:var(--orchestrator)}
+.map-toolbar select{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:6px;padding:6px 10px;font-size:12px}
+.graph-canvas{border:1px solid var(--line);border-radius:8px;background:radial-gradient(circle at 40% 20%,color-mix(in srgb,var(--accent) 4%,transparent),transparent 40%),repeating-linear-gradient(0deg,transparent 0,transparent 19px,var(--line2) 19px,var(--line2) 20px),repeating-linear-gradient(90deg,transparent 0,transparent 19px,var(--line2) 19px,var(--line2) 20px),var(--panel);overflow:auto;height:560px}
+.graph-canvas.tall{height:640px}
+.graph-svg{width:100%;height:100%;min-width:900px}
+.graph-node rect{fill:var(--panel2);stroke:var(--line);stroke-width:1.4}
+.graph-node.root rect{stroke:var(--accent);stroke-width:2;fill:color-mix(in srgb,var(--accent) 7%,var(--panel2))}
+.graph-node.chain rect{stroke:var(--recon)}
+.graph-node.threat rect{stroke:var(--brain)}
+.graph-node.rejected rect{stroke:var(--line);opacity:.55}
+.graph-node.group rect{stroke:var(--orchestrator)}
+.graph-node.asset rect{stroke:var(--recon)}
+.graph-node text{fill:var(--text);font-size:12px;font-weight:600}
+.graph-node .node-sub{fill:var(--dim);font-size:10px;font-weight:400}
+
+/* 发现与报告 */
+.report-actions{display:flex;gap:10px;align-items:center}
+.reports-grid{display:grid;grid-template-columns:1.2fr 1fr;gap:12px;align-items:start}
+.report-card{border:1px solid var(--line);background:var(--panel);border-radius:8px;overflow:hidden}
+.report-card>header{padding:9px 12px;background:var(--panel2);font-size:11px;font-weight:800;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+.report-card>header span{margin-left:auto;color:var(--dim);font-weight:400}
+.report-body{max-height:520px;overflow:auto;padding:10px 12px;font-size:11px;line-height:1.7}
+.report-body p{margin:0 0 4px;white-space:pre-wrap;word-break:break-word;color:var(--dim)}
+.report-body p.report-h{color:var(--text);font-weight:700;margin-top:8px}
+.evidence-records,.artifact-records{max-height:520px;overflow:auto;padding:8px 10px}
+.evidence-records details{border-bottom:1px solid var(--line2);padding:7px 2px}
+.evidence-records summary{display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer;list-style:none}
+.evidence-records summary b{color:var(--text);font-family:ui-monospace,monospace}
+.evidence-records summary span{color:var(--dim)}
+.evidence-records summary i{font-style:normal;color:var(--recon);font-size:9px}
+.evidence-records summary i.attack{color:var(--attack)}
+.evidence-records summary em{font-style:normal;margin-left:auto;font-size:9px}
+.evidence-records summary em.ok{color:var(--orchestrator)}
+.evidence-records summary em.err{color:var(--attack)}
+.evidence-records details p{margin:6px 0 4px;font-size:11px;color:var(--dim);white-space:pre-wrap;max-height:180px;overflow:auto}
+.evidence-records details small{color:var(--line);font-size:9px}
+.artifact-records .artifact-row{display:block;width:100%;text-align:left;border:1px solid var(--line2);background:var(--panel2);border-radius:6px;padding:8px 10px;margin-bottom:6px;cursor:pointer}
+.artifact-row b{display:block;font-size:11px;color:var(--text)}
+.artifact-row small{display:block;font-size:9px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.artifact-row em{font-style:normal;font-size:9px;color:var(--recon)}
+.artifact-row:hover{border-color:var(--accent)}
+
+/* 导航品牌与设置尾 */
+.nav-rail-head .nav-brand{display:flex;align-items:center;gap:8px;min-width:0;flex:1}
+.nav-rail-head .nav-brand img{width:26px;height:26px;object-fit:contain}
+.nav-rail-head .nav-brand b{font-size:15px;background:linear-gradient(135deg,var(--accent),#7d1211);background-clip:text;color:transparent;display:block;line-height:1.05}
+.nav-rail-head .nav-brand small{font-size:8px;letter-spacing:1px;color:var(--dim)}
+.nav-mark img{width:26px;height:26px;object-fit:contain;display:block;margin:0 auto}
+.nav-footer{margin-top:auto;border-top:1px solid var(--line);padding-top:8px;display:grid;gap:3px}
+.nav-footer button{display:flex;align-items:center;gap:9px;border:1px solid transparent;background:transparent;color:var(--dim);padding:9px 10px;font-size:12px;border-radius:6px;text-align:left;white-space:nowrap}
+.nav-footer button:hover{color:var(--accent);background:var(--panel2)}
+.nav-rail:not(.open) .nav-footer button{justify-content:center;padding:9px 6px}
+
+/* 情报视图双栏：左任务列表 + 右内容 */
+.intel-layout{display:grid;grid-template-columns:252px minmax(0,1fr);gap:14px;align-items:start}
+.session-list-panel{border:1px solid var(--line);background:var(--side);border-radius:8px;display:flex;flex-direction:column;max-height:calc(100vh - 150px);position:sticky;top:14px;overflow:hidden}
+.session-list-panel .session-search{margin:10px 10px 4px}
+.session-list-panel .session-list{padding:4px 8px 10px;overflow:auto;flex:1;max-height:calc(100vh - 220px)}
+.intel-content{min-width:0;display:flex;flex-direction:column;gap:12px}

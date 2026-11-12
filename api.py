@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import httpx
 import json
+import sqlite3
 import logging
 import os
 import re
@@ -3690,6 +3691,116 @@ async def resume_session(
     )
     ctx.task = task
     return {"session_id": session_id, "status": "resumed"}
+
+
+@app.get("/api/session/{session_id}/intel")
+async def get_session_intel(session_id: str, current_user: dict = Depends(get_current_user)):
+    """会话情报视图数据：资产台账 / 攻击链 / 假设 / 发现 / IOC / 等保判定。"""
+    await _verify_session_owner(session_id, current_user["id"])
+    session_file = _sessions_dir / f"{session_id}.json"
+    if not session_file.is_file():
+        return {"session_id": session_id, "assets": [], "attack_chain": [],
+                "hypotheses": [], "findings": [], "iocs": [], "verdicts": []}
+
+    def _load():
+        try:
+            return json.loads(session_file.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return {}
+
+    mission = await asyncio.to_thread(_load)
+    facts = mission.get("facts") or []
+    return {
+        "session_id": session_id,
+        "target": mission.get("target") or "",
+        "goal": mission.get("goal") or "",
+        "mission_mode": mission.get("mission_mode") or "",
+        "phase": mission.get("phase") or "",
+        "success": mission.get("success"),
+        "flag": mission.get("flag"),
+        "assets": mission.get("assets") or [],
+        "attack_chain": mission.get("attack_chain") or [],
+        "hypotheses": mission.get("hypotheses") or [],
+        "findings": mission.get("findings") or [],
+        "iocs": [f for f in facts if str(f.get("category") or "") == "ioc"],
+        "verdicts": [f for f in facts if str(f.get("category") or "") == "verdict"],
+        "evidence_records": mission.get("evidence_records") or [],
+    }
+
+
+@app.get("/api/dashboard")
+async def get_dashboard(current_user: dict = Depends(get_current_user)):
+    """仪表板聚合：任务分布/成功率/资产规模/Token 用量/近期任务。"""
+    def _query():
+        from core.auth import get_db
+
+        conn = get_db()
+        conn.row_factory = sqlite3.Row
+        total = conn.execute("SELECT COUNT(*) c FROM sessions").fetchone()["c"]
+        by_status = {
+            row["status"]: row["c"]
+            for row in conn.execute(
+                "SELECT status, COUNT(*) c FROM sessions GROUP BY status")
+        }
+        by_mode = {
+            row["m"]: row["c"]
+            for row in conn.execute(
+                """SELECT COALESCE(json_extract(target_info, '$.run_mode'),
+                                   'standard') m, COUNT(*) c
+                   FROM sessions GROUP BY m""")
+        }
+        by_mission = {
+            row["m"]: row["c"]
+            for row in conn.execute(
+                """SELECT COALESCE(json_extract(target_info, '$.mission_mode'),
+                                   'auto') m, COUNT(*) c
+                   FROM sessions GROUP BY m ORDER BY c DESC""")
+        }
+        recent = [
+            dict(row) for row in conn.execute(
+                """SELECT id, title, target, status, phase, success, created_at,
+                          COALESCE(json_extract(target_info, '$.run_mode'),
+                                   'standard') run_mode
+                   FROM sessions ORDER BY created_at DESC LIMIT 12""")
+        ]
+        assets_total = 0
+        mlps_verdicts = 0
+        sessions_dir = _sessions_dir
+        if sessions_dir.is_dir():
+            for path in sorted(sessions_dir.glob("*.json"),
+                               key=lambda p: p.stat().st_mtime, reverse=True)[:60]:
+                try:
+                    mission = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:  # noqa: BLE001
+                    continue
+                assets_total += len(mission.get("assets") or [])
+                mlps_verdicts += sum(
+                    1 for f in mission.get("facts") or []
+                    if str(f.get("category") or "") == "verdict")
+        return {
+            "total": total, "by_status": by_status, "by_mode": by_mode,
+            "by_mission": by_mission, "recent": recent,
+            "assets_total": assets_total, "mlps_verdicts": mlps_verdicts,
+        }
+
+    stats = await asyncio.to_thread(_query)
+    completed = stats["by_status"].get("completed", 0)
+    failed = stats["by_status"].get("failed", 0)
+    finished = completed + failed
+    try:
+        from core.token_usage import platform_usage_summary
+
+        usage = platform_usage_summary(days=30)
+    except Exception:  # noqa: BLE001 — 用量统计失败不阻断仪表板
+        usage = {}
+    return {
+        **stats,
+        "success_rate": round(completed / finished * 100, 1) if finished else None,
+        "token_usage": {
+            "total_tokens": (usage or {}).get("total_tokens"),
+            "calls": (usage or {}).get("total_calls"),
+        },
+    }
 
 
 @app.post("/api/session/{session_id}/cancel")

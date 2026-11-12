@@ -44,6 +44,7 @@ import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { accountStream, api, auth, Event, ManagedProvider, ModelApiConfig, ModelApiConfigInput, ModelProviderOption, PlatformUsageSummary, ProviderCatalogEntry, PythonEnvironmentStatus, Session, stream, SystemUser, ToolStatus } from "./api";
+import { DashboardView, AssetsView, ThreatsView, MappingView, ReportsView, NavRail, type IntelView } from "./IntelViews";
 import { ProviderWizardDialog } from "./ProviderWizard";
 import UserSettingsPage, { UsageDayPicker, UsageGroupTable, UsageStatCards } from "./UserSettings";
 import OnboardingWizard, { onboardingResumeStep } from "./OnboardingWizard";
@@ -2727,6 +2728,8 @@ function ConsoleApp() {
     [hasMoreSessions, setHasMoreSessions] = useState(false),
     [loadingMoreSessions, setLoadingMoreSessions] = useState(false),
     [active, setActive] = useState(""),
+    [view, setView] = useState<IntelView>("console"),
+    [intelSession, setIntelSession] = useState(""),
     [eventStore, setEventStore] = useState<EventStore>(() => emptyEventStore()),
     [visibleCount, setVisibleCount] = useState(120),
     [historyHasMore, setHistoryHasMore] = useState(false),
@@ -3420,73 +3423,20 @@ function ConsoleApp() {
           SYSTEM ONLINE
         </span>
       </div>
-      <div className="app-frame">
+      <div className={"app-frame with-nav " + (view !== "console" ? "page-mode" : "")}>
+        <NavRail view={view} onChange={setView}
+          onOpenSettings={() => { window.location.href = "/settings"; }}
+          onOpenTooling={() => setTooling(true)}
+          onOpenKnowledge={() => setKnowledge(true)}
+          theme={theme}
+          onToggleTheme={() => setTheme((currentTheme) =>
+            currentTheme === "light" ? "dark"
+              : currentTheme === "dark" ? "liquid" : "light",
+          )}
+        />
+        {view === "console" && (
         <aside className="session-sidebar">
             <header>
-              <div className="brand">
-                <span className="brand-logo">
-                  <img className="theme-logo-light" src={lightLogo} alt="灵枢" />
-                  <img className="theme-logo-dark" src={darkLogo} alt="灵枢" />
-                </span>
-                <div>
-                  <b>灵枢</b>
-                  <small>Lingshu Console</small>
-                </div>
-              </div>
-              <div className="sidebar-utilities">
-                <button
-                  className={`icon-button theme-switch ${theme}`}
-                  onClick={() =>
-                    setTheme((currentTheme) =>
-                      currentTheme === "light"
-                        ? "dark"
-                        : currentTheme === "dark"
-                          ? "liquid"
-                          : "light",
-                    )
-                  }
-                  title={
-                    theme === "light"
-                      ? "当前：亮色；切换到暗色"
-                      : theme === "dark"
-                        ? "当前：暗色；切换到液态玻璃"
-                        : "当前：液态玻璃；切换到亮色"
-                  }
-                  aria-label="切换显示样式"
-                >
-                  {theme === "light" ? (
-                    <Moon size={15} />
-                  ) : theme === "dark" ? (
-                    <Sparkles size={15} />
-                  ) : (
-                    <Sun size={15} />
-                  )}
-                </button>
-                <button
-                  className="icon-button"
-                  onClick={() => setKnowledge(true)}
-                  title="查看本地知识库"
-                  aria-label="查看本地知识库"
-                >
-                  <Database size={17} />
-                </button>
-                <button
-                  className="icon-button"
-                  onClick={() => setTooling(true)}
-                  title="查看系统工具状态"
-                  aria-label="查看系统工具状态"
-                >
-                  <Wrench size={16} />
-                </button>
-                <button
-                  className="icon-button"
-                  onClick={() => { window.location.href = "/settings"; }}
-                  title="用户设置：我的模型供应商、Agent 模型分工与账号安全"
-                  aria-label="用户设置"
-                >
-                  <UserCog size={17} />
-                </button>
-              </div>
               <NewMission
                 onCreated={(id) => {
                   setActive(id);
@@ -3540,6 +3490,8 @@ function ConsoleApp() {
               </button>
             </footer>
         </aside>
+        )}
+        {view === "console" ? (
         <main className="mission-main">
           <header className="mission-header">
             <div className="mission-ident">
@@ -3782,6 +3734,26 @@ function ConsoleApp() {
             </div>
           </footer>
         </main>
+        ) : (
+        <main className="page-main">
+          {view === "dashboard" && (
+            <DashboardView onOpenSession={(id) => { setView("console"); setActive(id); }} />
+          )}
+          {view === "assets" && (
+            <AssetsView sessions={sessions} activeId={intelSession || active} onSelect={setIntelSession} />
+          )}
+          {view === "threats" && (
+            <ThreatsView sessions={sessions} activeId={intelSession || active} onSelect={setIntelSession} />
+          )}
+          {view === "mapping" && (
+            <MappingView sessions={sessions} activeId={intelSession || active} onSelect={setIntelSession} />
+          )}
+          {view === "reports" && (
+            <ReportsView sessions={sessions} activeId={intelSession || active} onSelect={setIntelSession} />
+          )}
+        </main>
+        )}
+        {view === "console" && (
         <aside className={`intel-panel ${mobileIntel ? "mobile-open" : ""}`}>
           <button
             className="mobile-intel-close"
@@ -3867,12 +3839,11 @@ function ConsoleApp() {
                   })}
               </div>
             </section>
-            <EvidencePanel mission={detail} onDownload={downloadArtifact} />
-            <ArtifactPanel sessionId={active} onDownload={downloadArtifact} />
             <ToolHistoryPanel events={toolEvents} />
             <PlanPanel mission={detail} phase={phase} />
           </div>
         </aside>
+        )}
         {mobileIntel && (
           <button
             className="mobile-intel-scrim"
