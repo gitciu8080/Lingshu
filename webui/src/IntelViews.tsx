@@ -1,7 +1,7 @@
 /* 灵枢情报视图：导航栏 / 仪表板 / 资产管理 / 威胁建模 / 资产测绘。
    数据源：/api/dashboard 与 /api/session/{id}/intel；图表全部内联 SVG。 */
 import { useEffect, useMemo, useState } from "react";
-import { Activity, ChevronLeft, ChevronRight, Crosshair, Database, FileText, Gauge, LayoutDashboard, LogOut, Moon, Network, Radar, Search, Settings, ShieldAlert, Sparkles, Sun, Target, TrendingUp, UserCog, Wrench } from "lucide-react";
+import { Activity, ChevronLeft, ChevronRight, Crosshair, Database, FileText, Gauge, LayoutDashboard, LogOut, Menu, Moon, Network, Radar, Search, Settings, ShieldAlert, Sparkles, Sun, Target, TrendingUp, UserCog, Wrench } from "lucide-react";
 import { api, Session } from "./api";
 import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
@@ -31,27 +31,33 @@ export function NavRail({ view, onChange, onLogout, theme, onToggleTheme,
   onLogout: () => void;
   theme: string; onToggleTheme: () => void;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(() =>
+    typeof window === "undefined" ? true : window.innerWidth > 760);
+  const isMobile = () => window.innerWidth <= 760;
+  const pick = (id: IntelView) => {
+    onChange(id);
+    if (isMobile()) setOpen(false);
+  };
   return (
-    <aside className={`nav-rail ${open ? "open" : ""}`}>
+    <>
+      <button className="nav-mobile-toggle" onClick={() => setOpen(true)}
+        aria-label="打开导航菜单">
+        <Menu size={18} />
+      </button>
+      {open && <button className="nav-scrim" aria-label="关闭导航菜单"
+        onClick={() => setOpen(false)} />}
+      <aside className={`nav-rail ${open ? "open" : ""}`}>
       <div className="nav-rail-head">
-        {open ? (
-          <div className="brand nav-brand">
-            <span className="brand-logo">
-              <img className="theme-logo-light" src={lightLogo} alt="灵枢" />
-              <img className="theme-logo-dark" src={darkLogo} alt="灵枢" />
-            </span>
-            <div>
-              <b>灵枢</b>
-              <small>Lingshu Console</small>
-            </div>
-          </div>
-        ) : (
+        <div className="brand nav-brand">
           <span className="brand-logo nav-mark">
             <img className="theme-logo-light" src={lightLogo} alt="灵枢" />
             <img className="theme-logo-dark" src={darkLogo} alt="灵枢" />
           </span>
-        )}
+          <div className="nav-label">
+            <b>灵枢</b>
+            <small>Lingshu Console</small>
+          </div>
+        </div>
         <button
           className="nav-collapse"
           onClick={() => setOpen(!open)}
@@ -65,11 +71,11 @@ export function NavRail({ view, onChange, onLogout, theme, onToggleTheme,
           <button
             key={item.id}
             className={view === item.id ? "active" : ""}
-            onClick={() => onChange(item.id)}
+            onClick={() => pick(item.id)}
             title={item.label}
           >
             <item.icon size={16} />
-            {open && <span>{item.label}</span>}
+            <span className="nav-label">{item.label}</span>
           </button>
         ))}
       </nav>
@@ -77,14 +83,15 @@ export function NavRail({ view, onChange, onLogout, theme, onToggleTheme,
         <button onClick={onToggleTheme} title="切换显示样式">
           {theme === "light" ? <Moon size={16} /> : theme === "dark" ? (
             <Sparkles size={16} />) : (<Sun size={16} />)}
-          {open && <span>主题切换</span>}
+          <span className="nav-label">主题切换</span>
         </button>
         <button className="nav-logout" onClick={onLogout} title="退出登录">
           <LogOut size={16} />
-          {open && <span>退出登录</span>}
+          <span className="nav-label">退出登录</span>
         </button>
       </footer>
-    </aside>
+      </aside>
+    </>
   );
 }
 

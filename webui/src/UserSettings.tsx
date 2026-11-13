@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
-  Bot, BrainCircuit, Coins, Globe, KeyRound, LogOut, Plus, RotateCcw, Search, ShieldAlert, Trash2, UserCog,
+  ArrowDown, ArrowUp, Bot, BrainCircuit, CalendarDays, CheckCircle2, Coins, Globe, KeyRound, LogOut,
+  Plus, RotateCcw, Search, ShieldAlert, Trash2, UserCog, Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -113,6 +114,63 @@ export function UsageDayPicker({ days, onChange }: { days: number; onChange: (da
   );
 }
 
+function UsageDashStats({ calls, inputTokens, outputTokens, totalTokens }: {
+  calls: number; inputTokens: number; outputTokens: number; totalTokens: number;
+}) {
+  return (
+    <div className="dash-stats">
+      <article className="dash-stat"><Coins size={16} /><b>{formatTokens(totalTokens)}</b><span>总 Token</span></article>
+      <article className="dash-stat"><ArrowDown size={16} /><b>{formatTokens(inputTokens)}</b><span>输入 Token</span></article>
+      <article className="dash-stat"><ArrowUp size={16} /><b>{formatTokens(outputTokens)}</b><span>输出 Token</span></article>
+      <article className="dash-stat"><BrainCircuit size={16} /><b>{calls}</b><span>模型调用</span></article>
+    </div>
+  );
+}
+
+function UsageGroupCard({ title, note, rows, keyHeader, totalTokens }: {
+  title: string;
+  note: string;
+  rows: UsageGroupRow[];
+  keyHeader: string;
+  totalTokens: number;
+}) {
+  return (
+    <section className="dash-card dash-wide">
+      <header>{title}
+        <span className="dash-note">{note}</span>
+        <span className="card-actions db-count">{rows.length} 行</span>
+      </header>
+      <table className="dash-table plain">
+        <thead>
+          <tr><th>{keyHeader}</th><th>调用次数</th><th>输入 TOKEN</th><th>输出 TOKEN</th><th>合计</th><th>占比</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const rowTotal = row.input_tokens + row.output_tokens;
+            const percent = totalTokens > 0 ? Math.round((rowTotal / totalTokens) * 100) : 0;
+            return (
+              <tr key={row.key}>
+                <td><code>{row.key}</code></td>
+                <td>{row.calls}</td>
+                <td>{row.input_tokens.toLocaleString()}</td>
+                <td>{row.output_tokens.toLocaleString()}</td>
+                <td><b>{rowTotal.toLocaleString()}</b></td>
+                <td style={{ minWidth: 110 }}>
+                  <span style={{ fontSize: 11 }}>{percent}%</span>
+                  <span style={{ display: "block", height: 3, background: "var(--line2)", marginTop: 4 }}>
+                    <span style={{ display: "block", height: 3, width: `${percent}%`, background: "var(--accent)" }} />
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {!rows.length && <p className="empty-note">该时间范围内暂无用量记录</p>}
+    </section>
+  );
+}
+
 const INTEL_PLATFORMS: { id: string; label: string; needsEmail: boolean; hint: string }[] = [
   { id: "fofa", label: "FOFA", needsEmail: true, hint: 'email + key；查询如 title="登录"' },
   { id: "hunter", label: "Hunter 奇安信", needsEmail: false, hint: "api-key；每日免费配额" },
@@ -159,10 +217,11 @@ function IntelCard() {
   };
 
   return (
-    <section className="superadmin-database intel-card">
-      <header><div><h2>资产测绘引擎 API Key</h2>
-        <em>FOFA / Hunter / Shodan / ZoomEye；key 加密存储，仅测绘查询使用（结果属情报，测试目标仍需授权审批）</em></div></header>
-      <div className="superadmin-form" style={{ display: "grid", gap: 14 }}>
+    <section className="dash-card dash-wide intel-card">
+      <header>资产测绘引擎 API Key
+        <span className="dash-note">FOFA / Hunter / Shodan / ZoomEye；key 加密存储，仅测绘查询使用（结果属情报，测试目标仍需授权审批）</span>
+      </header>
+      <div style={{ display: "grid", gap: 14, padding: "2px 0" }}>
         {notice && <p className="mini" style={{ margin: 0 }}>{notice}</p>}
         {INTEL_PLATFORMS.map((p) => {
           const st = state[p.id] || { configured: false, email: "", hint: "", source: "" };
@@ -270,83 +329,80 @@ export function AgentSettingsView() {
 
   return (
     <>
-      <header className="superadmin-header">
+      <header className="page-head">
         <div>
-          <p className="kicker">LINGSHU · AGENT SETTINGS</p>
           <h1>Agent 模型分工</h1>
           <small>AGENT MODEL BINDINGS / 每个 Agent 角色使用的模型与思考强度</small>
         </div>
-        <span className="superadmin-live"><i /> SYSTEM ONLINE</span>
-      </header>
-      <section className="superadmin-stats">
-        <article><span>ROLES</span><b>{roles.length}</b><i /></article>
-        <article><span>BOUND</span><b>{boundCount}</b><i /></article>
-        <article><span>AVAILABLE_MODELS</span><b>{options.reduce((sum, option) => sum + (option.models?.length || 0), 0)}</b><i /></article>
-        <article className="danger"><span>FOLLOW_MAIN</span><b>{roles.length - boundCount}</b><i /></article>
-      </section>
-      <section className="superadmin-database">
-        <header>
-          <div><h2>AGENT_BINDINGS</h2><em>未绑定的角色跟随任务创建时选择的主模型；绑定失效自动回退主模型</em></div>
-          <div className="superadmin-toolbar">
-            <button className="danger-button compact add-model" disabled={savingBindings || !options.length} onClick={() => void saveBindings()}>
-              {savingBindings ? "保存中…" : "保存分工"}
-            </button>
-          </div>
-        </header>
-        <div className="superadmin-table-wrap">
-          <table className="superadmin-table">
-            <thead><tr><th>Agent 角色</th><th>供应商</th><th>模型</th><th>思考强度</th></tr></thead>
-            <tbody>
-              {roles.map((role) => {
-                const draft = draftBindings[role.role] || { provider: "", model: "", thinking_intensity: "" };
-                const models = options.find((option) => option.id === draft.provider)?.models || [];
-                return (
-                  <tr key={role.role}>
-                    <td>
-                      <div className="superadmin-user">
-                        <span>{role.label.replace(/[^一-龥A-Za-z]/g, "").slice(0, 2) || "AI"}</span>
-                        <div><b>{role.label}</b><small>{role.role}</small></div>
-                      </div>
-                    </td>
-                    <td>
-                      <select value={draft.provider} onChange={(e) => setBinding(role.role, { provider: e.target.value })}>
-                        <option value="">跟随主模型</option>
-                        {options.map((option) => (
-                          <option key={option.id} value={option.id}>
-                            {option.label}{option.owner === "platform" ? "（平台）" : ""}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td>
-                      <select value={draft.model} disabled={!draft.provider} onChange={(e) => setBinding(role.role, { model: e.target.value })}>
-                        <option value="">{draft.provider ? "（默认模型）" : "—"}</option>
-                        {models.map((name) => <option key={name} value={name}>{name}</option>)}
-                      </select>
-                    </td>
-                    <td>
-                      <select
-                        value={draft.thinking_intensity}
-                        disabled={!draft.provider}
-                        onChange={(e) => setBinding(role.role, { thinking_intensity: e.target.value })}
-                      >
-                        <option value="">跟随主模型</option>
-                        <option value="off">off（无思考）</option>
-                        <option value="low">low</option>
-                        <option value="medium">medium</option>
-                        <option value="high">high</option>
-                      </select>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          {!options.length && !loading && (
-            <p className="empty-note">请先在「用户与系统设置 → 大模型供应商」添加至少一个可用的供应商配置</p>
-          )}
+        <div className="page-head-extra">
+          <button className="quiet-button" disabled={savingBindings || !options.length}
+            onClick={() => void saveBindings()}>
+            {savingBindings ? "保存中…" : "保存分工"}
+          </button>
         </div>
-        <footer><span>BINDINGS: USER SCOPED</span><span>ROLES {roles.length}</span></footer>
+      </header>
+      <div className="dash-stats">
+        <article className="dash-stat"><Bot size={16} /><b>{roles.length}</b><span>Agent 角色</span></article>
+        <article className="dash-stat"><CheckCircle2 size={16} /><b>{boundCount}</b><span>已绑定</span></article>
+        <article className="dash-stat"><BrainCircuit size={16} /><b>{options.reduce((sum, option) => sum + (option.models?.length || 0), 0)}</b><span>可用模型</span></article>
+        <article className="dash-stat"><ShieldAlert size={16} /><b>{roles.length - boundCount}</b><span>跟随主模型</span></article>
+      </div>
+      <section className="dash-card dash-wide">
+        <header>角色绑定
+          <span className="dash-note">未绑定的角色跟随任务创建时选择的主模型；绑定失效自动回退主模型</span>
+          <span className="card-actions db-count">{roles.length} 角色</span>
+        </header>
+        <table className="dash-table plain">
+          <thead><tr><th>Agent 角色</th><th>供应商</th><th>模型</th><th>思考强度</th></tr></thead>
+          <tbody>
+            {roles.map((role) => {
+              const draft = draftBindings[role.role] || { provider: "", model: "", thinking_intensity: "" };
+              const models = options.find((option) => option.id === draft.provider)?.models || [];
+              return (
+                <tr key={role.role}>
+                  <td>
+                    <div className="cell-main">
+                      <b>{role.label}</b>
+                      <small>{role.role}</small>
+                    </div>
+                  </td>
+                  <td>
+                    <select value={draft.provider} onChange={(e) => setBinding(role.role, { provider: e.target.value })}>
+                      <option value="">跟随主模型</option>
+                      {options.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}{option.owner === "platform" ? "（平台）" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td>
+                    <select value={draft.model} disabled={!draft.provider} onChange={(e) => setBinding(role.role, { model: e.target.value })}>
+                      <option value="">{draft.provider ? "（默认模型）" : "—"}</option>
+                      {models.map((name) => <option key={name} value={name}>{name}</option>)}
+                    </select>
+                  </td>
+                  <td>
+                    <select
+                      value={draft.thinking_intensity}
+                      disabled={!draft.provider}
+                      onChange={(e) => setBinding(role.role, { thinking_intensity: e.target.value })}
+                    >
+                      <option value="">跟随主模型</option>
+                      <option value="off">off（无思考）</option>
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                    </select>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {!options.length && !loading && (
+          <p className="empty-note">请先在「用户与系统设置 → 大模型供应商」添加至少一个可用的供应商配置</p>
+        )}
       </section>
     </>
   );
@@ -479,31 +535,33 @@ export default function UserSettingsPage() {
 
         {tab === "providers" && (
           <>
-            <section className="superadmin-stats">
-              <article><span>PROVIDERS</span><b>{providers.length}</b><i /></article>
-              <article><span>ENABLED</span><b>{enabledCount}</b><i /></article>
-              <article><span>MODELS</span><b>{providers.reduce((sum, item) => sum + item.models.length, 0)}</b><i /></article>
-              <article className="danger"><span>WITH_TOOLS</span><b>{providers.filter((item) => item.enabled_tools.length).length}</b><i /></article>
-            </section>
-            <section className="superadmin-database">
-              <header>
-                <div><h2>MY_PROVIDERS</h2><em>私有供应商池；仅自己可见可用，平台池由超级管理员维护</em></div>
-                <div className="superadmin-toolbar">
-                  <label><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索名称 / 供应商 / 模型…" /></label>
+            <div className="dash-stats">
+              <article className="dash-stat"><Bot size={16} /><b>{providers.length}</b><span>供应商配置</span></article>
+              <article className="dash-stat"><CheckCircle2 size={16} /><b>{enabledCount}</b><span>已启用</span></article>
+              <article className="dash-stat"><BrainCircuit size={16} /><b>{providers.reduce((sum, item) => sum + item.models.length, 0)}</b><span>模型总数</span></article>
+              <article className="dash-stat"><Wrench size={16} /><b>{providers.filter((item) => item.enabled_tools.length).length}</b><span>原生工具接入</span></article>
+            </div>
+            <section className="dash-card dash-wide">
+              <header>私有供应商池
+                <span className="dash-note">仅自己可见可用；平台池由超级管理员维护</span>
+                <span className="card-actions">
+                  <label className="dash-search"><Search size={13} />
+                    <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索名称 / 供应商 / 模型…" />
+                  </label>
                   <button className="danger-button compact add-model" onClick={() => setEditor(null)}>
                     <Plus size={14} /> 添加供应商
                   </button>
-                </div>
+                </span>
               </header>
-              <div className="superadmin-table-wrap">
-                <table className="superadmin-table model-config-table">
+              <div className="dash-scroll">
+                <table className="dash-table plain model-config-table">
                   <thead><tr><th>状态</th><th>配置 / PROVIDER</th><th>API 地址</th><th>模型</th><th>原生工具</th><th>API Key</th><th>归属</th><th>操作</th></tr></thead>
                   <tbody>
                     {visibleProviders.map((item) => (
                       <tr key={item.id}>
                         <td><span className={item.enabled ? "endpoint-state enabled" : "endpoint-state"}><i />{item.enabled ? "启用" : "停用"}</span></td>
                         <td>
-                          <div className="superadmin-user"><span>AI</span><div><b>{item.name}</b><small>{item.provider} · {item.api_style}</small></div></div>
+                          <div className="cell-main"><b>{item.name}</b><small>{item.provider} · {item.api_style}</small></div>
                         </td>
                         <td><code className="endpoint-url">{item.base_url}</code></td>
                         <td>
@@ -536,10 +594,6 @@ export default function UserSettingsPage() {
                   <p className="empty-note">尚无供应商配置，请点击「添加供应商」接入你自己的大模型 API</p>
                 )}
               </div>
-              <footer>
-                <span>SECRETS: ENCRYPTED AT REST</span>
-                <span>DISPLAYING {visibleProviders.length} / {providers.length}</span>
-              </footer>
             </section>
           </>
         )}
@@ -548,38 +602,21 @@ export default function UserSettingsPage() {
           <>
             {usage ? (
               <>
-                <UsageStatCards
+                <UsageDashStats
                   calls={usage.calls}
                   inputTokens={usage.input_tokens}
                   outputTokens={usage.output_tokens}
                   totalTokens={usage.input_tokens + usage.output_tokens}
                 />
-                <div style={{ display: "flex", justifyContent: "flex-end", margin: "-12px 0 14px" }}>
+                <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <UsageDayPicker days={usageDays} onChange={setUsageDays} />
                 </div>
-                <div style={{ display: "grid", gap: 16 }}>
-                  <UsageGroupTable
-                    title="BY_MODEL"
-                    note="按模型名分解的消耗"
-                    rows={usage.by_model}
-                    keyHeader="模型"
-                    totalTokens={usage.input_tokens + usage.output_tokens}
-                  />
-                  <UsageGroupTable
-                    title="BY_PROVIDER"
-                    note="按供应商配置分解的消耗"
-                    rows={usage.by_provider}
-                    keyHeader="供应商配置"
-                    totalTokens={usage.input_tokens + usage.output_tokens}
-                  />
-                  <UsageGroupTable
-                    title="BY_SESSION"
-                    note="消耗最高的会话（Top 10）"
-                    rows={usage.by_session}
-                    keyHeader="会话"
-                    totalTokens={usage.input_tokens + usage.output_tokens}
-                  />
-                </div>
+                <UsageGroupCard title="按模型" note="按模型名分解的消耗" rows={usage.by_model}
+                  keyHeader="模型" totalTokens={usage.input_tokens + usage.output_tokens} />
+                <UsageGroupCard title="按供应商" note="按供应商配置分解的消耗" rows={usage.by_provider}
+                  keyHeader="供应商配置" totalTokens={usage.input_tokens + usage.output_tokens} />
+                <UsageGroupCard title="按会话" note="消耗最高的会话（Top 10）" rows={usage.by_session}
+                  keyHeader="会话" totalTokens={usage.input_tokens + usage.output_tokens} />
               </>
             ) : (
               <p className="empty-note">加载用量数据…</p>
@@ -591,15 +628,17 @@ export default function UserSettingsPage() {
 
         {tab === "account" && profile && (
           <>
-            <section className="superadmin-stats">
-              <article><span>ACCOUNT</span><b className="ellip">{profile.username}</b><i /></article>
-              <article><span>ROLE</span><b style={{ fontSize: 17 }}>{profile.role}</b><i /></article>
-              <article><span>CREATED</span><b style={{ fontSize: 13, lineHeight: 1.4 }}>{(profile.created_at || "--").slice(0, 10)}</b><i /></article>
-              <article className="danger"><span>LAST_LOGIN</span><b style={{ fontSize: 13, lineHeight: 1.4 }}>{profile.last_login ? profile.last_login.slice(0, 10) : "从未登录"}</b><i /></article>
-            </section>
-            <section className="superadmin-database">
-              <header><div><h2>PROFILE</h2><em>登录名与联系方式</em></div></header>
-              <form onSubmit={submitProfile} className="superadmin-form">
+            <div className="dash-stats">
+              <article className="dash-stat"><UserCog size={16} /><b className="ellip">{profile.username}</b><span>登录名</span></article>
+              <article className="dash-stat"><ShieldAlert size={16} /><b style={{ fontSize: 15 }}>{profile.role}</b><span>角色</span></article>
+              <article className="dash-stat"><CalendarDays size={16} /><b style={{ fontSize: 13 }}>{(profile.created_at || "--").slice(0, 10)}</b><span>创建时间</span></article>
+              <article className="dash-stat"><KeyRound size={16} /><b style={{ fontSize: 13 }}>{profile.last_login ? profile.last_login.slice(0, 10) : "从未登录"}</b><span>最近登录</span></article>
+            </div>
+            <section className="dash-card dash-wide">
+              <header>登录资料
+                <span className="dash-note">登录名与联系方式；用户名全局唯一</span>
+              </header>
+              <form onSubmit={submitProfile} className="dash-form">
                 <label>登录名
                   <input value={draftProfile.username} minLength={2} maxLength={32} required
                     onChange={(e) => setDraftProfile((old) => ({ ...old, username: e.target.value }))} />
@@ -612,11 +651,12 @@ export default function UserSettingsPage() {
                   {savingProfile ? "保存中…" : "保存资料"}
                 </button>
               </form>
-              <footer><span>USERNAME: UNIQUE</span><span>UID #{profile.id}</span></footer>
             </section>
-            <section className="superadmin-database">
-              <header><div><h2>PASSWORD</h2><em>修改成功后所有登录状态失效，需使用新密码重新登录</em></div></header>
-              <form onSubmit={submitPassword} className="superadmin-form">
+            <section className="dash-card dash-wide">
+              <header>修改密码
+                <span className="dash-note">修改成功后所有登录状态失效，需使用新密码重新登录</span>
+              </header>
+              <form onSubmit={submitPassword} className="dash-form">
                 <label>当前密码
                   <input type="password" value={oldPassword} required autoComplete="current-password"
                     onChange={(e) => setOldPassword(e.target.value)} />
@@ -633,7 +673,6 @@ export default function UserSettingsPage() {
                   <KeyRound size={14} />{changingPassword ? "修改中…" : "修改密码"}
                 </button>
               </form>
-              <footer><span>BCRYPT HASHED</span><span>MIN 8 CHARS · UPPER · LOWER · DIGIT</span></footer>
             </section>
           </>
         )}

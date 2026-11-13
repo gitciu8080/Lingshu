@@ -2317,87 +2317,104 @@ export function ToolingView() {
       ? packages.filter((item) => `${item.name} ${item.version} ${item.required || ""}`.toLowerCase().includes(keyword))
       : packages;
   }, [packageSearch, pythonEnvironment]);
+  const availCount = tools.filter((tool) => (tool.status || "missing") === "available").length;
+  const missingCount = tools.filter((tool) => (tool.status || "missing") === "missing").length;
+  const systemCount = systemTools.length + (pythonEnvironment?.package_count || 0);
   return (
-    <div className="page-tooling">
-          <div className="tooling-tabs" role="tablist" aria-label="工具状态分类">
-            <button className={tab === "ctf" ? "active" : ""} onClick={() => setTab("ctf")} role="tab" aria-selected={tab === "ctf"}>
-              CTF 工具 <span>{ctfTools.length}</span>
-            </button>
-            <button className={tab === "system" ? "active" : ""} onClick={() => setTab("system")} role="tab" aria-selected={tab === "system"}>
-              系统环境 <span>{systemTools.length + (pythonEnvironment?.package_count || 0)}</span>
-            </button>
-          </div>
-          <div className="tooling-summary">
-            <span className="ok">可用 {tabCounts.available || 0}</span>
-            <span className="warn">降级 {tabCounts.degraded || 0}</span>
-            <span className="bad">缺失 {tabCounts.missing || 0}</span>
-            <span>禁用 {tabCounts.disabled || 0}</span>
-          </div>
-          {error && <p className="error-note">工具状态读取失败：{error}</p>}
-          <button className="quiet-button full" onClick={() => void load(true)} disabled={loading}>
+    <>
+      <header className="page-head">
+        <div>
+          <h1>系统工具状态</h1>
+          <small>SYSTEM TOOLING / 攻防工具目录与运行环境健康</small>
+        </div>
+        <div className="page-head-extra">
+          <button className="quiet-button" onClick={() => void load(true)} disabled={loading}>
             <RefreshCw size={13} className={loading ? "spin" : ""} />
-            {loading ? "正在重新探测…" : "重新探测工具"}
+            {loading ? "探测中…" : "重新探测工具"}
           </button>
-          <div className="tooling-list">
-            {tab === "system" && pythonEnvironment && (
-              <section className="python-environment">
-                <header>
-                  <div>
-                    <h3>AGENTSCOPE PYTHON 扩展库</h3>
-                    <small>{pythonEnvironment.interpreter} · 已安装 {pythonEnvironment.package_count} · requirements {pythonEnvironment.requirements_count}</small>
-                  </div>
-                  <span>{visiblePackages.length} / {pythonEnvironment.packages.length}</span>
-                </header>
-                <div className="python-package-summary">
-                  <span className="ok">匹配 {pythonEnvironment.counts.matched || 0}</span>
-                  <span className="warn">环境额外 {pythonEnvironment.counts.untracked || 0}</span>
-                  <span className="bad">缺失 {(pythonEnvironment.counts.missing || 0) + (pythonEnvironment.counts.version_mismatch || 0)}</span>
-                </div>
-                <label className="python-package-search">
-                  <Search size={13} />
-                  <input value={packageSearch} onChange={(event) => setPackageSearch(event.target.value)} placeholder="搜索扩展库、版本或 requirements…" />
-                </label>
-                <div className="python-package-list">
-                  {visiblePackages.map((item) => (
-                    <article className="python-package-row" key={`${item.name}-${item.version || item.required}`}>
-                      <div>
-                        <b>{item.name}</b>
-                        <small>{item.version || "未安装"}{item.required ? ` · ${item.required}` : ""}</small>
-                      </div>
-                      <em className={item.status}>{PYTHON_PACKAGE_STATUS_LABELS[item.status] || item.status}</em>
-                    </article>
-                  ))}
-                  {!visiblePackages.length && <p className="empty-note">没有匹配的 Python 扩展库。</p>}
-                </div>
-              </section>
-            )}
-            {grouped.map(([category, items]) => (
-              <section key={category}>
-                <h3>{category.toUpperCase()}</h3>
-                {items.map((tool) => {
-                  const state = tool.status || "missing";
-                  return (
-                    <article className="tooling-row" key={tool.id}>
-                      <span className={`tooling-dot ${state}`} />
-                      <div>
-                        <header>
-                          <b>{tool.id}</b>
-                          {tool.kind?.startsWith("mcp_") && <span className="tooling-kind">MCP · {tool.kind.replace("mcp_", "")}</span>}
-                          <em className={state}>{TOOL_STATUS_LABELS[state] || state}</em>
-                        </header>
-                        <small>{tool.command || "未登记命令"}{tool.version ? ` · ${tool.version}` : ""}</small>
-                        <p>{tool.error || tool.description || "无附加说明"}</p>
-                      </div>
-                    </article>
-                  );
-                })}
-              </section>
-            ))}
-            {!loading && !visibleTools.length && tab === "ctf" && <p className="empty-note">暂无 CTF 工具目录数据</p>}
-            {!loading && !visibleTools.length && tab === "system" && !pythonEnvironment && <p className="empty-note">暂无系统环境数据</p>}
+        </div>
+      </header>
+      <div className="dash-stats">
+        <article className="dash-stat"><Wrench size={16} /><b>{ctfTools.length}</b><span>CTF 工具</span></article>
+        <article className="dash-stat"><PackageOpen size={16} /><b>{systemCount}</b><span>系统组件</span></article>
+        <article className="dash-stat"><CheckCircle2 size={16} /><b>{availCount}</b><span>可用</span></article>
+        <article className="dash-stat"><ShieldAlert size={16} /><b className={missingCount ? "stat-bad" : ""}>{missingCount}</b><span>缺失</span></article>
+      </div>
+      <nav className="asset-tabs">
+        <button className={tab === "ctf" ? "active" : ""} onClick={() => setTab("ctf")}>
+          CTF 工具 · {ctfTools.length}
+        </button>
+        <button className={tab === "system" ? "active" : ""} onClick={() => setTab("system")}>
+          系统环境 · {systemCount}
+        </button>
+      </nav>
+      {error && <p className="error-note">工具状态读取失败：{error}</p>}
+      {tab === "system" && pythonEnvironment && (
+        <section className="dash-card dash-wide">
+          <header>AgentScope Python 扩展库
+            <span className="dash-note">{pythonEnvironment.interpreter} · requirements {pythonEnvironment.requirements_count}</span>
+            <span className="card-actions tooling-chips">
+              <span className="ok">匹配 {pythonEnvironment.counts.matched || 0}</span>
+              <span className="warn">额外 {pythonEnvironment.counts.untracked || 0}</span>
+              <span className="bad">缺失 {(pythonEnvironment.counts.missing || 0) + (pythonEnvironment.counts.version_mismatch || 0)}</span>
+            </span>
+          </header>
+          <div className="db-toolbar">
+            <label className="python-package-search">
+              <Search size={13} />
+              <input value={packageSearch} onChange={(event) => setPackageSearch(event.target.value)} placeholder="搜索扩展库、版本或 requirements…" />
+            </label>
           </div>
-
-    </div>
+          <div className="dash-scroll">
+            <table className="dash-table plain">
+              <thead><tr><th>扩展库</th><th>已装版本</th><th>requirements</th><th>状态</th></tr></thead>
+              <tbody>
+                {visiblePackages.map((item) => (
+                  <tr key={`${item.name}-${item.version || item.required}`}>
+                    <td><b className="mono-name">{item.name}</b></td>
+                    <td><code>{item.version || "未安装"}</code></td>
+                    <td>{item.required || "—"}</td>
+                    <td><em className={`state-chip ${item.status}`}>{PYTHON_PACKAGE_STATUS_LABELS[item.status] || item.status}</em></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!visiblePackages.length && <p className="empty-note">没有匹配的 Python 扩展库。</p>}
+          </div>
+        </section>
+      )}
+      {grouped.map(([category, items]) => (
+        <section className="dash-card dash-wide" key={category}>
+          <header>{category.toUpperCase()}
+            <span className="dash-note">{SYSTEM_TOOL_CATEGORIES.has(category) ? "运行时与 MCP 组件" : "攻防能力工具"}</span>
+            <span className="card-actions db-count">{items.length} 项</span>
+          </header>
+          <table className="dash-table plain">
+            <thead><tr><th>工具</th><th>状态</th><th>命令 / 版本</th><th>说明</th></tr></thead>
+            <tbody>
+              {items.map((tool) => {
+                const state = tool.status || "missing";
+                return (
+                  <tr key={tool.id}>
+                    <td>
+                      <div className="cell-main">
+                        <b>{tool.id}</b>
+                        {tool.kind?.startsWith("mcp_") && <small>MCP · {tool.kind.replace("mcp_", "")}</small>}
+                      </div>
+                    </td>
+                    <td><em className={`state-chip ${state}`}>{TOOL_STATUS_LABELS[state] || state}</em></td>
+                    <td><code>{tool.command || "未登记命令"}{tool.version ? ` · ${tool.version}` : ""}</code></td>
+                    <td className="tool-desc">{tool.error || tool.description || "无附加说明"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </section>
+      ))}
+      {!loading && tab === "ctf" && !ctfTools.length && <p className="empty-note">暂无 CTF 工具目录数据，点击「重新探测工具」刷新。</p>}
+      {!loading && tab === "system" && !systemTools.length && !pythonEnvironment && <p className="empty-note">暂无系统环境数据。</p>}
+    </>
   );
 }
 
@@ -2406,7 +2423,9 @@ export function KnowledgeView() {
     [query, setQuery] = useState(""),
     [results, setResults] = useState<
       { score: number; source: string; snippet: string }[]
-    >([]);
+    >([]),
+    [searching, setSearching] = useState(false),
+    [syncing, setSyncing] = useState(false);
   const load = () =>
     api
       .knowledgeStatus()
@@ -2415,63 +2434,87 @@ export function KnowledgeView() {
   useEffect(() => {
     void load();
   }, []);
+  const online = status.available === true;
+  const docs = Number(status.documents ?? 0);
+  const search = async () => {
+    if (!query.trim() || searching) return;
+    setSearching(true);
+    try {
+      setResults((await api.knowledgeSearch(query)).results);
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setSearching(false);
+    }
+  };
+  const sync = async () => {
+    setSyncing(true);
+    try {
+      setStatus(await api.reindex());
+      toast.success("知识库索引已同步");
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
   return (
-    <div className="page-knowledge">
-          <div className="rag-health">
-            <span className={status.available === true ? "ok" : "off"} />
-            <div>
-              <b>{status.available === true ? "索引在线" : "索引不可用"}</b>
-              <small>.RAG · {String(status.documents ?? 0)} 个文档</small>
-            </div>
-          </div>
-          {Boolean(status.error) && (
-            <p className="error-note">{String(status.error)}</p>
-          )}
+    <>
+      <header className="page-head">
+        <div>
+          <h1>本地知识库</h1>
+          <small>LOCAL KNOWLEDGE BASE / .RAG 离线语料检索与索引</small>
+        </div>
+        <div className="page-head-extra">
+          <button className="quiet-button" onClick={() => void sync()} disabled={syncing}>
+            {syncing ? "同步中…" : "同步 .RAG 文档"}
+          </button>
+        </div>
+      </header>
+      <div className="dash-stats">
+        <article className="dash-stat"><CircleDot size={16} /><b className={online ? "stat-ok" : "stat-bad"}>{online ? "在线" : "离线"}</b><span>索引状态</span></article>
+        <article className="dash-stat"><Database size={16} /><b>{docs}</b><span>文档总数</span></article>
+        <article className="dash-stat"><Search size={16} /><b>{results.length}</b><span>本次检索命中</span></article>
+        <article className="dash-stat"><ShieldAlert size={16} /><b className={status.error ? "stat-bad" : ""}>{status.error ? 1 : 0}</b><span>错误</span></article>
+      </div>
+      {Boolean(status.error) && <p className="error-note">{String(status.error)}</p>}
+      <section className="dash-card dash-wide">
+        <header>语义检索
+          <span className="dash-note">检索 .RAG 中的 Writeup 与技术线索</span>
+          <span className="card-actions db-count">{results.length} 条结果</span>
+        </header>
+        <div className="db-toolbar">
           <div className="knowledge-search">
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="检索 Writeup 或技术线索"
+              onKeyDown={(e) => { if (e.key === "Enter") void search(); }}
+              placeholder="检索 Writeup 或技术线索…"
             />
-            <button
-              disabled={!query.trim()}
-              onClick={async () => {
-                try {
-                  setResults((await api.knowledgeSearch(query)).results);
-                } catch (err) {
-                  toast.error(String(err));
-                }
-              }}
-            >
-              <Search size={17} />
+            <button className="quiet-button" disabled={!query.trim() || searching} onClick={() => void search()}>
+              <Search size={14} />
+              {searching ? "检索中…" : "检索"}
             </button>
           </div>
-          <button
-            className="quiet-button full"
-            onClick={async () => {
-              try {
-                setStatus(await api.reindex());
-                toast.success("知识库索引已同步");
-              } catch (err) {
-                toast.error(String(err));
-              }
-            }}
-          >
-            同步 .RAG 文档
-          </button>
-          <div className="hits">
-            {results.map((r, i) => (
-              <article key={i}>
-                <header>
-                  <b>{r.source}</b>
-                  <span>{r.score.toFixed(3)}</span>
-                </header>
-                <p>{r.snippet}</p>
-              </article>
-            ))}
-          </div>
-
-    </div>
+        </div>
+        {results.length ? (
+          <table className="dash-table plain">
+            <thead><tr><th>来源</th><th>得分</th><th>片段</th></tr></thead>
+            <tbody>
+              {results.map((r, i) => (
+                <tr key={i}>
+                  <td className="hit-source">{r.source}</td>
+                  <td><code>{r.score.toFixed(3)}</code></td>
+                  <td className="hit-snippet">{r.snippet}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="empty-note">输入关键词后回车或点击检索；结果按语义相关度排序。</p>
+        )}
+      </section>
+    </>
   );
 }
 
