@@ -350,7 +350,7 @@ def create_orchestrator_agent(
             raise asyncio.CancelledError()
         return None
 
-    async def _recon_core(
+    async def _recon_impl(
         focus: str = "",
         hypothesis_id: str = "",
         route: str = "auto",
@@ -537,14 +537,14 @@ def create_orchestrator_agent(
     # 专家上下文刚被重置的标记：下次派遣附带全量任务档案（补齐专家记忆）。
     attack_context_reset = False
 
-    async def dispatch_attack(
+    async def dispatch_attack_impl(
         target_info: str,
         objective: str = "漏洞分析",
         service: str = "",
         cve: str = "",
         hypothesis_id: str = "",
     ) -> str:
-        """派遣 Attack 分析或验证当前授权目标。
+        """派遣 Attack 分析或验证当前授权目标。（内部执行体，由 dispatch_attack 兜底包装）
 
         Args:
             target_info: 本轮新增的关键证据（服务/版本/端口/响应片段）。
@@ -849,7 +849,7 @@ def create_orchestrator_agent(
         verify_block = extract_verify_block(report)
         if verify_block is not None and evidence.verification is None:
             evidence.verification = verify_block
-            mission.record("Orchestrator", "finding_poc_registered", {
+            mission.record("Orchestrator", "finding_poc_registered", **{
                 "evidence_id": evidence.id,
                 "expected_fingerprint": verify_block["expected_fingerprint"],
             })
@@ -894,7 +894,73 @@ def create_orchestrator_agent(
         )
         return f"[Attack 报告]\n{_bounded_report(report)}{category_note}"
 
-    async def _reverse_core(
+    def _converge_running_attempt(action_type: str, exc: Exception) -> None:
+        """兜底收敛：把该动作类型最新的 running attempt 标记为失败。
+
+        未预期异常若逃出执行体，attempt 会永远停留 running 态，后续同签名
+        动作将被 Action Dedup 的 already_running 阻断（498e11b4 复盘）。
+        """
+        for rec in reversed(mission.attempts):
+            if rec.action_type == action_type and rec.status == "running":
+                mission.finish_attempt(rec, "failure", f"内部错误：{exc}")
+                break
+        store.save(mission)
+
+    async def _recon_core(focus: str, hypothesis_id: str, route: str) -> str:
+        """_recon_impl 的兜底包装：未预期异常收敛 attempt 并返回可读错误。"""
+        try:
+            return await _recon_impl(
+                focus=focus, hypothesis_id=hypothesis_id, route=route,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 未预期异常不得让 attempt 卡 running 态
+            mission.record("Orchestrator", "recon_internal_error", error=str(exc)[:300])
+            _converge_running_attempt("recon", exc)
+            return f"[Recon 内部错误] {exc}。attempt 已收敛，请修正参数后重试或改用其他路径。"
+
+    async def dispatch_attack(
+        target_info: str,
+        objective: str = "漏洞分析",
+        service: str = "",
+        cve: str = "",
+        hypothesis_id: str = "",
+    ) -> str:
+        """派遣 Attack 分析或验证当前授权目标。（dispatch_attack_impl 的兜底包装）
+
+        Args:
+            target_info: 本轮新增的关键证据（服务/版本/端口/响应片段）。
+                只需填写自上次 Attack 派遣以来新增或变化的部分，禁止重复
+                粘贴历史证据——历史 Facts 会由系统自动拼接给专家。
+            objective: 本轮目标，如漏洞分析、漏洞验证、获取初始访问或寻找 Flag。
+            service: 侦察已确认的服务名（如 "Apache 2.4.49"），供长期记忆登记；未知留空。
+            cve: 已确认的 CVE 编号（如 "CVE-2021-41773"），未确认不得填写。
+            hypothesis_id: 本动作要验证的结构化假设 ID。
+        """
+        try:
+            return await dispatch_attack_impl(
+                target_info=target_info, objective=objective, service=service,
+                cve=cve, hypothesis_id=hypothesis_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 未预期异常不得让 attempt 卡 running 态
+            mission.record("Orchestrator", "attack_internal_error", error=str(exc)[:300])
+            _converge_running_attempt("attack", exc)
+            return f"[Attack 内部错误] {exc}。attempt 已收敛，请修正参数后重试或改用其他路径。"
+
+    async def _reverse_core(binary_path: str, objective: str, hypothesis_id: str) -> str:
+        """_reverse_impl 的兜底包装：未预期异常收敛 attempt 并返回可读错误。"""
+        try:
+            return await _reverse_impl(binary_path, objective, hypothesis_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 未预期异常不得让 attempt 卡 running 态
+            mission.record("Orchestrator", "reverse_internal_error", error=str(exc)[:300])
+            _converge_running_attempt("reverse", exc)
+            return f"[Reserve 内部错误] {exc}。attempt 已收敛，请修正参数后重试或改用其他路径。"
+
+    async def _reverse_impl(
         binary_path: str,
         objective: str = "二进制逆向分析",
         hypothesis_id: str = "",
@@ -1616,14 +1682,14 @@ def create_orchestrator_agent(
             )[:400]
             if passed:
                 stats["verified"] += 1
-                mission.record("Orchestrator", "finding_verification_passed", {
+                mission.record("Orchestrator", "finding_verification_passed", **{
                     "evidence_id": evidence.id,
                     "expected_fingerprint": verification.get("expected_fingerprint"),
                 })
             else:
                 stats["failed"] += 1
                 evidence.confidence = min(evidence.confidence, 0.5)
-                mission.record("Orchestrator", "finding_verification_failed", {
+                mission.record("Orchestrator", "finding_verification_failed", **{
                     "evidence_id": evidence.id,
                     "reason": outcome.get("error") or (
                         "timeout" if outcome.get("timed_out")

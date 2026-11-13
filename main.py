@@ -3514,7 +3514,7 @@ async def run_mission(
                     if _changed:
                         budget_downgraded = True
                         _total = get_session_token_total(session_id or mission_id)
-                        mission.record("system", "thinking_intensity_downgraded", {
+                        mission.record("system", "thinking_intensity_downgraded", **{
                             "budget": token_soft_budget,
                             "total_tokens": _total,
                             "changes": _changed,
