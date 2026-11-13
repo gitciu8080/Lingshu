@@ -639,8 +639,18 @@ export function ReportsView({ sessions, activeId, onSelect }: {
               <header>任务产物 <span>{artifacts.length}</span></header>
               <div className="artifact-records">
                 {artifacts.length ? artifacts.slice().reverse().map((item) => (
-                  <button key={item.path} className="artifact-row" onClick={() => {
-                    api.artifactFile(activeId, item.path);
+                  <button key={item.path} className="artifact-row" onClick={async () => {
+                    try {
+                      setNotice("下载中…");
+                      const blob = await api.artifactFile(activeId, item.path);
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement("a");
+                      link.href = url;
+                      link.download = item.path.split("/").pop() || "artifact";
+                      link.click();
+                      URL.revokeObjectURL(url);
+                      setNotice("已下载");
+                    } catch (err) { setNotice(String(err)); }
                   }} title={`下载 ${item.path}`}>
                     <b>{item.path.split("/").pop()}</b>
                     <small>{item.path}</small>

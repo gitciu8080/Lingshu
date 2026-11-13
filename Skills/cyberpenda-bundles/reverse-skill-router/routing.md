@@ -163,7 +163,7 @@ Route tasks to the most appropriate skill module by target type, user intent, an
 | "pwn / stack overflow / ROP / ret2libc" | `reverse-engineering/patterns-ctf*.md` + pwntools |
 | "Agent not working / AI lazy / skip steps" | `llm-security/references/agent-obedience-engineering.md` |
 | "MSF stuck / orphan process / MSF protocol" | `pentest-tools/references/msf-protocol.md` |
-| "anonymize / placeholder / writeup desensitize" | `field-journal/anonymization.md` |
+| "anonymize / placeholder / writeup desensitize" | `docs-generator/` — 报告脱敏约定 |
 | "Hydra / online brute force" | `pentest-tools/SKILL.md` — online password attack |
 | "Metasploit / msfconsole / exploit" | `pentest-tools/SKILL.md` — exploitation framework |
 | "Wireshark / packet analysis / PCAP" | `digital-forensics/` or `protocol-reverse/` |

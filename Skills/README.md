@@ -19,11 +19,12 @@
   crypto→ctf-crypto、forensics→ctf-forensics、malware→ctf-malware、misc→ctf-misc、
   osint→ctf-osint、ai-ml→ctf-ai-ml、writeup→ctf-writeup
 - **cyberpenda（按题型附加）**：web→[api-security, pentest-tools]、pwn→[pwn-chain]、
-  reverse→[reverse-skill-router, ~~reverse-engineering~~]（2026-10-29 移除，与 ctf-reverse
-  逐字级重复）、crypto/misc→[ctf-sandbox-orchestrator]、forensics→[digital-forensics]、
-  malware→[malware-analysis]、osint→[pentest-tools]、ai-ml→[llm-security]；
+  reverse→[reverse-skill-router, reverse-engineering]、crypto/misc→[ctf-sandbox-orchestrator]、
+  forensics→[digital-forensics]、malware→[malware-analysis]、osint→[pentest-tools]、
+  ai-ml→[llm-security]；
   attack-chain 无条件附加
 - mlps-assessment（等保测评方法论，挂载于 mlps 分类）——2026-11-13 新增
+- ir 组合（应急响应方法论，挂载于 ir 分类）——2026-11-13 新增
 - **未挂载的 bundle（约 110 个）**：完整快照保留备用。其中 vulnerabilities-\*（22 个
   pentest 方法论）、tooling-\*（9 个单工具速查）、competition-\*（40 个，被
   ctf-sandbox-orchestrator 文档引用）为主题互补资料，需要时在映射表加一行即可挂载。
@@ -40,6 +41,12 @@
 - **移出**：agentscope-tutorial → docs/（非安全技能）
 - **触发词消歧**：docs-generator 移除 "writeup" 触发词（归 ctf-writeup）；
   diagram-generator 标注 Mermaid 渲染交由 beautiful-mermaid
+- **2026-11-13 悬空引用修复**：清理 reverse-skill-router / reverse-engineering 内对已删除的
+  `ops/`、`field-journal/`、`RULES.md`、`CONTRIBUTING.md`、`master-route.ps1`/`case-init.ps1` 的
+  悬空引用（SKILL.md 工作流改为自包含；bootstrap 命令更正为 bootstrap-reverse.sh 实际用法）。
+  另：先前记录中"reverse-engineering 移除（与 ctf-reverse 逐字级重复）"有误——该 bundle 从未
+  移除且并非逐字重复（共享文件内容均有差异，且独有 dsl-vm-reverse/kernel-driver/go-reverse/
+  elf-analysis 等内容），实际保留并继续挂载
 
 ## 已知主题重叠（保留理由）
 

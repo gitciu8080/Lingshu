@@ -1,18 +1,15 @@
 # reverse-skill PRIMARY 快路径
 
-> 与 `scripts/master-route.ps1` 保持一致。
-
 ## 执行契约
 
 ```text
 1. 先路由后动手
 2. 输出 PRIMARY 路径 + 一句话依据
-3. case-init / scope.md（ops/scope-contract）— auth 未 granted 禁止对目标 ACT
-4. 指定 lead + specialist 角色（ops/role-map）
-5. 立即打开 PRIMARY 的 SKILL.md → ACTION REQUIRED
-6. 工具路径只认 tool-index；缺则 bootstrap（仅 manifest 能力）
-7. 过程追加 timeline / workitems；结论走 Evidence→Finding→Path
-8. 未命中 → 读 routing.md 全表或提议新 skill
+3. 授权范围（scope.md）未确认 — 禁止对目标 ACT
+4. 立即打开 PRIMARY 的 SKILL.md → ACTION REQUIRED
+5. 工具路径只认 tool-index；缺则 bootstrap（仅 manifest 能力）
+6. 过程记录时间线；结论走 Evidence→Finding→Path
+7. 未命中 → 读 routing.md 全表或提议新 skill
 ```
 
 ```powershell
@@ -103,7 +100,7 @@ powershell -File skills\scripts\append-evidence.ps1 -CaseRoot work\my-case -Id E
 ## 读序
 
 ```text
-RULES.md → MASTER-ROUTING.md → PRIMARY SKILL.md
-  → (可选) routing.md 三轴 / field-journal
+MASTER-ROUTING.md → PRIMARY SKILL.md
+  → (可选) routing.md 三轴
   → tool-index.md → bootstrap → ACT
 ```

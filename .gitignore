@@ -24,7 +24,9 @@ webui/node_modules/
 .agents
 .vscode
 reasonix.toml
-workbench_nss*
+# 遗留本地脚本不入库；nssctf_agent 为模块化重写版，正常入库
+workbench_nss.py
+workbench_nss_qwen.py
 reasonix.toml
 */__MACOSX/
 data/*.db
