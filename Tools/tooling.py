@@ -482,6 +482,27 @@ def _extract_last_substantive_assistant_text(agent: Any) -> str:
     return ""
 
 
+def reset_expert_context(agent: Agent) -> bool:
+    """清空专家 Agent 的压缩摘要与对话上下文（自愈用）。
+
+    专家按"每次派遣独立简报"设计（target_info + 差量 Facts 显式传入），
+    上下文重置不丢失任务知识——全部事实在 MissionState 中持久保存。
+    直接写 state.summary/state.context 与框架压缩实现使用相同的字段赋值。
+    """
+    try:
+        state = getattr(agent, "state", None)
+    except Exception:  # noqa: BLE001 - 只读型/特殊 Agent 不强制重置
+        return False
+    if state is None:
+        return False
+    try:
+        state.summary = ""
+        state.context = []
+        return True
+    except Exception:  # noqa: BLE001 - 只读型/特殊 Agent 不强制重置
+        return False
+
+
 async def run_expert_reply_with_continuation(
     agent: Agent,
     inputs: Msg | list[Msg] | None = None,

@@ -38,9 +38,21 @@ from Tools.tooling import (
     AgentMaxIterationsError,
     StrictJSONToolkit,
     AllowedFunctionTool,
+    reset_expert_context,
     run_interruptible_agent_reply,
     run_expert_reply_with_continuation,
 )
+# 框架压缩摘要的签名字段（默认 SummarySchema + 本项目 SUMMARY_SCHEMA）。
+# dispatch/派遣路径捕获到这些字段的 KeyError 时，说明是"上下文压缩结构化
+# 摘要缺字段"而非专家响应协议问题——重置专家上下文自愈而非循环重试。
+COMPRESSION_SUMMARY_FIELDS = frozenset({
+    "task_overview", "current_state", "important_discoveries",
+    "next_steps", "context_to_preserve",
+    "authorized_scope", "approval_status", "plan_items",
+    "evidence_paths", "failed_fingerprints", "flag_submission",
+    "next_action",
+})
+
 from agent.experts import ORCHESTRATOR_EXPERT
 from agent.categorize import (
     CategoryDecision,
@@ -522,6 +534,8 @@ def create_orchestrator_agent(
     # P2 差量注入游标：记录上次 Attack 派遣时的 facts 水位，专家 UserMsg
     # 只自动拼接新增 Facts，避免每次重灌全量证据推高专家压缩频率。
     attack_fact_mark = 0
+    # 专家上下文刚被重置的标记：下次派遣附带全量任务档案（补齐专家记忆）。
+    attack_context_reset = False
 
     async def dispatch_attack(
         target_info: str,
@@ -542,6 +556,7 @@ def create_orchestrator_agent(
             hypothesis_id: 本动作要验证的结构化假设 ID。
         """
         nonlocal attack_fact_mark
+        nonlocal attack_context_reset
         msg = _check_steering()
         if msg is not None:
             return msg
@@ -688,17 +703,31 @@ def create_orchestrator_agent(
             if attack_knowledge else ""
         )
         # 差量证据：自上次 Attack 派遣以来的新增 Facts（有界，最近 5 条）。
-        delta_facts = mission.facts[attack_fact_mark:]
+        # 专家上下文刚被重置时改附全量档案（最近 12 条），避免专家失忆。
+        context_was_reset = attack_context_reset
+        attack_context_reset = False
+        delta_facts = (
+            mission.facts[-12:] if context_was_reset
+            else mission.facts[attack_fact_mark:]
+        )
         attack_fact_mark = len(mission.facts)
         delta_section = ""
         if delta_facts:
+            fact_limit = 600 if context_was_reset else 400
+            fact_cap = 12 if context_was_reset else 5
+            archive_note = (
+                "任务档案（专家上下文刚重置，以下为全部关键事实）"
+                if context_was_reset else
+                "自上次 Attack 派遣以来的新增 Facts（最近 5 条，完整历史"
+                "已在你此前的会话上下文中）"
+            )
+            shown = delta_facts[-fact_cap:]
             delta_lines = "\n".join(
-                f"- {str(getattr(fact, 'content', fact))[:400]}"
-                for fact in delta_facts[-5:]
+                f"- {str(getattr(fact, 'content', fact))[:fact_limit]}"
+                for fact in shown
             )
             delta_section = (
-                "\n\n自上次 Attack 派遣以来的新增 Facts（最近 5 条，完整历史"
-                "已在你此前的会话上下文中）：\n" + delta_lines
+                f"\n\n{archive_note}）：\n" + delta_lines
             )
         asset_note = ""
         if mission.assets:
@@ -742,6 +771,27 @@ def create_orchestrator_agent(
                 f"请基于已有证据调整 objective 或补充侦察，避免重复调度。"
             )
         except KeyError as exc:
+            field = str(exc).strip().strip("'")
+            if field in COMPRESSION_SUMMARY_FIELDS:
+                # 上下文压缩的结构化摘要缺字段（本地小模型常见）：清空专家
+                # 上下文自愈，下一轮派遣从干净状态+全量档案开始，避免
+                # "压缩失败→协议错误→重试更大上下文"死循环（61aebfeb 复盘）。
+                reset_ok = reset_expert_context(attack_agent)
+                attack_context_reset = True
+                mission.finish_attempt(
+                    attempt, "failure",
+                    f"专家上下文压缩失败（摘要缺字段 {field}），已重置专家上下文",
+                )
+                mission.record(
+                    "Orchestrator", "expert_context_reset",
+                    expert=attack_agent.name, missing_field=field, reset=reset_ok,
+                )
+                store.save(mission)
+                return (
+                    f"[Attack 上下文重置] 专家上下文压缩失败（摘要缺字段 {field}），"
+                    "已清空其历史上下文自愈；请用相同 objective 重新调度一次，"
+                    "系统将附带完整任务档案。不削弱当前 Hypothesis。"
+                )
             mission.finish_attempt(attempt, "failure", f"Attack 响应协议字段缺失: {exc}")
             mission.record("Orchestrator", "attack_protocol_error", missing_field=str(exc))
             store.save(mission)

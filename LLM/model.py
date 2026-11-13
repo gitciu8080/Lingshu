@@ -520,6 +520,53 @@ class GatewayChatModel(OpenAIChatModel):
         self.thinking_off_payload = dict(thinking_off_payload or {})
         super().__init__(*args, **kwargs)
 
+    async def generate_structured_output(self, messages, structured_model, **kwargs):
+        """结构化输出兜底：缺失的 required 字段回填空值。
+
+        本地小模型（llama.cpp 量化模型）做上下文压缩时常返回缺字段的结构化
+        输出；框架用 summary_template.format(**res.content) 渲染，缺字段直接
+        KeyError 并杀死触发压缩的那次回复。此处按 schema 类型回填空值，
+        保证压缩流程可完成（字段为空说明该维度模型未能总结，语义可接受）。
+        """
+        response = await super().generate_structured_output(
+            messages, structured_model, **kwargs)
+        try:
+            filled = self._backfill_structured_fields(
+                getattr(response, "content", None), structured_model)
+        except Exception:  # noqa: BLE001 - 兜底失败不阻塞原响应
+            filled = 0
+        if filled:
+            logger.warning(
+                "结构化输出缺失 %d 个 required 字段，已回填空值（模型=%s）",
+                filled, self.model_name)
+        return response
+
+    @staticmethod
+    def _backfill_structured_fields(content, structured_model) -> int:
+        """按 JSON schema 回填缺失 required 字段；返回回填数量。"""
+        if not isinstance(content, dict):
+            return 0
+        if isinstance(structured_model, dict):
+            schema = structured_model
+        elif isinstance(structured_model, type):
+            schema = structured_model.model_json_schema()
+        else:
+            return 0
+        properties = schema.get("properties") or {}
+        filled = 0
+        for name in schema.get("required") or []:
+            if name in content:
+                continue
+            prop_type = (properties.get(name) or {}).get("type")
+            if prop_type == "array":
+                content[name] = []
+            elif prop_type == "object":
+                content[name] = {}
+            else:
+                content[name] = ""
+            filled += 1
+        return filled
+
     def _format_tools(self, tools, tool_choice):
         fmt_tools, fmt_tool_choice = super()._format_tools(tools, tool_choice)
         if fmt_tools:

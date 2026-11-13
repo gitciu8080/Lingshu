@@ -80,6 +80,23 @@ SUMMARY_SCHEMA: dict = {
 }
 
 
+# 压缩摘要模板：必须与 SUMMARY_SCHEMA 的 required 字段一一对应。
+# 框架用 summary_template.format(**res.content) 渲染压缩结果——模板引用了
+# schema 中不存在的字段（如默认模板的 {task_overview}）会在每次压缩时
+# 抛 KeyError 并杀死专家回复（61aebfeb 复盘）。
+SUMMARY_TEMPLATE: str = (
+    "<system-info>Here is a summary of your previous work\n"
+    "# Authorized Scope\n{authorized_scope}\n\n"
+    "# Approval Status\n{approval_status}\n\n"
+    "# Plan Items\n{plan_items}\n\n"
+    "# Evidence Paths\n{evidence_paths}\n\n"
+    "# Failed Fingerprints\n{failed_fingerprints}\n\n"
+    "# Flag Submission\n{flag_submission}\n\n"
+    "# Next Action\n{next_action}"
+    "</system-info>"
+)
+
+
 def build_agent_context_config(role: str = "") -> ContextConfig:
     """返回角色级 ContextConfig；无 role 时保持第一批默认契约。"""
     trigger, reserve, tool_limit = _ROLE_CONTEXT_PROFILES.get(
@@ -91,6 +108,7 @@ def build_agent_context_config(role: str = "") -> ContextConfig:
         reserve_ratio=reserve,
         tool_result_limit=tool_limit,
         summary_schema=SUMMARY_SCHEMA,
+        summary_template=SUMMARY_TEMPLATE,
     )
 
 
