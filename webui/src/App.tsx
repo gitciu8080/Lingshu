@@ -2911,6 +2911,13 @@ function ConsoleApp() {
       if (!me.onboarded || onboardingResumeStep() > 0) setOnboarding(true);
     }).catch(() => undefined);
   }, [ready]);
+  // 引导续步：从向导跳去设置页添加模型后，回到控制台时重新展开向导
+  // （onboarded 标记未写、resume 步 > 0 说明向导尚未完成）。
+  useEffect(() => {
+    if (view !== "console" || onboarding) return;
+    if (localStorage.getItem("lingshu_onboarding_done") === "1") return;
+    if (onboardingResumeStep() > 0) setOnboarding(true);
+  }, [view, onboarding]);
   useEffect(() => {
     if (!ready) return;
     const controller = new AbortController();
@@ -3869,6 +3876,7 @@ function ConsoleApp() {
         <OnboardingWizard
           onClose={() => setOnboarding(false)}
           onStartFirstMission={() => setNewMissionSignal((n) => n + 1)}
+          onOpenSettings={() => { setOnboarding(false); setView("settings"); }}
         />
       )}
       <MissionContextDialog
