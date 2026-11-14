@@ -42,6 +42,7 @@ from Tools.tooling import (
     run_interruptible_agent_reply,
     run_expert_reply_with_continuation,
 )
+from Tools.workspace_tools import create_workspace_tools
 # 框架压缩摘要的签名字段（默认 SummarySchema + 本项目 SUMMARY_SCHEMA）。
 # dispatch/派遣路径捕获到这些字段的 KeyError 时，说明是"上下文压缩结构化
 # 摘要缺字段"而非专家响应协议问题——重置专家上下文自愈而非循环重试。
@@ -182,8 +183,11 @@ def ir_completion_gate(mission: MissionState, success: bool) -> str | None:
     )
 
 # 报告回灌指挥官上下文的字符上限：全文已按原顺序登记 Evidence/findings，
-# 超限只回灌截断版，指挥官需要细节时经 view_mission_state 按需查看。
-_REPORT_RETURN_LIMIT = 4000
+# 超限只回灌截断版，指挥官需要细节时经 view_evidence 按需检索原文。
+# 上限取 3000：orchestrator 的 tool_result_limit=2400 est-token（≈bytes/4），
+# 3000 汉字≈9000 bytes≈2250 est-token < 2400，回灌不再必然触发框架层的
+# 二次截断与 offload 文件（498e11b4 复盘：offload 路径诱惑引发裸 Read 正文）。
+_REPORT_RETURN_LIMIT = 3000
 
 
 def _bounded_report(report: str) -> str:
@@ -192,7 +196,7 @@ def _bounded_report(report: str) -> str:
         return text
     return text[:_REPORT_RETURN_LIMIT] + (
         f"\n…（报告已截断，全文 {len(text)} 字符已登记 Evidence；"
-        "需要细节时调用 view_mission_state 查看证据摘要。）"
+        "需要细节时调用 view_evidence 按关键词检索证据原文。）"
     )
 
 
@@ -223,6 +227,7 @@ def create_orchestrator_agent(
     brain_agent: Agent | None = None,
     verification_runner: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
     qa_readonly: bool = False,
+    workspace_root: str | None = None,
 ) -> Agent:
     steering = steering_state if steering_state is not None else {"pending": None, "processed": False, "queue": []}
     steering.setdefault("queue", [])
@@ -563,6 +568,13 @@ def create_orchestrator_agent(
         if mission.phase not in {
             Phase.ANALYSIS, Phase.EXPLOITATION, Phase.POST_EXPLOITATION, *_IR_PHASES,
         }:
+            if mission.phase == Phase.RECON and "recon" in bg_state["busy_roles"]:
+                return (
+                    "[拒绝] 后台侦察仍在执行（任务处于 RECON 阶段），Attack 需等待"
+                    "侦察完成。请先调用 check_experts(wait=true) 收取侦察报告——"
+                    "收取后阶段将推进到 ANALYSIS，即可正常派遣 Attack；等待期间可"
+                    "推进逆向分析、计划维护或只读查验。"
+                )
             return f"[拒绝] 当前阶段 {mission.phase.value} 不允许派遣 Attack"
         mode = mission.mission_mode or (
             "authorized_pentest"
@@ -703,9 +715,19 @@ def create_orchestrator_agent(
             if attack_knowledge else ""
         )
         # 差量证据：自上次 Attack 派遣以来的新增 Facts（有界，最近 5 条）。
-        # 专家上下文刚被重置时改附全量档案（最近 12 条），避免专家失忆。
-        context_was_reset = attack_context_reset
+        # 两种情况改附全量档案（最近 12 条），避免专家失忆：
+        # 1. 压缩自愈刚重置过专家上下文（attack_context_reset）；
+        # 2. 专家尚未物化——首次派遣或题型切换 reset() 重建（LazyAgent.loaded
+        #    在物化前为 False；重建的新 Agent 上下文为空，对全部历史事实零记忆，
+        #    而翻盘场景恰是最需要历史证据的时刻）。
+        fresh_agent = not getattr(attack_agent, "loaded", True)
+        context_was_reset = attack_context_reset or fresh_agent
         attack_context_reset = False
+        if fresh_agent and mission.facts:
+            mission.record(
+                "Orchestrator", "attack_fresh_agent_archive",
+                facts_count=len(mission.facts),
+            )
         delta_facts = (
             mission.facts[-12:] if context_was_reset
             else mission.facts[attack_fact_mark:]
@@ -1131,10 +1153,17 @@ def create_orchestrator_agent(
         bg_state["running"][handle] = {
             "role": role, "objective": str(objective)[:200], "task": task,
         }
+        if role == "recon":
+            followup = (
+                "等待期间可推进逆向分析、计划维护或只读查验；注意 Attack 受阶段"
+                "闸门限制——侦察报告经 check_experts(wait=true) 收取、阶段推进到"
+                " ANALYSIS 后才能派遣 Attack。"
+            )
+        else:
+            followup = "等待期间可继续推进互不依赖的其他工作（如侦察或攻击）。"
         return (
-            f"[后台执行中] {handle}（{role}）。你可以继续推进互不依赖的其他工作"
-            "（如 Attack 或其他角色侦察）；完成后用 check_experts(wait=true) "
-            "等待并收取报告。"
+            f"[后台执行中] {handle}（{role}）。{followup}"
+            "完成后用 check_experts(wait=true) 等待并收取报告。"
         )
 
     async def dispatch_recon(
@@ -1224,9 +1253,19 @@ def create_orchestrator_agent(
                 "（用 dispatch_recon/dispatch_reverse 的 background=true 派出）。"
             )
         parts = [f"已收取 {len(ready)} 份报告："]
+        # 多份报告一次收取时按份数动态切片：框架层 tool_result_limit=2400
+        # est-token（≈3200 汉字）约束的是整个工具结果——单份 3000 已贴近，
+        # 两份以上若不切片必然再次触发框架截断+offload（498e11b4 复盘同款）。
+        per_limit = 3000 if len(ready) == 1 else max(600, 2800 // len(ready))
         for item in ready:
+            body = str(item["report"])
+            if len(body) > per_limit:
+                body = body[:per_limit] + (
+                    "\n…（本份已切片，全文已登记 Evidence，"
+                    "用 view_evidence 按关键词检索。）"
+                )
             parts.append(
-                f"\n===== [{item['role']}] {item['objective']} =====\n{item['report']}"
+                f"\n===== [{item['role']}] {item['objective']} =====\n{body}"
             )
         if running_now:
             lines = "\n".join(f"- {h}（{t}）" for h, t in running_now.items())
@@ -1647,33 +1686,28 @@ def create_orchestrator_agent(
         只处理 confidence≥0.8 且带 replay_command 的攻击报告证据；
         无 runner（未注入，如 fast 模式）时全部标注 skipped 并返回说明。
         验证失败不阻断收尾——仅降 confidence 并在审计链留痕。
+        执行策略：按命令中的目标 host 分桶，同 host 串行（PoC 可能有状态
+        副作用），跨 host 并发（上限 3）；全局预算 120s，超预算的剩余项标
+        skipped 留审计——避免 N 条 PoC × 45s 串行卡死收尾。
         """
         stats = {"verified": 0, "failed": 0, "skipped": 0, "unverified": 0}
-        for evidence in mission.evidence_records:
-            if evidence.kind != "attack_report" or evidence.confidence < 0.8:
-                continue
-            verification = evidence.verification
-            if verification is None:
-                evidence.verification = {"status": "unverified"}
-                stats["unverified"] += 1
-                continue
-            if verification.get("status") != "unverified":
-                stats[verification.get("status", "skipped")] = stats.get(
-                    verification.get("status", "skipped"), 0) + 1
-                continue
-            command = str(verification.get("replay_command") or "")
-            if not command or verification_runner is None:
-                verification["status"] = "skipped"
-                stats["skipped"] += 1
-                continue
-            outcome = await verification_runner(command)
-            expected_lines = verification.get("expected_lines") or []
+
+        def _bucket_key(command: str) -> str:
+            match = re.search(
+                r"\d{1,3}(?:\.\d{1,3}){3}|[a-zA-Z][\w.-]+\.[a-zA-Z]{2,}",
+                command,
+            )
+            return match.group(0) if match else "default"
+
+        def _process(evidence, outcome: dict) -> None:
+            expected_lines = evidence.verification.get("expected_lines") or []
             passed = (
                 not outcome.get("error")
                 and not outcome.get("timed_out")
                 and outcome.get("returncode") == 0
                 and verify_output_matches(outcome.get("stdout") or "", expected_lines)
             )
+            verification = evidence.verification
             verification["status"] = "verified" if passed else "failed"
             verification["verified_at"] = datetime.now().isoformat(timespec="seconds")
             verification["detail"] = (
@@ -1695,6 +1729,50 @@ def create_orchestrator_agent(
                         "timeout" if outcome.get("timed_out")
                         else f"rc={outcome.get('returncode')} 或期望输出未复现"),
                 })
+
+        buckets: dict[str, list] = {}
+        for evidence in mission.evidence_records:
+            if evidence.kind != "attack_report" or evidence.confidence < 0.8:
+                continue
+            verification = evidence.verification
+            if verification is None:
+                evidence.verification = {"status": "unverified"}
+                stats["unverified"] += 1
+                continue
+            if verification.get("status") != "unverified":
+                stats[verification.get("status", "skipped")] = stats.get(
+                    verification.get("status", "skipped"), 0) + 1
+                continue
+            command = str(verification.get("replay_command") or "")
+            if not command or verification_runner is None:
+                verification["status"] = "skipped"
+                stats["skipped"] += 1
+                continue
+            buckets.setdefault(_bucket_key(command), []).append(evidence)
+
+        if buckets:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 120.0
+            sem = asyncio.Semaphore(3)
+
+            async def _run_bucket(items: list) -> None:
+                async with sem:
+                    for evidence in items:
+                        if loop.time() >= deadline:
+                            evidence.verification["status"] = "skipped"
+                            evidence.verification["detail"] = "验证全局预算耗尽（120s）"
+                            stats["skipped"] += 1
+                            mission.record(
+                                "Orchestrator", "finding_verification_skipped",
+                                evidence_id=evidence.id, reason="budget",
+                            )
+                            continue
+                        outcome = await verification_runner(
+                            str(evidence.verification.get("replay_command") or ""),
+                        )
+                        _process(evidence, outcome)
+
+            await asyncio.gather(*(_run_bucket(v) for v in buckets.values()))
         if stats["verified"] + stats["failed"] == 0:
             return ""
         total = stats["verified"] + stats["failed"]
@@ -1949,17 +2027,21 @@ def create_orchestrator_agent(
         )
 
 
-    async def view_evidence(keyword: str = "", limit: int = 12) -> str:
-        """浏览任务证据原文（复盘问答模式专用只读工具）。
+    async def view_evidence(keyword: str = "", limit: int = 4) -> str:
+        """按关键词检索任务证据原文（只读）。
+
+        工具结果被截断时（提示"已截断"），用本工具检索对应证据的完整内容。
+        返回总量有界（约 2800 字符）；带关键词时每条返回命中点前后窗口
+        而非开头，命中不了再缩小 limit 或逐条检索。
 
         Args:
             keyword: 过滤关键词（不区分大小写，匹配证据来源/类型/内容），留空返回最近证据。
-            limit: 最多返回条数（1~20，默认 12）。
+            limit: 最多返回条数（1~8，默认 4）。
         """
         try:
-            limit_n = max(1, min(int(limit), 20))
+            limit_n = max(1, min(int(limit), 8))
         except (TypeError, ValueError):
-            limit_n = 12
+            limit_n = 4
         needle = str(keyword or "").strip().lower()
         records = list(mission.evidence_records or [])
         total = len(records)
@@ -1973,16 +2055,33 @@ def create_orchestrator_agent(
         chosen = records[-limit_n:]
         if not chosen:
             return f"[证据] 无匹配证据（任务共 {total} 条证据记录）。"
-        parts = [f"任务共 {total} 条证据，当前展示 {len(chosen)} 条："]
+        # 总预算切片：框架 tool_result_limit=2400 est-token 约束整个工具
+        # 结果（≈3200 汉字），按条数均分避免必然二次截断+offload。
+        per = max(200, 2800 // limit_n)
+        parts = [f"任务共 {total} 条证据，当前展示 {len(chosen)} 条（每条 ≤{per} 字符，命中窗口优先）："]
         for r in chosen:
             verification = getattr(r, "verification", None)
             verify_note = (
                 f"；验证结果={str(verification)[:300]}" if verification else ""
             )
+            body = str(getattr(r, "summary", "") or "")
+            if len(body) > per:
+                if needle:
+                    idx = body.lower().find(needle)
+                    if idx < 0:
+                        idx = 0
+                    start = max(0, idx - per // 4)
+                    body = (
+                        ("…" if start > 0 else "")
+                        + body[start:start + per]
+                        + "…（片段，全文更长）"
+                    )
+                else:
+                    body = body[:per] + "…（截断，带关键词重查可取命中窗口）"
             parts.append(
                 f"\n===== 证据 {getattr(r, 'id', '?')}（来源 {getattr(r, 'source', '?')}"
                 f" / 类型 {getattr(r, 'kind', '?')}）=====\n"
-                f"{str(getattr(r, 'summary', '') or '')[:4000]}{verify_note}"
+                f"{body}{verify_note}"
             )
         chain = mission.attack_chain or []
         if chain:
@@ -2001,6 +2100,8 @@ def create_orchestrator_agent(
             create_query_memory_tool(),
             AllowedFunctionTool(view_evidence, is_read_only=True),
         ]
+        if workspace_root:
+            qa_tools.extend(create_workspace_tools(workspace_root))
         qa_agent = Agent(
             name=ORCHESTRATOR_EXPERT,
             system_prompt=(
@@ -2044,6 +2145,13 @@ def create_orchestrator_agent(
     tools.append(AllowedFunctionTool(dispatch_reverse, is_concurrency_safe=False))
     # P5：后台派遣收取（recon/reverse 可与其他角色并行，报告经此收取）
     tools.append(AllowedFunctionTool(check_experts, is_read_only=True))
+    # 证据原文检索：报告回灌被 _bounded_report 截断后的权威"读回"途径
+    tools.append(AllowedFunctionTool(view_evidence, is_read_only=True))
+    # 工作区只读文件工具：AgentScope 超长工具结果会截断落盘为
+    # sessions/<role>/tool_result-*.txt 并提示可读该文件——必须真的给
+    # 读取工具，否则模型会把 Read 调用写成正文文本（498e11b4 复盘）。
+    if workspace_root:
+        tools.extend(create_workspace_tools(workspace_root))
     mode = mission.mission_mode or (
         "authorized_pentest" if target_kind == "network" else "ctf"
     )
@@ -2057,8 +2165,10 @@ def create_orchestrator_agent(
         tools.append(AllowedFunctionTool(consult_brain, is_concurrency_safe=False))
     enabled_capabilities = [
         "recon", "attack", "hypothesis", "plan", "state", "approval", "memory",
-        "background_dispatch", "check_experts",
+        "background_dispatch", "check_experts", "view_evidence",
     ]
+    if workspace_root:
+        enabled_capabilities.append("workspace_files")
     if artifact_recon_agent is not None:
         enabled_capabilities.append("artifact_recon")
     if network_recon_agent is not None:

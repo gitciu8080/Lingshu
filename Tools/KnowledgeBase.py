@@ -88,13 +88,21 @@ def build_retrieval_request(
     if gap:
         parts.append(f"知识缺口：{gap}")
     query = "\n".join(parts)
+    # 缓存指纹不含逐轮变化的 focus 全文（objective 每轮必不同 → 每轮必
+    # miss，缓存形同虚设且每次都付 embedding+检索），只保留其中的 CVE
+    # 编号等技术实体——CVE 变化才是知识参考真正需要换批的信号。
+    focus_cves = [
+        c.upper() for c in re.findall(
+            r"CVE-\d{4}-\d{4,}", str(bounded_focus), re.IGNORECASE,
+        )
+    ]
     fingerprint_payload = {
         "phase": phase,
         "primary": primary,
         "secondary": secondary,
         "facts": facts,
         "hypotheses": hypotheses,
-        "focus": bounded_focus,
+        "focus_cves": focus_cves,
         "goal": str(getattr(mission, "goal", ""))[:700],
     }
     cache_key = hashlib.sha256(

@@ -1413,6 +1413,25 @@ def _read_taskbook_text(path: Path | str) -> str:
     return ""
 
 
+# 文本化工具调用检测（498e11b4 复盘）：模型把 <tool_call>/<function=…> 写进
+# 正文文本时不会被框架执行——含嵌在叙述中的完整形态（如 <function=Read>
+# 指向 offload 的 tool_result 文件）。命中后由主循环注入纠错提示重开一轮。
+_TEXTUAL_TOOL_CALL_RE = re.compile(r"<tool_call>|<function=|</function>")
+
+# 陈旧 running attempt 时效：一次专家派遣最长几十秒~几分钟，超过 30 分钟仍
+# running 的记录视为历史异常逃逸残留（498e11b4 复盘）。
+_STALE_ATTEMPT_SECONDS = 1800
+
+
+def _attempt_started_at_stale(started_at: str) -> bool:
+    """陈旧 running attempt 判定：超过 30 分钟或时间戳不可解析视为 stale。"""
+    try:
+        started = datetime.fromisoformat(str(started_at))
+    except (TypeError, ValueError):
+        return True
+    return (datetime.now() - started).total_seconds() > _STALE_ATTEMPT_SECONDS
+
+
 def _mission_mode(target_spec: TargetSpec, goal: str, taskbook_text: str = "") -> str:
     text = f"{goal}\n{taskbook_text}".lower()
     if any(token in text for token in ("nssctf", "ctf", "题目附件", "challenge")):
@@ -2293,17 +2312,32 @@ async def run_mission(
                         ),
                     }
                 if previous is not None and previous.status == "running":
-                    mission.record(
-                        "system", "action_duplicate_blocked", tool=tool_name,
-                        signature=signature, previous_action_id=previous.id,
-                        reason="already_running",
-                    )
-                    store.save(mission)
-                    _push_target_info()
-                    return {
-                        "decision": "blocked",
-                        "message": f"[Action Dedup] 相同动作 {previous.id} 仍在执行，禁止并发重放。",
-                    }
+                    # 陈旧 running attempt 自动过期（498e11b4 复盘）：旧版本异常
+                    # 逃逸会把 attempt 永久留在 running 态，导致同签名动作被
+                    # already_running 无限期阻断。判定陈旧则收敛为失败并放行
+                    # 本次执行；否则维持并发阻断。
+                    if _attempt_started_at_stale(str(previous.started_at)):
+                        mission.finish_attempt(
+                            previous, "failure",
+                            "陈旧 running attempt 自动过期（历史异常逃逸残留）",
+                        )
+                        mission.record(
+                            "system", "stale_attempt_expired",
+                            attempt_id=previous.id, tool=tool_name,
+                        )
+                        store.save(mission)
+                    else:
+                        mission.record(
+                            "system", "action_duplicate_blocked", tool=tool_name,
+                            signature=signature, previous_action_id=previous.id,
+                            reason="already_running",
+                        )
+                        store.save(mission)
+                        _push_target_info()
+                        return {
+                            "decision": "blocked",
+                            "message": f"[Action Dedup] 相同动作 {previous.id} 仍在执行，禁止并发重放。",
+                        }
 
                 matching_failures = [
                     item for item in mission.failed_paths if item.signature == signature
@@ -2378,6 +2412,15 @@ async def run_mission(
                 _push_target_info()
                 return {}
             raised = bool(payload.get("raised") or payload.get("tool_error"))
+            # F6 排障落库：工具结果正文不进 session_messages（tool_call_end 的
+            # output 恒为空串），补一条尾部摘要事件供排障检索（成败都记）。
+            if result.strip():
+                event_callback(
+                    "tool_result_summary",
+                    tool=action.tool,
+                    action_id=action.id,
+                    tail=result[-300:],
+                )
             failure_type, reason, resolution = classify_failure(result, raised=raised)
             if failure_type is None and result.strip():
                 mission.finish_action(
@@ -3415,6 +3458,7 @@ async def run_mission(
                     lambda command: run_verification_command(
                         command, mission.target, registry=scope_registry, timeout=45)
                 ),
+                workspace_root=str(ws_root) if use_v2_workspace else None,
         )
             main_agent = orchestrator
             main_agent_prefix = "[Orchestrator] "
@@ -3495,14 +3539,34 @@ async def run_mission(
         final_continuation_budget = 1
         # Orchestrator 自身超迭代同样先补一轮（输出决策/complete_mission）再兜底
         max_iters_continuation_budget = 1
+        # O5：nudge/终局/超迭代续跑轮的意图是"立即行动或收尾"，不是重新展开
+        # 分析——临时把该轮迭代预算收紧为 8（正常 20/30），防止一次续跑再烧
+        # 满整轮（最坏 5 次续跑 ≈ 150 迭代）。
+        _CONTINUATION_CAP = 8
+        cap_next_reply = False
         while True:
             try:
-                final_result = await run_interruptible_agent_reply(
-                    main_agent,
-                    UserMsg(name="user", content=orch_content),
-                    prefix=main_agent_prefix,
-                    on_event=event_callback,
+                _orig_iters = getattr(
+                    getattr(main_agent, "react_config", None), "max_iters", None,
                 )
+                _capped_now = (
+                    cap_next_reply
+                    and isinstance(_orig_iters, int)
+                    and _orig_iters > _CONTINUATION_CAP
+                )
+                if _capped_now:
+                    main_agent.react_config.max_iters = _CONTINUATION_CAP
+                try:
+                    final_result = await run_interruptible_agent_reply(
+                        main_agent,
+                        UserMsg(name="user", content=orch_content),
+                        prefix=main_agent_prefix,
+                        on_event=event_callback,
+                    )
+                finally:
+                    if _capped_now:
+                        main_agent.react_config.max_iters = _orig_iters
+                cap_next_reply = False
                 # Token 软预算：超限自动降思考档（一次性，软限制不硬停）
                 if (
                     token_soft_budget > 0 and not budget_downgraded
@@ -3541,8 +3605,12 @@ async def run_mission(
                     raise asyncio.CancelledError()
                 # P5：残缺工具调用/空回答熔断——模型输出未闭合 <tool_call> 标签
                 # 或整段为空时，AgentScope 会当作文本直接结束，导致任务无进展。
+                # 498e11b4 复盘追加：嵌在叙述中的完整 <tool_call>/<function=Read>
+                # 文本同样不会被执行（框架只解析原生工具调用通道），必须一并
+                # 纠错，否则伪调用文本留在上下文中跨轮污染、诱发更多文本化调用。
                 txt = final_result.get_text_content() or ""
                 stripped = txt.strip()
+                textual_tool_call = bool(_TEXTUAL_TOOL_CALL_RE.search(stripped))
                 if (
                     malformed_retry_budget > 0
                     and (
@@ -3550,14 +3618,28 @@ async def run_mission(
                         or stripped == "<tool_call>"
                         or stripped == "<tool_call></tool_call>"
                         or stripped.startswith("<tool_call>") and stripped.endswith("</tool_call>") and len(stripped) < 40
+                        or textual_tool_call
                     )
                 ):
                     malformed_retry_budget -= 1
-                    orch_content = (
-                        "你上一条回复只输出了残缺的 <tool_call> 标签，未实际调用工具。"
-                        f"请直接调用工具推进任务（{dispatch_hint}），"
-                        "或立即收尾任务。"
-                    )
+                    if textual_tool_call and stripped:
+                        orch_content = (
+                            "[系统纠错] 检测到你把工具调用写成了正文文本"
+                            "（<tool_call> / <function=…> 标签）。该格式不会被执行，"
+                            "本轮没有任何工具被调用。请改用原生工具调用通道重发：\n"
+                            f"- 任务调度：直接调用 {dispatch_hint}；\n"
+                            "- 读取被截断的工具结果文件：调用 workspace_read"
+                            "（path 填提示中给出的工作区相对路径，如 "
+                            "sessions/<角色>/tool_result-*.txt）；\n"
+                            "- 检索证据原文：调用 view_evidence。\n"
+                            "禁止再以正文文本输出任何工具调用标签。"
+                        )
+                    else:
+                        orch_content = (
+                            "你上一条回复只输出了残缺的 <tool_call> 标签，未实际调用工具。"
+                            f"请直接调用工具推进任务（{dispatch_hint}），"
+                            "或立即收尾任务。"
+                        )
                     continue
                 # Agent 正常结束时，若用户在回复末尾追加了情报，也无需等待
                 # 下一次工具调用，立即开启新一轮 Orchestrator 回复。
@@ -3591,6 +3673,7 @@ async def run_mission(
                     )
                 ):
                     stalled_nudge_budget -= 1
+                    cap_next_reply = True
                     mission.record(
                         "system",
                         "orchestrator_stalled_nudge",
@@ -3634,6 +3717,7 @@ async def run_mission(
                     )
                 ):
                     final_continuation_budget -= 1
+                    cap_next_reply = True
                     unresolved = [
                         f"{item.get('id')}({item.get('status')}): {str(item.get('content') or '')[:80]}"
                         for item in mission.plan_items
@@ -3681,6 +3765,7 @@ async def run_mission(
                         error=str(exc),
                     )
                     store.save(mission)
+                    cap_next_reply = True
                     orch_content = (
                         f"[系统] 你已达到最大推理迭代次数（{exc}），本轮补发最后一批"
                         "推理轮次。禁止重复调用工具循环；立即基于已有证据二选一：\n"

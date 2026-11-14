@@ -588,19 +588,35 @@ async def run_expert_reply_with_continuation(
         )
 
     # ── 空回复且无法恢复：补轮 ──
+    # 补轮目的只是收口输出；与超迭代补轮一致临时收紧预算为 3，防止
+    # "禁止再调用工具"被无视后再烧一整轮 ReAct（同 Agent 忙碌互斥下安全）。
+    original_max_iters = getattr(
+        getattr(agent, "react_config", None), "max_iters", None,
+    )
+    capped = False
+    if isinstance(original_max_iters, int) and original_max_iters > 3:
+        try:
+            agent.react_config.max_iters = 3
+            capped = True
+        except Exception:  # noqa: BLE001 - 只读型/特殊 Agent 不强制收紧
+            capped = False
     try:
-        result = await run_interruptible_agent_reply(
-            agent,
-            _msg(
-                f"[系统] {name} 上一轮未返回任何文本内容。禁止再调用任何工具，"
-                "立即基于已完成的分析输出最终中文报告正文；没有结论也要说明"
-                "已验证的事实和未解决的问题。"
-            ),
-            prefix,
-            on_event,
-        )
-    except AgentMaxIterationsError:
-        return ""
+        try:
+            result = await run_interruptible_agent_reply(
+                agent,
+                _msg(
+                    f"[系统] {name} 上一轮未返回任何文本内容。禁止再调用任何工具，"
+                    "立即基于已完成的分析输出最终中文报告正文；没有结论也要说明"
+                    "已验证的事实和未解决的问题。"
+                ),
+                prefix,
+                on_event,
+            )
+        except AgentMaxIterationsError:
+            return ""
+    finally:
+        if capped:
+            agent.react_config.max_iters = original_max_iters
     getter = getattr(result, "get_text_content", None)
     if callable(getter):
         try:
