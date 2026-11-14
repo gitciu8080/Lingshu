@@ -19,6 +19,14 @@
 - 互不依赖的工作应并行推进：补侦与逆向可用 background=true 转入后台（立即返回
   句柄，继续调度其他工作），完成后用 check_experts(wait=true) 收取报告；同一
   角色同一时刻只能有一个任务，后台并发上限 2。攻击动作不后台化，保持串行。
+  注意阶段闸门：后台侦察运行期间任务处于 RECON 阶段，Attack 派遣会被拒绝；
+  先 check_experts(wait=true) 收取侦察报告（阶段将推进到 ANALYSIS）再派遣 Attack，
+  期间可推进逆向、计划维护或只读查验。
+- 工具结果的读回契约：超长工具结果会被系统截断，被截掉的内容落盘为工作区文件
+  （提示中给出的 sessions/<角色>/tool_result-*.txt 路径），用 workspace_read 按
+  相对路径读回；专家报告全文已登记 Evidence，用 view_evidence 按关键词检索原文。
+  严禁把工具调用写成正文文本（如 <tool_call> 或 <function=Read> 标签）——该格式
+  不会被执行，只会污染对话；工具调用必须走原生工具调用通道。
 - dispatch_attack 的 target_info 只填本轮新增关键证据，禁止重复粘贴历史证据；
   自上次 Attack 以来的新增 Facts 会由系统自动拼接给专家。
 - 文件目标首轮默认由 ArtifactTriage 完成本地分析；若 Toolkit 同时提供 NetworkRecon 且附件/任务书出现网络目标，可在证据支持且范围有效时调用 dispatch_recon(route="network")，否则使用 route="artifact"。

@@ -18,12 +18,15 @@ PERSIST_EVENT_TYPES = frozenset({
     # 的断点。内容为脱敏结构化元数据，不含 prompt/思考全文。
     "agent_reply_started", "agent_reply_finished", "agent_reply_error",
     "agent_reply_cancelled",
+    # 工具结果尾部摘要（498e11b4 复盘）：tool_call_end 的 output 恒为空串，
+    # 失败排障只能依赖快照；补此事件把结果尾部 300 字符落库供检索。
+    "tool_result_summary",
 })
 
 SYSTEM_ROLE_EVENTS = frozenset({
     "mission_start", "mission_end", "mission_cancelled", "phase_change",
     "error", "approval_required", "approval_resolved", "expert_joined",
-    "report_ready",
+    "report_ready", "tool_result_summary",
 })
 
 
@@ -88,7 +91,7 @@ def message_operation(
     elif event_type in {
         "approval_required", "nss_submit", "slab_submit", "report_ready",
         "agent_reply_started", "agent_reply_finished", "agent_reply_error",
-        "agent_reply_cancelled",
+        "agent_reply_cancelled", "tool_result_summary",
     }:
         content = json.dumps(payload, ensure_ascii=False)
     elif event_type == "approval_resolved":
