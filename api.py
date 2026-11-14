@@ -222,6 +222,8 @@ _long_memory_path = _PROJECT_ROOT / ".LongMemory" / "agentic_memory.json"
 _upload_dir = _PROJECT_ROOT / "WorkDir" / "uploads"
 _upload_dir.mkdir(parents=True, exist_ok=True)
 _reports_dir = _PROJECT_ROOT / ".Reports"
+# PDF 按需渲染的并发锁（按 session_id 去重，防止重复渲染同一报告）
+_report_render_locks: dict[str, asyncio.Lock] = {}
 _reports_dir.mkdir(parents=True, exist_ok=True)
 _workspace_janitor_task: asyncio.Task[None] | None = None
 _background_tasks: set[asyncio.Task[Any]] = set()
@@ -2897,6 +2899,10 @@ async def _run_post_mission_qa(session_id: str, question: str, user_id: int) -> 
                 qa_readonly=True,
                 offloader=workspace,
                 state=agent_state,
+                workspace_root=(
+                    str(ws_service.workspace_dir(user_id, session_id))
+                    if workspace is not None else None
+                ),
             )
         # 流式去重：run_interruptible_agent_reply 已经把回复经 text_start/
         # delta/end 流式推送并落库；只有流式未产出任何文本时，才把最终
@@ -3132,6 +3138,8 @@ async def get_session_detail(session_id: str, current_user: dict = Depends(get_c
     session["is_live"] = session_id in _active_sessions
     _attach_model_metadata(session)
     report_path = _reports_dir / f"{session_id}.pdf"
+    # PDF 允许按需渲染（见 download_session_report）：已有预生成文件，
+    # 或 MissionState 携带 summary（现场渲染）都视为可下载。
     session["report_available"] = report_path.is_file()
     if session["report_available"]:
         session["report_url"] = f"/api/session/{session_id}/report"
@@ -3150,6 +3158,9 @@ async def get_session_detail(session_id: str, current_user: dict = Depends(get_c
                 session["markdown_url"] = (
                     f"/api/session/{session_id}/report/markdown"
                 )
+                if not session["report_available"]:
+                    session["report_available"] = True
+                    session["report_url"] = f"/api/session/{session_id}/report"
         except (json.JSONDecodeError, OSError):
             pass
     # 解析 target_info（如果存在）
@@ -3238,11 +3249,44 @@ async def download_session_report(
     session_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """下载当前用户所属会话的 Summary Agent PDF 报告。"""
+    """下载当前用户所属会话的 Summary Agent PDF 报告。
+
+    预生成文件缺失时（历史会话 / 收尾被中断），若 MissionState 携带
+    summary 则现场渲染并缓存到 .Reports，避免取消/失败任务永远 404。
+    """
     await _verify_session_owner(session_id, current_user["id"])
     report_path = _reports_dir / f"{session_id}.pdf"
     if not report_path.is_file():
-        raise HTTPException(status_code=404, detail="该会话尚未生成 PDF 报告")
+        mission_data = None
+        session_file = _sessions_dir / f"{session_id}.json"
+        if session_file.is_file():
+            try:
+                mission_data = await asyncio.to_thread(
+                    lambda: json.loads(session_file.read_text(encoding="utf-8")),
+                )
+            except (json.JSONDecodeError, OSError):
+                mission_data = None
+        summary = str((mission_data or {}).get("summary") or "").strip()
+        if not summary:
+            raise HTTPException(
+                status_code=404,
+                detail="该会话未生成报告：任务未完成收尾总结（取消或异常终止）",
+            )
+        async with _report_render_locks.setdefault(session_id, asyncio.Lock()):
+            if not report_path.is_file():  # 双检：并发点击只渲染一次
+                try:
+                    from Tools.Report import generate_mission_pdf
+
+                    await asyncio.to_thread(
+                        generate_mission_pdf,
+                        session_id, summary, mission_data, _reports_dir,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 渲染失败原样上报
+                    logger.exception("会话 %s PDF 按需渲染失败", session_id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"报告生成失败：{exc}",
+                    ) from exc
     return FileResponse(
         report_path,
         media_type="application/pdf",

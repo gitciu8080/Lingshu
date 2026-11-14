@@ -595,6 +595,7 @@ export function ReportsView({ sessions, activeId, onSelect }: {
               onClick={() => download("pdf")}>下载 PDF 报告</button>
             <button className="quiet-button" onClick={() => download("markdown")}>下载 Markdown</button>
             <button className="quiet-button" onClick={() => download("jsonl")}>下载会话 JSONL</button>
+            {!reportAvailable && <span className="mini muted">该会话无收尾总结，无可下载报告</span>}
             {notice && <span className="mini">{notice}</span>}
           </div>
       {!activeId ? <EmptyHint text="选择一个任务查看报告与证据" /> : loading ? (
