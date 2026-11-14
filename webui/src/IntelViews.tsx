@@ -2,7 +2,7 @@
    数据源：/api/dashboard 与 /api/session/{id}/intel；图表全部内联 SVG。 */
 import { useEffect, useMemo, useState } from "react";
 import { Activity, ChevronLeft, ChevronRight, Crosshair, Database, FileText, Gauge, LayoutDashboard, LogOut, Menu, Moon, Network, Radar, Search, Settings, ShieldAlert, Sparkles, Sun, Target, TrendingUp, UserCog, Wrench } from "lucide-react";
-import { api, Session } from "./api";
+import { api, auth, Session } from "./api";
 import lightLogo from "./logo2.png";
 import darkLogo from "./logored.png";
 
@@ -524,15 +524,13 @@ export function ThreatsView({ sessions, activeId, onSelect }: {
 
 /* ── 发现与报告 ── */
 
-function downloadBlob(name: string, response: Response): Promise<void> {
-  return response.blob().then((blob) => {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = name;
-    link.click();
-    URL.revokeObjectURL(url);
-  });
+function saveBlob(name: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 export function ReportsView({ sessions, activeId, onSelect }: {
@@ -556,7 +554,7 @@ export function ReportsView({ sessions, activeId, onSelect }: {
       .then((r) => setArtifacts(r.artifacts || []))
       .catch(() => setArtifacts([]));
     fetch(`/api/session/${encodeURIComponent(activeId)}`,
-      { headers: { Authorization: `Bearer ${localStorage.getItem("lingshu-token") || ""}` } })
+      { headers: { Authorization: `Bearer ${auth.get()}` } })
       .then((r) => r.json())
       .then((d) => setReportAvailable(!!d.report_available))
       .catch(() => setReportAvailable(false));
@@ -566,15 +564,15 @@ export function ReportsView({ sessions, activeId, onSelect }: {
     if (!activeId) return;
     setNotice("下载中…");
     try {
-      const response = kind === "pdf"
-        ? await fetch(`/api/session/${encodeURIComponent(activeId)}/report`,
-            { headers: { Authorization: `Bearer ${localStorage.getItem("lingshu-token") || ""}` } })
-        : await fetch(
-            `/api/session/${encodeURIComponent(activeId)}/${kind === "markdown" ? "report/markdown" : "jsonl"}`,
-            { headers: { Authorization: `Bearer ${localStorage.getItem("lingshu-token") || ""}` } });
-      if (!response.ok) throw new Error(`下载失败 (${response.status})`);
+      // 统一走 api.ts 的下载函数：token 与请求封装单一来源
+      // （此前手写 fetch 误用 "lingshu-token" 键名，读到空 token 导致 401）。
+      const blob = kind === "pdf"
+        ? await api.report(activeId)
+        : kind === "markdown"
+          ? await api.reportMarkdown(activeId)
+          : await api.jsonl(activeId);
       const names = { pdf: "report.pdf", markdown: "report.md", jsonl: "session.jsonl" };
-      await downloadBlob(`${activeId.slice(0, 8)}-${names[kind]}`, response);
+      saveBlob(`${activeId.slice(0, 8)}-${names[kind]}`, blob);
       setNotice("已下载");
     } catch (err) { setNotice(String(err)); }
   };
@@ -643,12 +641,7 @@ export function ReportsView({ sessions, activeId, onSelect }: {
                     try {
                       setNotice("下载中…");
                       const blob = await api.artifactFile(activeId, item.path);
-                      const url = URL.createObjectURL(blob);
-                      const link = document.createElement("a");
-                      link.href = url;
-                      link.download = item.path.split("/").pop() || "artifact";
-                      link.click();
-                      URL.revokeObjectURL(url);
+                      saveBlob(item.path.split("/").pop() || "artifact", blob);
                       setNotice("已下载");
                     } catch (err) { setNotice(String(err)); }
                   }} title={`下载 ${item.path}`}>
