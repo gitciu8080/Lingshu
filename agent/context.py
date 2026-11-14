@@ -45,9 +45,11 @@ SUMMARY_SCHEMA: dict = {
             "description": "人工审批闸门状态（首次进入 EXPLOITATION 前）",
         },
         "plan_items": {
-            "type": "array",
+            # O13：放宽为 object|string——小模型复刻对象数组易失败触发全量
+            # reset 自愈（代价最大）；字符串形式（如 "p1 done,p2 doing"）可接受
+            "type": ["array", "string"],
             "items": {"type": "object"},
-            "description": "作战计划清单快照（id/status/evidence）",
+            "description": "作战计划清单快照（id/status/evidence），亦可为紧凑字符串",
         },
         "evidence_paths": {
             "type": "array",
@@ -60,8 +62,18 @@ SUMMARY_SCHEMA: dict = {
             "description": "已失败动作指纹（熔断与去重依据）",
         },
         "flag_submission": {
-            "type": "object",
+            # O13：放宽——空提交场景小模型常回字符串
+            "type": ["object", "string"],
             "description": "最近一次 Flag/NSS 提交结果（correct/attempt_id）",
+        },
+        "key_runtime_state": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "压缩后必须存活的活性工具状态，每条一个：IDA database 会话 ID、"
+                "WebShell URL/shell_id、已获凭据（user:pass@host）、GDB session ID、"
+                "容器/反弹监听地址——丢失会导致压缩后重找会话/重找 shell 的整轮浪费"
+            ),
         },
         "next_action": {
             "type": "string",
@@ -75,6 +87,7 @@ SUMMARY_SCHEMA: dict = {
         "evidence_paths",
         "failed_fingerprints",
         "flag_submission",
+        "key_runtime_state",
         "next_action",
     ],
 }
@@ -92,6 +105,7 @@ SUMMARY_TEMPLATE: str = (
     "# Evidence Paths\n{evidence_paths}\n\n"
     "# Failed Fingerprints\n{failed_fingerprints}\n\n"
     "# Flag Submission\n{flag_submission}\n\n"
+    "# Key Runtime State (IDA session ids / shell urls / credentials — reuse them, do not re-discover)\n{key_runtime_state}\n\n"
     "# Next Action\n{next_action}"
     "</system-info>"
 )

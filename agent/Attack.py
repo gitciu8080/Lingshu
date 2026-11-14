@@ -296,6 +296,7 @@ async def create_attack_agent(
     command_workdir: str | Path | None = None,
     mission=None,
     store=None,
+    analysis_lock=None,
 ) -> Agent:
     """创建 Attack Agent。
 
@@ -311,6 +312,9 @@ async def create_attack_agent(
         mission: 共享任务状态（可选）。提供时 Analysis 委托研判会登记
             Evidence，Attack 失败后 Orchestrator 仍可复用研判结论。
         store: MissionStore（可选），配合 mission 使用。
+        analysis_lock: 共享 asyncio.Lock（可选）。Analysis 实例同时被
+            Reserve 消费；Agent state 无并发保护，前台 Attack 与后台
+            Reserve 同时委托时必须串行化（由 main.py 创建同一把锁传入）。
     """
     async def analysis(service_info: str) -> str:
         """请求 Analysis 专家研判真实服务证据。
@@ -319,13 +323,23 @@ async def create_attack_agent(
             service_info: Recon 得到的服务、版本和响应证据。
         """
         try:
-            text = await run_expert_reply_with_continuation(
-                analysis_agent,
-                UserMsg(name="Attack", content=service_info),
-                prefix="[Analysis] ",
-                on_event=event_callback,
-                label="Analysis",
-            )
+            if analysis_lock is not None:
+                async with analysis_lock:
+                    text = await run_expert_reply_with_continuation(
+                        analysis_agent,
+                        UserMsg(name="Attack", content=service_info),
+                        prefix="[Analysis] ",
+                        on_event=event_callback,
+                        label="Analysis",
+                    )
+            else:
+                text = await run_expert_reply_with_continuation(
+                    analysis_agent,
+                    UserMsg(name="Attack", content=service_info),
+                    prefix="[Analysis] ",
+                    on_event=event_callback,
+                    label="Analysis",
+                )
         except AgentMaxIterationsError:
             return "[Analysis] 超迭代，本轮无研判输出；请基于现有证据自行推进。"
         result = text or (

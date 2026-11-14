@@ -51,7 +51,7 @@ COMPRESSION_SUMMARY_FIELDS = frozenset({
     "next_steps", "context_to_preserve",
     "authorized_scope", "approval_status", "plan_items",
     "evidence_paths", "failed_fingerprints", "flag_submission",
-    "next_action",
+    "key_runtime_state", "next_action",
 })
 
 from agent.experts import ORCHESTRATOR_EXPERT
@@ -299,26 +299,39 @@ def create_orchestrator_agent(
             )
 
         final = result.candidate if result.accepted else previous
-        mission.category_history.append({
-            "stage": "runtime",
-            "source": source,
-            "previous": {
-                "primary": previous.primary, "secondary": previous.secondary,
-                "confidence": previous.confidence, "scores": previous.scores,
-                "evidence": previous.evidence, "stage": previous.stage,
-            },
-            "candidate": {
-                "primary": result.candidate.primary, "secondary": result.candidate.secondary,
-                "confidence": result.candidate.confidence, "scores": result.candidate.scores,
-                "evidence": result.candidate.evidence, "stage": result.candidate.stage,
-            },
-            "accepted": result.accepted,
-            "reason": result.reason,
-            "evidence_id": evidence_id,
-            "evidence_fingerprint": result.evidence_fingerprint,
-            "web_network_guard_applied": web_guard,
-            "created_at": datetime.now().isoformat(),
-        })
+        # O8 瘦身：仅接受的翻盘存完整历史；未接受时存轻量记录（保留证据
+        # 指纹供去重，不再嵌 previous/candidate 的完整 scores/evidence）。
+        if result.accepted:
+            mission.category_history.append({
+                "stage": "runtime",
+                "source": source,
+                "previous": {
+                    "primary": previous.primary, "secondary": previous.secondary,
+                    "confidence": previous.confidence, "scores": previous.scores,
+                    "evidence": previous.evidence, "stage": previous.stage,
+                },
+                "candidate": {
+                    "primary": result.candidate.primary, "secondary": result.candidate.secondary,
+                    "confidence": result.candidate.confidence, "scores": result.candidate.scores,
+                    "evidence": result.candidate.evidence, "stage": result.candidate.stage,
+                },
+                "accepted": result.accepted,
+                "reason": result.reason,
+                "evidence_id": evidence_id,
+                "evidence_fingerprint": result.evidence_fingerprint,
+                "web_network_guard_applied": web_guard,
+                "created_at": datetime.now().isoformat(),
+            })
+        else:
+            mission.category_history.append({
+                "stage": "runtime",
+                "source": source,
+                "primary": previous.primary,
+                "accepted": False,
+                "evidence_id": evidence_id,
+                "evidence_fingerprint": result.evidence_fingerprint,
+                "created_at": datetime.now().isoformat(),
+            })
         if not result.accepted:
             return ""
 

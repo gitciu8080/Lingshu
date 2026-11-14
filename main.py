@@ -2760,6 +2760,9 @@ async def run_mission(
             )
         else:
             brain = None
+        # O10：Analysis 单实例被 Attack/Reserve 双方委托，Agent state 无并发
+        # 保护——共享锁保证前台 Attack 与后台 Reserve 的研判串行化。
+        analysis_lock = asyncio.Lock()
         analysis = LazyAgent(
             ANALYSIS_EXPERT,
             lambda: create_analysis_agent(
@@ -2871,6 +2874,22 @@ async def run_mission(
                 mission.transition(Phase.ANALYSIS, "快速模式直接进入执行")
             store.save(mission)
             _push_target_info()
+        elif resume and mission.plan_items and mission.phase != Phase.PLANNING:
+            # O7：断点续跑且权威 JSON 已有计划与进度——跳过 Brain 重规划。
+            # 重跑规划有三重代价：一整轮规划 token；SubmitPlan 批量替换语义
+            # 会把已执行到一半的 plan_items 状态（completed/failed）重置回
+            # pending；收尾的阶段迁移（→RECON→ANALYSIS）会造成阶段回退。
+            # 专家名册仍需绑定（进程重启后 roster 令牌丢失）。
+            mission.record(
+                "system", "brain_planning_skipped_on_resume",
+                plan_items=len(mission.plan_items), phase=mission.phase.value,
+            )
+            store.save(mission)
+            expert_roster_token = bind_expert_roster()
+            print(
+                f"[Brain] 续跑检测：已有 {len(mission.plan_items)} 项计划"
+                f"（phase={mission.phase.value}），跳过重规划，沿用持久化计划与进度。"
+            )
         else:
             # ── 6b. 首轮 Recon/Triage 与二次分类 ──
             # 在 Attack/Reserve 创建前完成一次真实侦察，使接受后的分类能够直接
@@ -3298,6 +3317,7 @@ async def run_mission(
                 command_workdir=command_workdir,
                 mission=mission,
                 store=store,
+                analysis_lock=analysis_lock,
             )
 
         attack = LazyAgent(
@@ -3386,6 +3406,7 @@ async def run_mission(
                 command_workdir=command_workdir,
                 mission=mission,
                 store=store,
+                analysis_lock=analysis_lock,
             )
 
         reserve = LazyAgent(REVERSE_EXPERT, _load_reverse_agent)
@@ -3470,11 +3491,13 @@ async def run_mission(
         ) or "  （Brain 未登记结构化计划，可用 AddPlan 自行建立清单）"
         orch_context = ""
         if initial_context:
+            # O9：前次上下文已全文注入 Brain 规划提示词（其消化结果进了计划），
+            # Orchestrator 侧只保留指引，避免 4000 字符双重常驻注入。
             orch_context = (
-                f"\n\n## 前次任务上下文（同一目标重跑，供参考以避开失败路径）\n"
-                f"{initial_context}\n"
-                f"若前次已取得可利用通道（如已确认的 RCE/文件读取），应直接复用并精简命令，"
-                f"避免重复完整攻击链。"
+                "\n\n## 前次任务上下文\n"
+                "本任务是同一目标重跑：前次结论已由 Brain 吸收进当前计划"
+                "（避开失败路径、复用已确认通道）；若前次已取得可利用通道"
+                "（如已确认的 RCE/文件读取），应直接复用并精简命令。"
             )
             mission.record("system", "context_injected", source="rerun")
         if mission.knowledge_context.get("context"):
@@ -3514,15 +3537,19 @@ async def run_mission(
                 f"{experience_hint}{orch_context}"
             )
         else:
+            # O9 首轮注入瘦身：该消息常驻上下文、每轮模型调用重复 prefill。
+            # plan 12000→6000（尾部是专家名册，Orchestrator 不需要全文）；
+            # context_layers(8)→(4)（working 层明细可经 view_mission_state
+            # 按需读，一次工具往返换 ~20k 常驻 token）。
             orch_content = (
                 f"执行以下已授权任务。\n任务模式：{mission.mission_mode}\n目标：{mission.target}\n目标要求：{mission.goal}\n"
                 f"模式约束：{mode_policy}\n"
                 f"声明范围：{json.dumps(mission.declared_scope, ensure_ascii=False)}\n"
                 f"有效范围：{json.dumps(mission.authorized_scope, ensure_ascii=False)}\n\n"
-                f"Brain 计划摘要：\n{mission.plan[:12000]}\n\n"
+                f"Brain 计划摘要：\n{mission.plan[:6000]}\n\n"
                 f"结构化计划清单（执行中用 UpdatePlan/AddPlan/DeletePlan/ListPlan 维护）：\n{plan_items_text}\n\n"
-                f"分层决策上下文（Historical 仅含引用，需要时调用 view_mission_state）：\n"
-                f"{json.dumps(mission.context_layers(limit=8), ensure_ascii=False)}\n"
+                f"分层决策上下文（精简视图，需要完整明细时调用 view_mission_state）：\n"
+                f"{json.dumps(mission.context_layers(limit=4), ensure_ascii=False)}\n"
                 "首轮 Recon 与题型确认已经完成；只有存在明确证据缺口时才补充侦察，"
                 "否则直接基于 Facts/Evidence 推进。对待验证判断先登记 Hypothesis 并在"
                 "dispatch 时关联其 ID；遇到 Failed Path 按 resolution 执行 Retry/Fallback/停止路径。"
@@ -3532,6 +3559,8 @@ async def run_mission(
         # P5 熔断重试预算：Orchestrator 输出残缺 <tool_call>/空回答时重新注入
         malformed_retry_budget = 2
         stalled_nudge_budget = 2
+        # O12：后台报告收取提示的重注入上限；耗尽后系统代收（防无界重开轮）
+        pending_hint_budget = 3
         budget_downgraded = False   # Token 软预算降档只执行一次
         # P0-B 升级阶梯第二级：nudge 耗尽后的终局续跑轮（固定 1 次）。
         # 注入结构化任务状态摘要，给 Orchestrator 一轮全新迭代预算收口；
@@ -3654,20 +3683,45 @@ async def run_mission(
                 # 后台专家报告就绪 → 注入收取提示重开一轮。
                 # fast（Captain）与 standard（Orchestrator P5 后台派遣）共用：
                 # _fast_pending_report_hint 经 agent._lingshu_bg 属性通用读取。
+                # O12：提示重注入设预算上限——这是唯一无界的重开轮路径（模型
+                # 若反复纯文本结束而不调 check_experts，会无限重启 reply）。
+                # 耗尽后由系统直接代收：把 ready 报告作为用户消息注入。
                 report_hint = _fast_pending_report_hint(main_agent)
                 if report_hint:
-                    orch_content = report_hint
-                    continue
+                    if pending_hint_budget > 0:
+                        pending_hint_budget -= 1
+                        orch_content = report_hint
+                        continue
+                    bg = getattr(main_agent, "_lingshu_bg", None)
+                    ready = list((bg or {}).get("ready") or [])
+                    if ready:
+                        bg["ready"] = []
+                        mission.record("system", "pending_reports_force_collected",
+                                       count=len(ready))
+                        store.save(mission)
+                        chunks = "\n\n".join(
+                            f"===== [{item.get('role')}] {item.get('objective')} =====\n"
+                            + str(item.get("report", ""))[:1400]
+                            for item in ready
+                        )
+                        orch_content = (
+                            "[系统代收] 以下后台专家报告已就绪并自动收取"
+                            "（收取提示多次未被执行）。请基于报告结论推进任务"
+                            "或立即收尾：\n\n" + chunks
+                        )
+                        continue
                 # P5b：未到终态的纯文本收尾 → 若仍有可推进的工作
-                # （已批准攻击 / 存在 pending 或 in_progress 计划项），
+                # （已批准攻击 / 存在 in_progress 计划项），
                 # 注入一次推进提示而不是直接退出主循环。
+                # O11：纯 pending 残留不再触发——complete_mission 本就会把
+                # pending 项合法置 skipped，带着 pending 如实收尾是合法路径。
                 if (
                     stalled_nudge_budget > 0
                     and mission.phase not in {Phase.COMPLETED, Phase.FAILED}
                     and (
                         mission.exploitation_approved
                         or any(
-                            item.get("status") in {"pending", "in_progress"}
+                            item.get("status") == "in_progress"
                             for item in mission.plan_items
                         )
                     )
@@ -3698,7 +3752,9 @@ async def run_mission(
                         "也没有收尾。\n"
                         f"{approved_hint}\n"
                         f"你现在必须调用工具继续推进（{dispatch_hint}）；"
-                        "只有当任务确实无法继续时才允许如实收尾。"
+                        "只有当任务确实无法继续时才允许如实收尾——"
+                        "剩余 pending 计划项可交由 complete_mission 自动置为"
+                        " skipped 后如实收尾，无需强行补完。"
                         "禁止再次以纯文本结束回合。"
                     )
                     continue
@@ -3711,7 +3767,7 @@ async def run_mission(
                     and (
                         mission.exploitation_approved
                         or any(
-                            item.get("status") in {"pending", "in_progress"}
+                            item.get("status") == "in_progress"
                             for item in mission.plan_items
                         )
                     )

@@ -487,7 +487,12 @@ class MissionState:
             self.transition(Phase.FAILED, reason)
 
     def add_finding(self, source: str, report: str) -> None:
-        self.findings.append({"timestamp": _now(), "source": source, "report": report})
+        # O8 瘦身：全文已在 evidence_records（summary 4000 上限），findings
+        # 只留 2000 摘要——长任务 mission JSON 曾因三份全文线性膨胀。
+        self.findings.append({
+            "timestamp": _now(), "source": source,
+            "report": str(report)[:2000],
+        })
         self.record("Orchestrator", "finding_added", source=source)
 
     def add_attack_step(
@@ -500,7 +505,8 @@ class MissionState:
         step: dict[str, Any] = {
             "timestamp": _now(),
             "objective": objective,
-            "report": report,
+            # O8 瘦身：时间线用途，800 摘要即可；全文在 evidence_records。
+            "report": str(report)[:800],
         }
         if service:
             step["service"] = service
@@ -688,17 +694,24 @@ class MissionState:
         )
         if existing is not None:
             existing.last_seen = _now()
+            changed = False
             if service and service != existing.service:
                 existing.service = service
-            existing.confidence = max(existing.confidence,
-                                      max(0.0, min(float(confidence), 1.0)))
+                changed = True
+            new_conf = max(existing.confidence, max(0.0, min(float(confidence), 1.0)))
+            if new_conf > existing.confidence:
+                existing.confidence = new_conf
+                changed = True
             for ref in refs:
                 if ref not in existing.evidence_ids:
                     existing.evidence_ids.append(ref)
-            self.record(
-                "Orchestrator", "asset_updated",
-                asset_id=existing.id, host=existing.host, port=existing.port,
-            )
+                    changed = True
+            # O8 瘦身：仅实质变化记审计——重复资产的 last_seen 刷新不再刷事件
+            if changed:
+                self.record(
+                    "Orchestrator", "asset_updated",
+                    asset_id=existing.id, host=existing.host, port=existing.port,
+                )
             return existing
         asset = AssetRecord(
             id=f"as{len(self.assets) + 1}",
@@ -911,7 +924,8 @@ class MissionState:
         ][-limit:]
         return {
             "core_state": {
-                "task": self.goal,
+                # O9：goal 无界（任务书全文可达数万字符）——截断防注入膨胀
+                "task": str(self.goal or "")[:1500],
                 "target": self.target,
                 "phase": self.phase.value,
                 "authorized": self.authorized,

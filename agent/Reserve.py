@@ -198,6 +198,7 @@ async def create_reverse_agent(
     command_workdir: str | Path | None = None,
     mission=None,
     store=None,
+    analysis_lock=None,
 ) -> Agent:
     async def analysis(service_info: str) -> str:
         """委托 Analysis 专家研判真实证据。
@@ -205,14 +206,26 @@ async def create_reverse_agent(
         Args:
             service_info: Recon 得到的文件信息和初步结论。
         """
+        # O10：与 Attack 共享同一 Analysis 实例；后台 Reserve 与前台 Attack
+        # 同时委托时必须经共享锁串行（Agent state 无并发保护）。
         try:
-            text = await run_expert_reply_with_continuation(
-                analysis_agent,
-                UserMsg(name="Reserve", content=service_info),
-                prefix="[Analysis] ",
-                on_event=event_callback,
-                label="Analysis",
-            )
+            if analysis_lock is not None:
+                async with analysis_lock:
+                    text = await run_expert_reply_with_continuation(
+                        analysis_agent,
+                        UserMsg(name="Reserve", content=service_info),
+                        prefix="[Analysis] ",
+                        on_event=event_callback,
+                        label="Analysis",
+                    )
+            else:
+                text = await run_expert_reply_with_continuation(
+                    analysis_agent,
+                    UserMsg(name="Reserve", content=service_info),
+                    prefix="[Analysis] ",
+                    on_event=event_callback,
+                    label="Analysis",
+                )
         except AgentMaxIterationsError:
             return "[Analysis] 超迭代，本轮无研判输出；请基于现有证据自行推进。"
         result = text or (
