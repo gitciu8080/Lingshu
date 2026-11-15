@@ -701,12 +701,17 @@ def _summary_mission_context(mission: MissionState) -> dict[str, Any]:
     return data
 
 
-# 中文文本约 1 token ≈ 1 字符（含 Markdown 表格/命令回显时更接近 1:1，
-# 按 1.5 折算会低估 token 数导致小上下文模型被撑爆）。本地小模型上长输入
-# 的 prefill 耗时是超线性增长，因此预算按 token 数严格折算，并预留 50%
-# 给系统提示、模板与报告正文输出。
-_SUMMARY_CHARS_PER_TOKEN = 1.0
-_SUMMARY_OUTPUT_RESERVE_RATIO = 0.5
+# Summary 输入预算（2026-11-15 详细度回归复盘）：
+# - 云端模型 prefill 快、无超时压力：按中文实测 ~1.5 字符/token 折算、
+#   预留 35%（报告正文+系统提示），128k 上下文即可恢复 ef3a4ae 时代的
+#   120k 字符输入水平；
+# - 本地 llama.cpp/vLLM 的 prefill 耗时超线性，仍按保守 1.2 字符/token
+#   折算并预留 45%，同时超时上限上浮 60%（见 run_summary_report）。
+_SUMMARY_LOCAL_CHARS_PER_TOKEN = 1.2
+_SUMMARY_LOCAL_RESERVE_RATIO = 0.45
+_SUMMARY_CLOUD_CHARS_PER_TOKEN = 1.5
+_SUMMARY_CLOUD_RESERVE_RATIO = 0.35
+_SUMMARY_LOCAL_TIMEOUT_SCALE = 1.6
 _SUMMARY_MIN_TRANSCRIPT_CHARS = 6_000
 _SUMMARY_MAX_TRANSCRIPT_CHARS = 120_000
 # 报告生成超时：本地小模型长文输出可能极慢，超时即走结构化兜底
@@ -714,12 +719,31 @@ _SUMMARY_MAX_TRANSCRIPT_CHARS = 120_000
 _SUMMARY_TIMEOUT_SECONDS = float(os.environ.get("LINGSHU_SUMMARY_TIMEOUT", "300"))
 
 
-def _summary_input_budget(provider: str, model_name: str | None) -> int:
-    """按目标模型的 context_size 折算 Summary 输入的字符预算。
+def _summary_provider_is_local(provider: str, model_name: str | None) -> bool:
+    """判断 Summary 用的供应商端点是否本地/私网（决定预算与篇幅分档）。"""
+    try:
+        from LLM.model import _is_local_endpoint
+        from core.model_registry import list_llm_providers
+
+        for entry in list_llm_providers(owner_is_superadmin=True):
+            if str(entry.get("provider") or "") != str(provider or ""):
+                continue
+            return _is_local_endpoint(str(entry.get("base_url") or ""))
+    except Exception:  # noqa: BLE001 — 探测失败按保守（本地）分档
+        return True
+    return False
+
+
+def _summary_input_budget(
+    provider: str, model_name: str | None, *, is_local: bool | None = None,
+) -> int:
+    """按目标模型的 context_size 折算 Summary 输入的字符预算（本地/云端分档）。
 
     取不到配置时回退 128k token 的保守值。最小值兜底保证短任务仍可总结。
     """
     context_tokens = 128_000
+    if is_local is None:
+        is_local = _summary_provider_is_local(provider, model_name)
     try:
         from core.model_registry import list_llm_providers
         wanted = (model_name or "").strip()
@@ -741,10 +765,40 @@ def _summary_input_budget(provider: str, model_name: str | None) -> int:
                 break
     except Exception:  # noqa: BLE001 — 预算探测失败回退保守值
         pass
-    usable_tokens = int(context_tokens * (1 - _SUMMARY_OUTPUT_RESERVE_RATIO))
+    if is_local:
+        chars_per_token, reserve = (
+            _SUMMARY_LOCAL_CHARS_PER_TOKEN, _SUMMARY_LOCAL_RESERVE_RATIO,
+        )
+    else:
+        chars_per_token, reserve = (
+            _SUMMARY_CLOUD_CHARS_PER_TOKEN, _SUMMARY_CLOUD_RESERVE_RATIO,
+        )
+    usable_tokens = int(context_tokens * (1 - reserve))
     return max(
         _SUMMARY_MIN_TRANSCRIPT_CHARS,
-        min(int(usable_tokens * _SUMMARY_CHARS_PER_TOKEN), _SUMMARY_MAX_TRANSCRIPT_CHARS),
+        min(int(usable_tokens * chars_per_token), _SUMMARY_MAX_TRANSCRIPT_CHARS),
+    )
+
+
+def _summary_length_directive(is_local: bool) -> str:
+    """按模型分档返回追加到 Summary 任务指令末尾的篇幅要求。
+
+    SUMMARY.md 的固定篇幅段为本地小模型的防超时保守值；云端模型 prefill
+    快，在任务指令中放宽到 5000~8000 字以恢复详细度（任务指令优先级
+    高于系统提示的固定篇幅段）。
+    """
+    if is_local:
+        return (
+            "【篇幅要求】本轮使用本地模型：请遵守系统提示中的篇幅控制"
+            "（正文 ≤2500 字），优先保证五章节完整与关键结论。"
+        )
+    return (
+        "【篇幅要求】本轮使用云端模型，输出能力充足：报告正文目标 "
+        "5000~8000 字（系统提示中的 2500 字篇幅控制不适用本轮）。"
+        "五个章节齐全的前提下尽量详实：'三、测试综述'展开攻击链推理"
+        "过程与关键判断依据；'四、测试结果'逐条列出漏洞发现（现象、"
+        "复现命令要点、影响面）；已验证发现附完整复现要点；表格与"
+        "流程图（```mermaid```）在有助于理解时积极使用。"
     )
 
 
@@ -755,13 +809,14 @@ def _summary_inputs_within_budget(
     provider: str,
     model_name: str | None,
     user_id: int | None,
+    is_local: bool | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """按模型上下文预算裁剪 Summary 输入，返回 (transcript, mission_data)。
 
     结构化状态与会话记录共享同一预算：状态优先（保证判据/证据完整），
     剩余额度给会话记录（从最新往回取，见 _build_summary_transcript）。
     """
-    budget = _summary_input_budget(provider, model_name)
+    budget = _summary_input_budget(provider, model_name, is_local=is_local)
     mission_data = _summary_mission_context(mission)
     state_text = json.dumps(mission_data, ensure_ascii=False, indent=2)
     # 状态最多占预算的 45%，避免大任务把会话记录挤成零
@@ -814,13 +869,30 @@ async def run_summary_report(
     Returns:
         生成的报告正文 Markdown
     """
+    runtime = RuntimeConfig.from_env(user_id=user_id)
+    # 报告使用与主任务相同的模型；思考强度沿用级别映射（旧 Ver 语义），
+    # model_ver 为具体模型名（API 路径）时取 medium。
+    summary_intensity = {"Low": "off", "Min": "medium", "Max": "high"}.get(
+        str(model_ver or ""), "medium",
+    )
+    summary_provider, summary_model_name = provider, model_name
+    if user_id is not None:
+        binding = get_agent_model_bindings(user_id).get("summary")
+        if binding and binding.get("provider") and binding.get("model"):
+            summary_provider = str(binding["provider"])
+            summary_model_name = str(binding["model"])
+            if binding.get("thinking_intensity"):
+                summary_intensity = str(binding["thinking_intensity"])
+    # 本地/云端分档：输入预算、篇幅要求与超时都随端点能力缩放
+    # （2026-11-15 详细度回归复盘：一刀切 1.0 字符/token + 2500 字上限
+    # 让云端报告的输入/输出双双砍半）。
+    summary_is_local = _summary_provider_is_local(summary_provider, summary_model_name)
     # 输入预算按模型上下文自适应：本地小上下文模型（如 llama.cpp 32k）在
     # 5 万+12 万字符的固定上限下会直接超时或截断（思考模式更甚），导致
-    # "Summary Agent 未返回报告正文"降级。这里按 context_size 折算字符预算
-    # （中文约 1 token ≈ 1.5 字符，留 40% 给输出与系统提示）。
+    # "Summary Agent 未返回报告正文"降级。这里按 context_size 折算字符预算。
     transcript, mission_data = _summary_inputs_within_budget(
-        mission, messages, provider=provider, model_name=model_name,
-        user_id=user_id,
+        mission, messages, provider=summary_provider, model_name=summary_model_name,
+        user_id=user_id, is_local=summary_is_local,
     )
     prompt = (
         "请总结以下一次完整授权安全测试。\n\n"
@@ -829,6 +901,7 @@ async def run_summary_report(
         "【写作约束】会话记录中的条目是实际发生的对话、动作与工具结果。"
         "报告必须基于这些事实撰写，不得复述、引用或编造任何 Agent 的"
         "内心独白、计划性思考或推理过程；未发生的步骤不得写入报告。"
+        f"\n\n{_summary_length_directive(summary_is_local)}"
     )
     if event_callback is not None:
         event_callback(
@@ -838,20 +911,6 @@ async def run_summary_report(
             agent=SUMMARY_EXPERT,
         )
     try:
-        runtime = RuntimeConfig.from_env(user_id=user_id)
-        # 报告使用与主任务相同的模型；思考强度沿用级别映射（旧 Ver 语义），
-        # model_ver 为具体模型名（API 路径）时取 medium。
-        summary_intensity = {"Low": "off", "Min": "medium", "Max": "high"}.get(
-            str(model_ver or ""), "medium",
-        )
-        summary_provider, summary_model_name = provider, model_name
-        if user_id is not None:
-            binding = get_agent_model_bindings(user_id).get("summary")
-            if binding and binding.get("provider") and binding.get("model"):
-                summary_provider = str(binding["provider"])
-                summary_model_name = str(binding["model"])
-                if binding.get("thinking_intensity"):
-                    summary_intensity = str(binding["thinking_intensity"])
         # 报告生成是"结构化转写"任务，不需要长链推理：关闭思考可避免本地
         # 模型把预算耗在 reasoning_content 上（实测 Qwen3 长输入下思考会吃满
         # max_tokens 导致正文为空/超时），并显著缩短出报告时间。
@@ -877,6 +936,11 @@ async def run_summary_report(
         if _suspended:
             event_callback.suspend()
         try:
+            # 本地端点 prefill 超线性：更长的详细输入配套更高的超时上限
+            # （云端维持默认值；环境变量显式配置时以配置为准不再缩放）。
+            summary_timeout = _SUMMARY_TIMEOUT_SECONDS
+            if summary_is_local and "LINGSHU_SUMMARY_TIMEOUT" not in os.environ:
+                summary_timeout = round(_SUMMARY_TIMEOUT_SECONDS * _SUMMARY_LOCAL_TIMEOUT_SCALE)
             result = await asyncio.wait_for(
                 stream_agent_reply(
                     summary_agent,
@@ -884,7 +948,7 @@ async def run_summary_report(
                     prefix="[Summary] ",
                     on_event=event_callback,
                 ),
-                timeout=_SUMMARY_TIMEOUT_SECONDS,
+                timeout=summary_timeout,
             )
         finally:
             if _suspended and hasattr(event_callback, "resume"):

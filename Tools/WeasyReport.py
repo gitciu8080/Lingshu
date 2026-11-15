@@ -466,7 +466,9 @@ def _markdown_html(
             )
         else:
             replacement = (
-                '<figure class="mermaid-fallback"><figcaption>流程图源码（渲染失败）</figcaption>'
+                '<figure class="mermaid-fallback"><figcaption>'
+                "流程图源码（渲染失败：请在 Skills/beautiful-mermaid 下执行"
+                " npm ci 恢复渲染依赖）</figcaption>"
                 f"<pre><code>{html.escape(code)}</code></pre></figure>"
             )
         rendered = rendered.replace(f"<p>{marker}</p>", replacement)
