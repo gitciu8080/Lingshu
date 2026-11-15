@@ -93,6 +93,7 @@ from Tools.AgenticMemory import get_experience_hint  # P0-C：Brain 规划前注
 from Tools.tool_catalog import get_tool_catalog
 from Tools.target import TargetSpec, normalize_target  # 目标规范化
 from agent.context import (  # 内部 Agent 的统一 Offloader/ContextConfig/角色状态
+    context_tier_scale,
     build_agent_context_config,
     build_role_agent_state,
 )
@@ -719,19 +720,33 @@ _SUMMARY_MAX_TRANSCRIPT_CHARS = 120_000
 _SUMMARY_TIMEOUT_SECONDS = float(os.environ.get("LINGSHU_SUMMARY_TIMEOUT", "300"))
 
 
-def _summary_provider_is_local(provider: str, model_name: str | None) -> bool:
-    """判断 Summary 用的供应商端点是否本地/私网（决定预算与篇幅分档）。"""
-    try:
-        from LLM.model import _is_local_endpoint
-        from core.model_registry import list_llm_providers
+def _knowledge_caps(tier_scale: float) -> dict[str, int]:
+    """按端点分档返回 Knowledge Context 检索参数（2026-11-15 一刀切排查）。
 
-        for entry in list_llm_providers(owner_is_superadmin=True):
-            if str(entry.get("provider") or "") != str(provider or ""):
-                continue
-            return _is_local_endpoint(str(entry.get("base_url") or ""))
+    默认值与 Tools/KnowledgeBase.py 的 _DEFAULT_* 一致（本地档）；
+    云端放大 fetch/context_k/单条/总量（fetch 受检索层 min(k,10) 约束）。
+    """
+    scale = max(1.0, tier_scale)
+    return {
+        "fetch_k": min(10, int(8 * scale)),
+        "context_k": int(4 * scale),
+        "max_item_chars": int(800 * scale),
+        "max_context_chars": int(3600 * scale),
+    }
+
+
+def _summary_provider_is_local(provider: str, model_name: str | None) -> bool:
+    """判断 Summary 用的供应商端点是否本地/私网（决定预算与篇幅分档）。
+
+    探测实现统一在 core.model_registry.provider_endpoint_is_local
+    （agent.context.context_tier_scale 与各处分档共用同一规则）。
+    """
+    try:
+        from core.model_registry import provider_endpoint_is_local
+
+        return provider_endpoint_is_local(provider, model_name)
     except Exception:  # noqa: BLE001 — 探测失败按保守（本地）分档
         return True
-    return False
 
 
 def _summary_input_budget(
@@ -2559,8 +2574,24 @@ async def run_mission(
         # legacy 为原有任务 workdir。项目根只保留代码与只读 Skills。
         command_workdir = ws_root if ws_root is not None else workdir
 
+        # 角色绑定端点（provider/model），未绑定的角色分档回退主模型；
+        # 声明先于 _role_tier_scale，避免任何提前调用的 NameError
+        _role_binding_endpoints: dict[str, tuple[str, Any]] = {}
+
         def _role_context(role: str):
-            return build_agent_context_config(role) if use_v2_workspace else None
+            return build_agent_context_config(
+                role, tier_scale=_role_tier_scale(role),
+            ) if use_v2_workspace else None
+
+        def _role_tier_scale(role: str) -> float:
+            """角色实际生效模型的端点分档（绑定模型优先，未绑定用主模型）。"""
+            binding = _role_binding_endpoints.get(role)
+            p, m = binding if binding else (provider, model_name)
+            return context_tier_scale(provider=p, model_name=m)
+
+        def _win_chars(role: str, base_chars: int) -> int:
+            """按角色分档放大字符窗口（派遣上下文/计划注入）。"""
+            return int(base_chars * _role_tier_scale(role))
 
         # ── 5. 模型与基础 Agent ──
         # Qwen 启动前必须核对 llama.cpp 实际加载的模型。只有服务端唯一模型
@@ -2627,6 +2658,11 @@ async def run_mission(
                 role_models, _model_warnings = resolve_role_models(
                     _bindings, _build_role_model, model, thinking_intensity,
                 )
+                # 分工端点快照（角色分档用）：provider/model 对
+                _role_binding_endpoints = {
+                    role: (str(b.get("provider") or ""), b.get("model"))
+                    for role, b in _bindings.items()
+                }
                 for _warning in _model_warnings:
                     logger.warning("[模型分工] %s", _warning)
                     print(f"[系统] [模型分工] {_warning}")
@@ -2760,7 +2796,12 @@ async def run_mission(
                     await rag_service.start()
                 if not rag_service.available:
                     raise RuntimeError(rag_service.error or "知识库不可用")
-                retrieved = await rag_service.retrieve_context(request["query"])
+                retrieved = await rag_service.retrieve_context(
+                    request["query"],
+                    **_knowledge_caps(context_tier_scale(
+                        provider=provider, model_name=model_name,
+                    )),
+                )
                 context = str(retrieved.get("context") or "")
                 mission.knowledge_context = {
                     **request,
@@ -3328,15 +3369,20 @@ async def run_mission(
 
         def _current_attack_capability_context() -> str:
             """在 Attack 真正懒加载时读取最新 WebShell/CVE 证据。"""
+            # 端点分档（2026-11-15 一刀切排查）：字符 ×scale、条数最多 ×2
+            scale = _role_tier_scale("attack")
+            chars = int(800 * scale)
+            count = int(20 * max(1.0, min(2.0, scale)))
+            short_count = int(12 * max(1.0, min(2.0, scale)))
             return "\n".join([
-                mission.goal[:1500],
-                mission.plan[:5000],
-                *[item.content[:800] for item in mission.facts[-20:]],
+                mission.goal[:int(1500 * scale)],
+                mission.plan[:int(5000 * scale)],
+                *[item.content[:chars] for item in mission.facts[-count:]],
                 # EvidenceRecord 保存的是摘要字段；这里在 Attack 懒加载前汇总
                 # 最新证据，不能按 FactRecord 的 content 字段读取。
-                *[str(item.summary or "")[:800] for item in mission.evidence_records[-20:]],
-                *[str(item.get("report") or "")[:800] for item in mission.findings[-12:]],
-                *[str(item.get("report") or "")[:800] for item in mission.attack_chain[-12:]],
+                *[str(item.summary or "")[:chars] for item in mission.evidence_records[-count:]],
+                *[str(item.get("report") or "")[:chars] for item in mission.findings[-short_count:]],
+                *[str(item.get("report") or "")[:chars] for item in mission.attack_chain[-short_count:]],
             ])
 
         async def _load_attack_agent():
@@ -3368,7 +3414,7 @@ async def run_mission(
                 # Attack 使用 MissionState 中共享的有界 Knowledge Context；
                 # 新知识缺口由 Orchestrator 调度前的 provider 按状态指纹刷新。
                 rag_middleware=None,
-                expert_context=mission.plan[:2000],
+                expert_context=mission.plan[:_win_chars("attack", 2000)],
                 event_callback=event_callback,
                 offloader=workspace,
                 context_config=_role_context("attack"),
@@ -3394,7 +3440,7 @@ async def run_mission(
             attack_expert_name(
                 str((mission.category_decision or {}).get("primary") or "unknown"),
                 target_spec.kind,
-                mission.plan[:2000],
+                mission.plan[:_win_chars("attack", 2000)],
             ),
             _load_attack_agent,
         )
@@ -3523,6 +3569,7 @@ async def run_mission(
         else:
             orchestrator = create_orchestrator_agent(
                 model=_role_model("orchestrator"),
+                tier_scale=_role_tier_scale("orchestrator"),
                 recon_agent=recon,
                 attack_agent=attack,
                 reserve_agent=reserve,

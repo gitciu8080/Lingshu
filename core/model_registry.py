@@ -604,6 +604,34 @@ def list_llm_providers(
         return items
 
 
+def provider_endpoint_is_local(
+    provider: str,
+    model_name: str | None = None,
+    *,
+    owner_user_id: Any = _UNSET,
+    owner_is_superadmin: bool = True,
+) -> bool:
+    """判断供应商端点是否本地/私网（上下文预算分档用）。
+
+    匹配 provider（与 _summary_input_budget 相同的宽松匹配规则）后按
+    base_url 判定；探测失败回退 True（保守=本地档，避免意外撑爆小模型）。
+    供 agent.context.context_tier_scale 与 main 的预算/篇幅分档复用。
+    """
+    try:
+        from LLM.model import _is_local_endpoint  # 惰性导入避免环
+
+        for entry in list_llm_providers(
+            owner_user_id=owner_user_id,
+            owner_is_superadmin=owner_is_superadmin,
+        ):
+            if str(entry.get("provider") or "") != str(provider or ""):
+                continue
+            return _is_local_endpoint(str(entry.get("base_url") or ""))
+    except Exception:  # noqa: BLE001 — 探测失败按保守（本地）分档
+        return True
+    return False
+
+
 def _find_provider(data: dict[str, Any], provider_id: int) -> dict[str, Any] | None:
     return next(
         (p for p in data["providers"] if int(p["id"]) == int(provider_id)), None,

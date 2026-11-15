@@ -189,13 +189,26 @@ def ir_completion_gate(mission: MissionState, success: bool) -> str | None:
 # 3000 汉字≈9000 bytes≈2250 est-token < 2400，回灌不再必然触发框架层的
 # 二次截断与 offload 文件（498e11b4 复盘：offload 路径诱惑引发裸 Read 正文）。
 _REPORT_RETURN_LIMIT = 3000
+# 分档上限（本地/云端，2026-11-15 一刀切排查）：云端 orchestrator 的
+# tool_result_limit 放大后，报告回灌可携带更多细节，减少 view_evidence
+# 二次检索轮次；12000 字符与 est-token ×4 放大同比例。
+_REPORT_RETURN_LIMIT_CLOUD_CAP = 12_000
 
 
-def _bounded_report(report: str) -> str:
+def report_return_limit(tier_scale: float = 1.0) -> int:
+    """按端点分档返回报告回灌上限（本地 3000 / 云端 ×4，cap 12000）。"""
+    return min(
+        int(_REPORT_RETURN_LIMIT * max(1.0, tier_scale)),
+        _REPORT_RETURN_LIMIT_CLOUD_CAP,
+    )
+
+
+def _bounded_report(report: str, *, limit: int | None = None) -> str:
+    cap = _REPORT_RETURN_LIMIT if limit is None else max(1, int(limit))
     text = str(report or "")
-    if len(text) <= _REPORT_RETURN_LIMIT:
+    if len(text) <= cap:
         return text
-    return text[:_REPORT_RETURN_LIMIT] + (
+    return text[:cap] + (
         f"\n…（报告已截断，全文 {len(text)} 字符已登记 Evidence；"
         "需要细节时调用 view_evidence 按关键词检索证据原文。）"
     )
@@ -229,7 +242,19 @@ def create_orchestrator_agent(
     verification_runner: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
     qa_readonly: bool = False,
     workspace_root: str | None = None,
+    tier_scale: float = 1.0,
 ) -> Agent:
+    # ── 端点分档（2026-11-15 一刀切排查）：本地=1.0，云端=4.0 ──
+    # 派遣窗口（target_info/focus/objective/差量事实）与报告回灌上限随
+    # 分档放大；证据条数类窗口最多 ×2（条数过多稀释注意力，字符扩容为主）。
+    report_cap = report_return_limit(tier_scale)
+
+    def _win(base_chars: int) -> int:
+        return int(base_chars * max(1.0, tier_scale))
+
+    def _win_count(base_count: int) -> int:
+        return int(base_count * max(1.0, min(2.0, tier_scale)))
+
     steering = steering_state if steering_state is not None else {"pending": None, "processed": False, "queue": []}
     steering.setdefault("queue", [])
 
@@ -454,7 +479,7 @@ def create_orchestrator_agent(
                 UserMsg(
                     name="Orchestrator",
                     content=(
-                        f"授权目标：{mission.target}\n本轮重点：{focus[:2000]}\n"
+                        f"授权目标：{mission.target}\n本轮重点：{focus[:_win(2000)]}\n"
                         + (f"已登记资产（{len(mission.assets)} 项，自动登记；"
                            "auto_scope_expand 开启时私网新主机自动入授权范围）："
                            + "; ".join(
@@ -548,7 +573,7 @@ def create_orchestrator_agent(
             source=selected_recon.name,
             evidence_id=evidence.id,
         )
-        return f"[Recon 侦察报告]\n{_bounded_report(report)}{category_note}"
+        return f"[Recon 侦察报告]\n{_bounded_report(report, limit=report_cap)}{category_note}"
 
     # P2 差量注入游标：记录上次 Attack 派遣时的 facts 水位，专家 UserMsg
     # 只自动拼接新增 Facts，避免每次重灌全量证据推高专家压缩频率。
@@ -749,8 +774,8 @@ def create_orchestrator_agent(
         attack_fact_mark = len(mission.facts)
         delta_section = ""
         if delta_facts:
-            fact_limit = 600 if context_was_reset else 400
-            fact_cap = 12 if context_was_reset else 5
+            fact_limit = _win(600 if context_was_reset else 400)
+            fact_cap = _win_count(12 if context_was_reset else 5)
             archive_note = (
                 "任务档案（专家上下文刚重置，以下为全部关键事实）"
                 if context_was_reset else
@@ -794,8 +819,8 @@ def create_orchestrator_agent(
                 UserMsg(
                     name="Orchestrator",
                     content=(
-                        f"授权目标：{mission.target}{asset_note}\n本轮目标：{objective[:1500]}\n\n"
-                        f"本轮新增关键证据（调用方筛选，勿重复历史）：\n{target_info[:2000]}\n"
+                        f"授权目标：{mission.target}{asset_note}\n本轮目标：{objective[:_win(1500)]}\n\n"
+                        f"本轮新增关键证据（调用方筛选，勿重复历史）：\n{target_info[:_win(2000)]}\n"
                         f"{delta_section}"
                         f"{knowledge_section}"
                         f"{rejected_note}\n\n"
@@ -942,7 +967,7 @@ def create_orchestrator_agent(
             source=attack_agent.name,
             evidence_id=evidence.id,
         )
-        return f"[Attack 报告]\n{_bounded_report(report)}{category_note}"
+        return f"[Attack 报告]\n{_bounded_report(report, limit=report_cap)}{category_note}"
 
     def _converge_running_attempt(action_type: str, exc: Exception) -> None:
         """兜底收敛：把该动作类型最新的 running attempt 标记为失败。
@@ -1050,7 +1075,7 @@ def create_orchestrator_agent(
                     content=(
                         f"授权目标：{mission.target}\n"
                         f"二进制文件：{binary_path}\n"
-                        f"本轮目标：{objective[:1500]}\n\n"
+                        f"本轮目标：{objective[:_win(1500)]}\n\n"
                         "先调用 ida_open_binary 打开文件并保存 database 会话 ID，"
                         "禁止手动启动 idat 或直接调用 idb_open；需要动态验证时使用 "
                         "gdb_create_session，结束后关闭 GDB 会话。\n"
@@ -1124,14 +1149,14 @@ def create_orchestrator_agent(
             ),
         )
         store.save(mission)
-        return f"[Reserve 逆向报告]\n{_bounded_report(report)}"
+        return f"[Reserve 逆向报告]\n{_bounded_report(report, limit=report_cap)}"
 
     # ── P5 后台派遣封装与收取（机制移植自 fast 模式 Captain，已验证语义） ──
     def _note_bg_report(role: str, objective: str, result_text: str) -> None:
         text = str(result_text or "")
-        trimmed = text[:_REPORT_RETURN_LIMIT] + (
+        trimmed = text[:report_cap] + (
             "\n…（结果已截断；完整内容与证据链已按原顺序登记）"
-            if len(text) > _REPORT_RETURN_LIMIT else ""
+            if len(text) > report_cap else ""
         )
         bg_state["ready"].append({
             "role": role, "objective": str(objective)[:200], "report": trimmed,
@@ -1333,7 +1358,7 @@ def create_orchestrator_agent(
                     content=(
                         "任务执行中咨询。以下是当前作战计划状态与近期失败路径。\n"
                         f"咨询动因：{str(trigger)[:500]}\n"
-                        f"补充上下文：{str(context_summary)[:2000]}\n\n"
+                        f"补充上下文：{str(context_summary)[:_win(2000)]}\n\n"
                         f"当前计划项：\n{items_summary}\n\n"
                         f"近期失败路径：\n{failed_summary}\n\n"
                         "请输出计划调整建议：需要新增/修改/删除/重排哪些计划项，"
@@ -1349,7 +1374,7 @@ def create_orchestrator_agent(
         text = str(advice or "").strip()
         if not text:
             return "[Brain 顾问] 本轮无建议输出；可稍后带更聚焦的动因重试。"
-        return f"[Brain 顾问建议]\n{_bounded_report(text)}"
+        return f"[Brain 顾问建议]\n{_bounded_report(text, limit=report_cap)}"
 
     async def request_exploitation_approval(reason: str) -> str:
         """首次进入攻击阶段（EXPLOITATION）前，请求人工批准。

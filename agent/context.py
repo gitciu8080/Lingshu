@@ -19,6 +19,31 @@ TRIGGER_RATIO = 0.75
 RESERVE_RATIO = 0.12
 TOOL_RESULT_LIMIT = 4000
 
+# ── 本地/云端上下文预算分档（2026-11-15 一刀切排查）──
+# 云端模型 prefill 快、上下文大（200k 常见），工具结果/派遣窗口按本地小
+# 模型定出的绝对上限裁剪会白白损失信息；本地 llama.cpp/vLLM 维持原值。
+CONTEXT_TIER_LOCAL = 1.0
+CONTEXT_TIER_CLOUD = 4.0
+# est-token 绝对上限：即使分档放大也不超过 12k（防极端配置撑爆上下文）
+TOOL_RESULT_LIMIT_CLOUD_CAP = 12_000
+
+
+def context_tier_scale(
+    *,
+    is_local: bool | None = None,
+    provider: str = "",
+    model_name: str | None = None,
+) -> float:
+    """返回该模型端点的上下文预算分档系数（本地 1.0 / 云端 4.0）。"""
+    if is_local is None:
+        try:
+            from core.model_registry import provider_endpoint_is_local
+
+            is_local = provider_endpoint_is_local(provider, model_name)
+        except Exception:  # noqa: BLE001 — 探测失败按保守（本地）分档
+            is_local = True
+    return CONTEXT_TIER_LOCAL if is_local else CONTEXT_TIER_CLOUD
+
 _ROLE_CONTEXT_PROFILES: dict[str, tuple[float, float, int]] = {
     "brain": (0.75, 0.10, 1800),
     "recon": (0.70, 0.10, 2400),
@@ -111,16 +136,26 @@ SUMMARY_TEMPLATE: str = (
 )
 
 
-def build_agent_context_config(role: str = "") -> ContextConfig:
-    """返回角色级 ContextConfig；无 role 时保持第一批默认契约。"""
+def build_agent_context_config(
+    role: str = "", *, tier_scale: float = 1.0,
+) -> ContextConfig:
+    """返回角色级 ContextConfig；无 role 时保持第一批默认契约。
+
+    ``tier_scale``（context_tier_scale）：云端端点放大 tool_result_limit
+    （×4，上限 TOOL_RESULT_LIMIT_CLOUD_CAP est-token）；trigger/reserve
+    为比例制不随分档变化。默认 1.0 保持本地/既有调用行为不变。
+    """
     trigger, reserve, tool_limit = _ROLE_CONTEXT_PROFILES.get(
         role.strip().lower(),
         (TRIGGER_RATIO, RESERVE_RATIO, TOOL_RESULT_LIMIT),
     )
+    scaled_limit = min(
+        int(tool_limit * max(1.0, tier_scale)), TOOL_RESULT_LIMIT_CLOUD_CAP,
+    )
     return ContextConfig(
         trigger_ratio=trigger,
         reserve_ratio=reserve,
-        tool_result_limit=tool_limit,
+        tool_result_limit=scaled_limit,
         summary_schema=SUMMARY_SCHEMA,
         summary_template=SUMMARY_TEMPLATE,
     )
