@@ -69,7 +69,11 @@ ARENA_WORKDIR.mkdir(parents=True, exist_ok=True)
 # 解题相对 TTL 的提前量（秒），避免超时结算前还在跑
 TTL_MARGIN = 120
 
-NSS_FLAG_PATTERN = re.compile(r"NSSCTF\{[^{}\r\n]+\}")
+# 平台按题目原生格式校验 flag（不限定 NSSCTF 前缀）：Arena 承载 LitCTF/
+# DASCTF 等归档题，原生格式可能是 flag{...}、LitCTF{...} 等。提取时按
+# 通用 `前缀{内容}` 匹配，保留原生前缀（2026-11-15 通宵压测复盘：严格
+# NSSCTF{} 假设导致 attempt#13561 正确内容被换壳 6 连错）。
+NSS_FLAG_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9_-]{0,31}\{[^{}\r\n]{1,4096}\}")
 
 
 def _resolve_model_level(provider: str, requested: str | None) -> str:
@@ -97,7 +101,7 @@ def _mask_token(token: str) -> str:
 
 
 def _extract_nss_flag(value: Any) -> str | None:
-    """从 Agent 输出中提取平台接受的严格 NSSCTF{...} 格式。"""
+    """从 Agent 输出中提取平台接受的原生格式 flag（`前缀{...}`，不限 NSSCTF）。"""
     if not isinstance(value, str):
         return None
     match = NSS_FLAG_PATTERN.search(value.strip())
@@ -419,12 +423,15 @@ async def _solve_attempt(
     # 目标描述：容器（nc/pwn 连接地址）+ 附件（本地二进制分析）。格式要求
     # 必须进入 goal，确保 Brain/Orchestrator/Attack 都能看到，而不只由工作台
     # 在最终提交时补救。
+    # 格式口径（2026-11-15 通宵压测复盘）：平台按题目原生格式校验，不限定
+    # NSSCTF{} 前缀——Arena 承载 LitCTF 等归档题，换壳提交只会白耗错误次数。
     base_goal = (
         "获取 Flag\n\n"
-        "【FLAG 提交硬性要求】平台只接受严格的 NSSCTF{...} 格式（大小写必须完全一致）。"
-        "发现原始结果后必须整理并校验为 NSSCTF{...}；禁止提交 flag{...}、裸文本、"
-        "带解释文字的整句或其他前缀。调用 submit_nss_flag 时参数也必须仅包含完整的 "
-        "NSSCTF{...}。若候选不符合该格式，应继续分析，不得把它当作最终 FLAG。\n\n"
+        "【FLAG 提交硬性要求】平台按题目原生格式校验 flag，不限定 NSSCTF{} 前缀。"
+        "发现候选后原样提交：保留其原有前缀（如 flag{...}、LitCTF{...}、NSSCTF{...} 等），"
+        "禁止改写大小写、更换或叠加包装壳（如 NSSCTF{LitCTF{...}} 属于错误提交）。"
+        "完全没有花括号包裹的裸文本不是完整 flag，应继续分析。"
+        "同一候选被判错后，禁止提交其大小写/包装变体——必须寻找新证据得出新内容。\n\n"
         f"【题目】{problem.get('content', '')}"
     )
     if note == "container":
@@ -629,8 +636,8 @@ async def _solve_attempt(
             print(f"[workbench] ⚠️ 候选 FLAG 格式无效，不提交以免消耗错误次数: {preview}")
             goal = (
                 f"{base_goal}\n\n"
-                f"【第 {run_idx + 1} 轮反馈】上轮候选『{preview}』不符合平台格式，未提交。"
-                "必须继续求解，并且最终只给出严格的 NSSCTF{...}。"
+                f"【第 {run_idx + 1} 轮反馈】上轮候选『{preview}』未检测到 `前缀{{内容}}` "
+                "结构的完整 flag，未提交。必须继续求解，给出带原生前缀包装的完整候选。"
             )
             continue
 

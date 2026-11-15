@@ -19,6 +19,7 @@ from core.TaskState import (
     MissionState,
     MissionStore,
     Phase,
+    normalize_flag_key,
 )
 from Tools.fingerprint import (
     compute_action_fingerprint,
@@ -1864,8 +1865,11 @@ def create_orchestrator_agent(
         """向 NSSCTF Agent Arena 提交 Flag 并获取判定结果。
 
         仅当任务由 NSSCTF Arena 发起（携带 nss_context）时可用。
+        平台按题目原生格式校验（不限定 NSSCTF{} 前缀）：候选应原样提交、
+        保留其原有前缀（如 flag{...}、LitCTF{...}、NSSCTF{...}），
+        禁止改写大小写或换壳——与已判错候选归一化同键的变体会被直接拦截。
         Args:
-            flag: 候选 Flag（如 NSSCTF{...}）。
+            flag: 候选 Flag（题目原生格式，如 flag{...} / LitCTF{...} / NSSCTF{...}）。
         """
         if not nss_context:
             mission.record("Orchestrator", "nss_submit_unavailable", flag=flag)
@@ -1880,12 +1884,30 @@ def create_orchestrator_agent(
         candidate = (flag or "").strip()
         if not candidate:
             return "[拒绝] Flag 不能为空。"
-        if not candidate.startswith("NSSCTF{") and not candidate.startswith("flag"):
+
+        # ── 变体拦截：与已判错候选归一化同键（换壳/大小写变体）直接拒发，
+        # 不消耗平台错误次数。依据：2026-11-15 通宵压测 attempt#13561 对
+        # 正确内容 Y0u_know_broadca5t_att4ck 连续 6 次换壳/改写被判错。──
+        candidate_key = normalize_flag_key(candidate)
+        if candidate_key and candidate_key in (mission.nss_rejected_keys or []):
+            mission.record("Orchestrator", "nss_submit_variant_blocked", flag=candidate)
+            store.save(mission)
+            return (
+                "[拦截] 该候选与已判错的提交归一化后相同（仅包装壳/大小写差异），"
+                "平台已对此内容消耗过错误机会。禁止提交其变体；"
+                "请给出新的证据来源（哪个命令输出生成了它），"
+                "或更换思路继续分析，不要围绕同一内容做格式改写。"
+            )
+
+        # 原生格式校验放宽：任意 `前缀{...}` 包装均放行（平台按原生格式判定）；
+        # 仅对完全没有花括号包装的裸文本提示继续分析，不提交、不消耗错误次数
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_-]{0,31}\{.+\}$", candidate, re.S):
             mission.record("Orchestrator", "nss_submit_format_warning", flag=candidate)
             store.save(mission)
             return (
-                f"[警告] Flag '{candidate}' 不符合常见格式（NSSCTF{...}），"
-                f"请确认候选值，确认无误后再提交。"
+                f"[警告] '{candidate}' 未包裹花括号前缀，不像完整 flag"
+                "（原生格式形如 flag{...}、LitCTF{...}、NSSCTF{...} 等）。"
+                "请先确认候选完整后再提交。"
             )
 
         payload = {"flag": candidate}
@@ -1913,6 +1935,8 @@ def create_orchestrator_agent(
             "remaining_wrong_attempts": remaining,
             "api_base": api_base,
         }
+        if not correct and candidate_key and candidate_key not in mission.nss_rejected_keys:
+            mission.nss_rejected_keys.append(candidate_key)
         mission.record(
             "Orchestrator", "nss_submit",
             flag=candidate, correct=correct, remaining_wrong_attempts=remaining,

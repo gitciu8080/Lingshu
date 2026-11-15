@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -61,6 +62,22 @@ def _compute_event_hash(event: "AuditEvent", previous_hash: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat()
+
+
+def normalize_flag_key(candidate: str) -> str:
+    """归一化候选 flag：反复剥掉 ``前缀{...}`` 包装壳并小写去空白。
+
+    用于识别"同内容换壳/改大小写"的变体提交：``NSSCTF{LitCTF{X}}``、
+    ``NSSCTF{x}``、``LitCTF{X}`` 归一化后同键。NSSCTF Arena 按题目原生
+    格式校验（不限定 NSSCTF{} 前缀），包装壳不影响判定内容。
+    """
+    s = str(candidate or "").strip()
+    while s:
+        m = re.match(r"^[A-Za-z][A-Za-z0-9_-]{0,31}\{(.*)\}$", s, re.S)
+        if not m:
+            break
+        s = m.group(1)
+    return re.sub(r"\s+", "", s).lower()
 
 
 def _bounded_data(value: Any, *, depth: int = 0) -> Any:
@@ -366,6 +383,11 @@ class MissionState:
     # NSSCTF Agent Arena 提交结果（由 Orchestrator 的 submit_nss_flag 工具写入）：
     # {attempt_id, flag, correct, remaining_wrong_attempts}
     nss_submit: dict[str, Any] | None = None
+
+    # 已判错候选的归一化键（由 submit_nss_flag 维护）：剥掉包装壳并小写后的
+    # 内容键。用于拦截"同内容换壳/改大小写"的变体提交，避免重复消耗平台
+    # 错误次数（2026-11-15 通宵压测 attempt#13561 六连错复盘）。
+    nss_rejected_keys: list[str] = field(default_factory=list)
 
     # slab-match 平台提交结果（由 Orchestrator 的 submit_slab_flag 工具写入）：
     # {exercise_id, flag, submitted, correct, api_base}

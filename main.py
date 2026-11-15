@@ -1257,8 +1257,12 @@ def _prepare_workspace(target_spec: TargetSpec) -> tuple[str, Path, dict | None]
             )
             return str(workdir), workdir, manifest_dict
         except SafeExtractError as exc:
-            # 安全校验失败视为致命错误，直接终止任务
-            raise SystemExit(f"[安全错误] 解压失败: {exc}") from exc
+            # 安全校验失败终止当前任务。用 RuntimeError 而非 SystemExit：
+            # SystemExit 是 BaseException，在 Web 后端（api.py 的会话任务）
+            # 里会穿透 except Exception 并杀死整个 uvicorn 进程（2026-11-15
+            # 压测复盘：畸形 7z 归档触发全服崩溃）；CLI main() 会把它包装
+            # 成非零退出，行为不变。
+            raise RuntimeError(f"[安全错误] 解压失败: {exc}") from exc
 
     # ── 单个文件目标：直接使用文件所在目录，目标即文件路径 ──
     if target_spec.kind == "single_file" and target_spec.original_path is not None:
@@ -1270,7 +1274,9 @@ def _prepare_workspace(target_spec: TargetSpec) -> tuple[str, Path, dict | None]
         return str(target_spec.workspace), target_spec.workspace, None
 
     # 理论上 normalize_target 已保证不会走到这里，兜底防御
-    raise SystemExit(f"无法处理目标类型: {target_spec.kind}")
+    # （RuntimeError：Web 会话任务里可被 except Exception 捕获标记任务失败，
+    # 不会像 SystemExit 那样杀死整个后端进程）
+    raise RuntimeError(f"无法处理目标类型: {target_spec.kind}")
 
 
 def _extract_declared_network_targets(text: str) -> list[str]:
