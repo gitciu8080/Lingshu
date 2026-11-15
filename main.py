@@ -3537,13 +3537,30 @@ async def run_mission(
         # 只读 shell，专家子 Agent 报告即结论（与 Orchestrator 互斥创建）。
         if run_mode == "fast":
             orchestrator = None
+
+            def _as_lazy(agent):
+                """统一 Captain 的 experts 契约为 LazyAgent（20261115 复盘）。
+
+                triage/recon 映射的是急切构造的真实 Agent（create_artifact_triage_agent
+                / create_network_recon_agent），而 Captain._run_expert 一律
+                ``await lazy.get()``——附件任务上 Blade 派 triage/recon 必报
+                ``'Agent' object has no attribute 'get'``：同步派遣裸异常喷回、
+                后台派遣任务无声死亡（ready 永远为空 → 指挥官无限重派）。
+                """
+                if agent is None or isinstance(agent, LazyAgent):
+                    return agent
+                return LazyAgent(
+                    getattr(agent, "name", "expert"),
+                    lambda bound=agent: bound,
+                )
+
             main_agent = create_fast_captain_agent(
                 _role_model("orchestrator"),
                 experts={
                     "attack": attack,
                     "reverse": reserve,
-                    "triage": artifact_recon if artifact_recon is not None else recon,
-                    "recon": network_recon if network_recon is not None else recon,
+                    "triage": _as_lazy(artifact_recon) or _as_lazy(recon),
+                    "recon": _as_lazy(network_recon) or _as_lazy(recon),
                     "analysis": analysis,
                 },
                 mission=mission,
@@ -3950,6 +3967,47 @@ async def run_mission(
                     continue
                 mission.record("system", "orchestrator_max_iters_exceeded", error=str(exc))
                 if mission.phase not in {Phase.COMPLETED, Phase.FAILED}:
+                    # 收割等待（20261115 复盘）：fast 模式下指挥官死于 max_iters
+                    # 时，后台专家可能仍在工作（失败会话里 Victor 仅干了 1 分
+                    # 51 秒即被 mission_end 连人带任务杀掉）。有后台任务在跑时
+                    # 有界等待至多 180s 并代收报告，专家工作成果不白费。
+                    if run_mode == "fast":
+                        bg = getattr(main_agent, "_lingshu_bg", None)
+                        if bg and (bg.get("running") or bg.get("ready")):
+                            running_tasks = [
+                                info["task"] for info in bg.get("running", {}).values()
+                                if not info["task"].done()
+                            ]
+                            if running_tasks:
+                                try:
+                                    await asyncio.wait(
+                                        running_tasks, timeout=180,
+                                        return_when=asyncio.FIRST_COMPLETED,
+                                    )
+                                except (RuntimeError, asyncio.TimeoutError):
+                                    pass
+                            if bg.get("ready"):
+                                collected = list(bg["ready"])
+                                bg["ready"] = []
+                                mission.record(
+                                    "system", "background_reports_harvested",
+                                    count=len(collected),
+                                )
+                                for item in collected:
+                                    event_callback(
+                                        "message",
+                                        content=(
+                                            f"[收割] [{item.get('role')}] "
+                                            f"{item.get('objective')}\n"
+                                            + str(item.get("report", ""))[:1400]
+                                        ),
+                                        agent="system",
+                                    )
+                                store.save(mission)
+                                print(
+                                    f"[系统] 已收割 {len(collected)} 份后台专家报告"
+                                    "（指挥官超迭代死亡，成果保留进会话记录）"
+                                )
                     mission.finalize_as_failed(
                         f"Orchestrator 在 {mission.phase.value} 阶段达到最大迭代次数，"
                         f"未能完成任务。原因：{exc}"

@@ -161,6 +161,17 @@ def create_fast_captain_agent(
         bg_state["busy_roles"].add(key)
         try:
             await _run_expert(key, objective, background=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 后台失败必须可收取（20261115 复盘：
+            # _run_expert 里的异常若逃出任务，ready 永远为空，check_experts 显示
+            # "当前没有后台专家任务"，指挥官会无限重派同一角色）
+            mission.record(
+                "Orchestrator", "expert_failed", role=key, error=str(exc)[:300],
+                background=True,
+            )
+            store.save(mission)
+            _note_report(key, objective, f"[后台执行失败] {exc}")
         finally:
             bg_state["busy_roles"].discard(key)
             bg_state["running"].pop(handle, None)
@@ -207,7 +218,18 @@ def create_fast_captain_agent(
                 "你可以继续派其它角色的专家或做只读查验；"
                 "用 check_experts(wait=true) 等待并收取报告。"
             )
-        return await _run_expert(key, str(objective), background=False)
+        try:
+            return await _run_expert(key, str(objective), background=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 同步派遣的意外异常转为可读错误
+            # （20261115 复盘：experts 表存在非 LazyAgent 条目时裸 AttributeError
+            # 直接喷给指挥官，消耗迭代预算且无行动指引）
+            mission.record("Orchestrator", "expert_failed", role=key, error=str(exc)[:300])
+            store.save(mission)
+            return (
+                f"专家执行失败：{exc}。请调整目标重派（可换角色），或自行用只读 shell 推进。"
+            )
 
     async def check_experts(wait: bool = False, timeout: int = 240) -> str:
         """收取后台专家的报告。
@@ -225,6 +247,16 @@ def create_fast_captain_agent(
                     running, timeout=bounded, return_when=asyncio.FIRST_COMPLETED,
                 )
         ready = bg_state["ready"]
+        # 轮询退避（20261115 复盘）：wait=false 且无就绪报告但有任务在跑时，
+        # 原实现立即返回"暂无"——指挥官每 5-10 秒重查一次，每次白烧一个迭代
+        # 却零专家推进（失败会话 34 次轮询零收敛）。就地等 20 秒再复查，
+        # 把死迭代变成专家的真实工作时间。
+        if not ready and bg_state["running"]:
+            try:
+                await asyncio.sleep(20)
+            except asyncio.CancelledError:
+                raise
+            ready = bg_state["ready"]
         bg_state["ready"] = []
         running_now = {
             handle: f"{info['role']}：{info['objective']}"
