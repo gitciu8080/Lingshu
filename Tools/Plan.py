@@ -2,19 +2,25 @@
 
 设计要点：
 - 所有工具通过闭包绑定 mission / store / event_callback；
-- 每次变更立即持久化（store.save）并推送 plan_updated 事件（SSE → 前端）；
+- 每次变更立即持久化（store.save）并推送 plan_updated 事件（SSE → 前端，
+  内容指纹去重 + 终态停播，见 push_plan_update）；
 - 标记 completed 强制要求 evidence（防伪造闸门）；
 - 全部操作写入审计链（mission.record）。
 """
+import hashlib
+import json
 from collections.abc import Callable
 from typing import Any, TypedDict
 
-from core.TaskState import MissionState, MissionStore
+from core.TaskState import MissionState, MissionStore, Phase
 from Tools.tooling import AllowedFunctionTool
 
 # 计划条目允许的阶段归属与状态取值
 PLAN_PHASES = {"recon", "analysis", "exploitation", "post_exploitation", "complete"}
 PLAN_STATUSES = {"pending", "in_progress", "completed", "failed", "skipped"}
+
+# 终态阶段：任务收敛后计划快照只广播一次，后续任何变更不再进 SSE
+_TERMINAL_PHASES = frozenset({Phase.COMPLETED, Phase.FAILED, Phase.CANCELLED})
 
 
 class PlanDraft(TypedDict):
@@ -25,17 +31,47 @@ class PlanDraft(TypedDict):
     phase: str
 
 
+def _plan_items_fingerprint(mission: MissionState) -> str:
+    """计划条目列表内容指纹（json → sha256）。"""
+    return hashlib.sha256(
+        json.dumps(mission.plan_items, ensure_ascii=False, sort_keys=True)
+        .encode("utf-8"),
+    ).hexdigest()
+
+
 def push_plan_update(
     mission: MissionState,
     event_callback: Callable[[str, dict[str, Any]], None] | None,
 ) -> None:
-    """向 SSE 订阅者推送计划清单全量快照。"""
-    if event_callback is not None:
-        event_callback(
-            "plan_updated",
-            items=mission.plan_items,
-            phase=mission.phase.value,
-        )
+    """向 SSE 订阅者推送计划清单全量快照（内容去重 + 终态停播）。
+
+    2026-11-15 压测复盘：UpdatePlan 同值重复调用、收尾多路径 finalize
+    （complete_mission / run_mission 失败收敛 / NSS flag 固化）会在同一
+    秒重复广播内容完全相同的 plan_updated（全天 12 个重复时间点、19 条
+    多余事件），任务 completed 之后仍在继续广播。规则：
+    - 条目内容指纹与上次已广播一致 → 跳过；
+    - 任务已进入终态且终态快照已广播过 → 永不再广播（后续变更只落
+      权威 JSON 与审计链，不进 SSE）。
+    去重状态挂在 mission 实例上（非持久化字段）；resume 重建实例后
+    首推必发，供断线重连的补偿回放正常工作。
+    """
+    if event_callback is None:
+        return
+    fingerprint = _plan_items_fingerprint(mission)
+    last = getattr(mission, "_plan_broadcast_state", None)
+    terminal = mission.phase in _TERMINAL_PHASES
+    if last is not None:
+        last_fingerprint, last_terminal = last
+        if fingerprint == last_fingerprint:
+            return
+        if terminal and last_terminal:
+            return
+    event_callback(
+        "plan_updated",
+        items=mission.plan_items,
+        phase=mission.phase.value,
+    )
+    mission._plan_broadcast_state = (fingerprint, terminal)
 
 
 def _find_item(items: list[dict], item_id: str) -> dict | None:
@@ -53,11 +89,14 @@ def _commit(
     """统一收尾：审计 → 检查点持久化 → 推送前端。
 
     计划变更写安全检查点（权威 JSON + 工作区 checkpoint.json 镜像），
-    崩溃恢复从最近一次计划变更继续。
+    崩溃恢复从最近一次计划变更继续。任务终态后计划维护工具的变更不再
+    广播（2026-11-15 压测：任务 completed 后 UpdatePlan 仍触发多次
+    plan_updated）；审计与权威 JSON 照常落盘。
     """
     mission.record(actor, action, **detail)
     store.checkpoint(mission, f"plan_{action}")
-    push_plan_update(mission, event_callback)
+    if mission.phase not in _TERMINAL_PHASES:
+        push_plan_update(mission, event_callback)
 
 
 def create_add_plan_tool(

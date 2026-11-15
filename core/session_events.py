@@ -47,7 +47,17 @@ def message_operation(
     elif event_type == "mission_start":
         content = f"目标: {payload.get('target', '')} | 任务: {payload.get('goal', '')}"
     elif event_type == "mission_end":
-        content = f"状态: {payload.get('status', '未知')}"
+        # JSON 落库（status/success/flag/phase）：SSE 断线重连的回放与
+        # workbench 驱动器都依赖完整终态字段直接判定成败（2026-11-15
+        # 复盘：断流场景靠 GET 轮询兜底会漏判）。旧版本为「状态: xxx」
+        # 纯文本，回放端（api._message_to_event）做兼容解析。
+        content = json.dumps({
+            "message": payload.get("message", ""),
+            "status": payload.get("status", "未知"),
+            "success": payload.get("success"),
+            "flag": payload.get("flag"),
+            "phase": payload.get("phase", ""),
+        }, ensure_ascii=False)
     elif event_type == "mission_cancelled":
         content = payload.get("message", "任务已被取消")
     elif event_type == "phase_change":

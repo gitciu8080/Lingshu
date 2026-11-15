@@ -631,10 +631,12 @@ def _message_to_event(message: dict) -> dict:
         "approval_required", "approval_resolved", "plan_updated", "nss_submit",
         "slab_submit", "expert_joined", "report_ready", "agent_reply_started",
         "agent_reply_finished", "agent_reply_error", "agent_reply_cancelled",
+        "mission_end",
     ):
         try:
             event.update(json.loads(content))
         except (json.JSONDecodeError, TypeError):
+            # 兼容旧版本落库的 mission_end「状态: xxx」纯文本
             event["content"] = content
     elif event_type in ("tool_call_start", "tool_call_end"):
         try:
@@ -824,10 +826,16 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                 status_val = "failed"
             # Summary 报告已由 run_mission 收尾阶段生成（含 PDF 落盘与 report_ready
             # 事件），此处仅落库并通知前端任务结束。
+            # success/flag/phase 并入 payload：workbench 驱动器（workbench_nss
+            # 等）从 mission_end 直接拿到成败结论，无需再 GET 会话详情兜底
+            # （断流场景轮询兜底会漏判）。
             callback(
                 "mission_end",
                 message="任务执行已结束",
                 status=status_val,
+                success=success,
+                flag=flag,
+                phase=phase,
                 agent="system",
             )
             mission_end_sent = True
@@ -873,6 +881,23 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
             status_val = "failed"
             phase = "failed"
             callback("error", message=f"任务异常：{exc}", agent="system")
+    except BaseException as exc:  # noqa: BLE001 - 结构性兜底，见下
+        # 2026-11-15 压测复盘：畸形归档曾以 SystemExit（BaseException 子类）
+        # 穿透 except Exception 杀死整个 uvicorn 进程。源头已改抛 RuntimeError
+        # （21317c0），此处是结构性兜底：会话任务协程内的任何 BaseException
+        # （SystemExit / GeneratorExit / C 扩展异常等）都收敛为该会话 failed
+        # ——写入 error 事件与会话审计后由 finally 统一落库，任务级异常
+        # 永不升级为进程级死亡。唯一例外 KeyboardInterrupt：它是运维停止
+        # 整个服务的信号，保持向上传递交给 uvicorn 的关闭流程。
+        status_val = "failed"
+        phase = "failed"
+        callback(
+            "error",
+            message=f"任务协程异常终止 {type(exc).__name__}: {exc}",
+            agent="system",
+        )
+        if isinstance(exc, KeyboardInterrupt):
+            raise
     finally:
         if mission_state is None or status_val == "cancelled":
             existing = await asyncio.to_thread(session_store.get_session, session_id) or {}
@@ -897,7 +922,16 @@ async def _run_and_cleanup(session_id: str, ctx: SessionContext, target: str, go
                 tool_name=tool.get("tool_name", ""),
             )
         if not mission_end_sent:
-            callback("mission_end", message="任务已结束", status=status_val)
+            # 异常/取消路径的收尾事件同样透出 success/flag/phase（与主路径
+            # payload 契约一致，见上方 mission_end 注释）。
+            callback(
+                "mission_end",
+                message="任务已结束",
+                status=status_val,
+                success=success,
+                flag=flag,
+                phase=phase,
+            )
         await _flush_persistence()
         terminal_fields: dict[str, Any] = {
             "status": status_val,

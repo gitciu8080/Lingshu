@@ -775,6 +775,19 @@ def create_orchestrator_agent(
                 f"\n本轮资产范围（多资产任务：objective 中指明本轮资产，"
                 f"报告按资产分节）：{asset_lines}"
                 + ("…等" if len(mission.assets) > 15 else ""))
+        # NSSCTF Arena：注入已判错候选排除集（归一化键），防止专家换思路后
+        # 重复推导同一死路（2026-11-15 压测 attempt#13561 对正确内容连续
+        # 6 次换壳提交复盘）。上限最近 20 条、每条截断 64 字符。
+        rejected_note = ""
+        if mission.nss_rejected_keys:
+            rejected_lines = "\n".join(
+                f"- {str(key)[:64]}"
+                for key in mission.nss_rejected_keys[-20:]
+            )
+            rejected_note = (
+                "\n\n【已判错候选（归一化键，禁止再次提交其任何变体）】\n"
+                f"{rejected_lines}"
+            )
         try:
             report = await run_expert_reply_with_continuation(
                 attack_agent,
@@ -784,7 +797,8 @@ def create_orchestrator_agent(
                         f"授权目标：{mission.target}{asset_note}\n本轮目标：{objective[:1500]}\n\n"
                         f"本轮新增关键证据（调用方筛选，勿重复历史）：\n{target_info[:2000]}\n"
                         f"{delta_section}"
-                        f"{knowledge_section}\n\n"
+                        f"{knowledge_section}"
+                        f"{rejected_note}\n\n"
                         "完成分析/验证后立即输出最终报告，禁止继续调用工具。"
                     ),
                 ),
