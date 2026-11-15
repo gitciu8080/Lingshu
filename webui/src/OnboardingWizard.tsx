@@ -35,30 +35,39 @@ function StepDots({ total, current }: { total: number; current: number }) {
   );
 }
 
-// 导航栏示意（对齐 NavRail 十视图；图标-only 收起态 + 编号热点）
-function NavRailMock({ hot }: { hot: number[] }) {
-  const items: [number, typeof LayoutDashboard][] = [
-    [1, LayoutDashboard],
-    [2, Crosshair],
-    [3, Database],
-    [3, ShieldAlert],
-    [3, Network],
-    [4, FileText],
-    [5, UserCog],
-    [5, Settings],
-    [5, Wrench],
-    [5, BookOpen],
+// 导航栏示意（对齐 NavRail 展开态：图标+文字行、分组分隔线、行尾编号）。
+// n=0 表示该行不编号（归属上一编号的分组，靠分隔线表达）。
+function NavRailMock() {
+  const items: { n: number; label: string; icon: typeof LayoutDashboard; sep?: boolean }[] = [
+    { n: 1, label: "仪表板", icon: LayoutDashboard },
+    { n: 2, label: "控制台", icon: Crosshair },
+    { n: 3, label: "资产管理", icon: Database, sep: true },
+    { n: 0, label: "威胁建模", icon: ShieldAlert },
+    { n: 0, label: "资产测绘", icon: Network },
+    { n: 4, label: "发现与报告", icon: FileText },
+    { n: 5, label: "Agent 设置", icon: UserCog, sep: true },
+    { n: 0, label: "用户与系统设置", icon: Settings },
+    { n: 0, label: "系统工具状态", icon: Wrench },
+    { n: 0, label: "本地知识库", icon: BookOpen },
   ];
   return (
     <div className="ob-rail-bar" aria-hidden>
-      <span className="ob-rail-logo">灵</span>
-      {items.map(([n, Icon], i) => (
-        <span key={i} className={hot.includes(n) ? "hot" : ""}>
-          <Icon size={12} />
-          <i>{hot.includes(n) ? n : ""}</i>
-        </span>
+      <div className="ob-rail-brand">
+        <b>灵枢</b>
+        <small>Lingshu Console</small>
+      </div>
+      {items.map(({ n, label, icon: Icon, sep }) => (
+        <div key={label} className={`ob-rail-item ${n ? "hot" : ""} ${sep ? "with-sep" : ""}`}>
+          {sep && <i className="ob-rail-sep" />}
+          <Icon size={13} />
+          <span>{label}</span>
+          {n > 0 && <em>{n}</em>}
+        </div>
       ))}
-      <span className="ob-rail-foot"><Settings size={11} /><ArrowRight size={11} style={{ transform: "rotate(90deg)" }} /></span>
+      <div className="ob-rail-foot">
+        <i className="ob-rail-sep" />
+        <span>主题切换 · 退出登录</span>
+      </div>
     </div>
   );
 }
@@ -164,7 +173,7 @@ export default function OnboardingWizard({
       <h2>认识导航栏</h2>
       <p className="ob-lead">左侧导航栏汇聚全部功能视图（收起只留图标，悬停看名称）：</p>
       <div className="ob-rail">
-        <NavRailMock hot={[2, 4, 5]} />
+        <NavRailMock />
         <ul className="ob-list">
           <li><i>1</i><b>仪表板</b>：全局任务态势、成功率与 Token 用量总览</li>
           <li><i>2</i><b>控制台</b>：任务会话与智能体实时活动的主战场</li>
