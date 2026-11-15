@@ -3859,8 +3859,6 @@ function ConsoleApp() {
                   })}
               </div>
             </section>
-            <EvidencePanel mission={detail} onDownload={downloadArtifact} />
-            <ArtifactPanel sessionId={active} onDownload={downloadArtifact} />
             <ToolHistoryPanel events={toolEvents} />
             <PlanPanel mission={detail} phase={phase} />
           </div>
