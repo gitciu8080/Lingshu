@@ -422,6 +422,11 @@ class MissionState:
     action_history: list[ActionRecord] = field(default_factory=list)
     failed_paths: list[FailedPathRecord] = field(default_factory=list)
     assets: list[AssetRecord] = field(default_factory=list)
+    # T3 冷事实摘要（20261116，移植自 ARTEX 冷图压缩）：叠加投影——facts
+    # 列表永不删改，digest 覆盖水位单调推进；热层只展示未被 digest 覆盖的
+    # 近期事实，旧事实的要点进入 historical_context.facts_digest。
+    facts_digest: str = ""
+    facts_digest_upto: int = 0
     # 测绘发现自动扩容开关（opt-in）：开启时新发现的 RFC1918 私网主机自动
     # 加入授权范围；公网地址永不自动扩容。仅 mlps/pentest 系模式生效。
     auto_scope_expand: bool = False
@@ -966,7 +971,8 @@ class MissionState:
                         "confidence": item.confidence,
                         "evidence_ids": item.evidence_ids,
                     }
-                    for item in self.facts[-limit:]
+                    # T3 冷事实摘要：热层只展示未被 digest 覆盖的近期事实
+                    for item in self.facts[self.facts_digest_upto:][-limit:]
                 ],
             },
             "working_context": {
@@ -1013,6 +1019,12 @@ class MissionState:
                     "failed_paths": len(self.failed_paths),
                     "hypotheses": len(self.hypotheses),
                 },
+                # T3 冷事实摘要：旧事实的压缩要点（引用型材料，不挤占热层）
+                "facts_digest": {
+                    "text": str(self.facts_digest or "")[:1500],
+                    "covers_facts_upto": self.facts_digest_upto,
+                    "total_facts": len(self.facts),
+                },
                 "terminal_hypotheses": [
                     {"id": item.id, "status": item.status}
                     for item in terminal_hypotheses
@@ -1029,7 +1041,7 @@ class MissionState:
 
 # MissionStore 持久化 schema 版本。旧文件缺字段时由 load() 自动迁移，
 # 不回写（保持旧任务只读兼容）。
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # v1: 初始字段（target/goal/phase/plan/findings/attack_chain/flag/...）
 # v2: v0.2.0 新增 target_spec/category_decision/category_history/
@@ -1045,6 +1057,8 @@ SCHEMA_VERSION = 9
 # v7: 人工利用审批改为可恢复的多态状态，不再以 false 代表所有未批准情况
 # v8: 任务模式、声明/有效范围及独立范围审批状态
 # v9: 资产台账 assets（测绘/侦察发现的结构化主机清单）
+# v10: 冷事实摘要 facts_digest/facts_digest_upto（叠加投影，移植自 ARTEX
+#     冷图压缩；facts 列表永不删改，热层只展示未覆盖部分）
 
 
 class MissionStoreCorruptedError(OSError):

@@ -345,6 +345,14 @@ class EmbeddingTest(RegistryIsolationMixin, unittest.TestCase):
 class FactoryDispatchTest(RegistryIsolationMixin, unittest.TestCase):
     # ── 注册表 → 模型工厂端到端（驱动分发） ──
 
+    @staticmethod
+    def _unwrap(model):
+        """多 profile 池下 create_model 返回熔断链包装器——解出驱动实例。"""
+        from LLM.failover import FailoverChatModel
+        if isinstance(model, FailoverChatModel):
+            return model._active()
+        return model
+
     def test_responses_and_native_drivers(self) -> None:
         registry.create_llm_provider(_provider_payload(
             "DeepSeek官方", "deepseek", "deepseek-v4-flash", api_style="responses",
@@ -355,9 +363,10 @@ class FactoryDispatchTest(RegistryIsolationMixin, unittest.TestCase):
         overrides = registry.load_runtime_overrides()
         runtime = RuntimeConfig(custom_llm_configs=overrides.get("custom_llm_configs", {}))
         self.assertIsInstance(
-            create_model(provider="deepseek", config=runtime), DeepSeekResponsesModel,
+            self._unwrap(create_model(provider="deepseek", config=runtime)),
+            DeepSeekResponsesModel,
         )
-        model = create_model(provider="anthropic", config=runtime)
+        model = self._unwrap(create_model(provider="anthropic", config=runtime))
         # 出厂实例默认带 Token 用量统计钩子（LLM/model.py 动态子类），
         # 驱动类型用基类断言而非类名字符串。
         self.assertEqual(
@@ -372,7 +381,7 @@ class FactoryDispatchTest(RegistryIsolationMixin, unittest.TestCase):
         ), actor_id=1)
         overrides = registry.load_runtime_overrides()
         runtime = RuntimeConfig(custom_llm_configs=overrides.get("custom_llm_configs", {}))
-        model = create_model(provider="zhipu", model="glm-5.3", config=runtime)
+        model = self._unwrap(create_model(provider="zhipu", model="glm-5.3", config=runtime))
         self.assertIsInstance(model, GatewayChatModel)
         self.assertEqual(model.thinking_style, "zhipu")
 

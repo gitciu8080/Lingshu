@@ -15,6 +15,7 @@ import logging  # 日志记录（Summary 报告等收尾阶段的异常追溯）
 import os  # 环境变量与路径操作
 import re  # 从最终证据中提取 CVE 等标题特征
 import shutil
+import time  # 冷事实摘要防抖（time.monotonic）
 import subprocess
 import sys  # 修改模块搜索路径，确保能 import 本目录下的包
 import tempfile
@@ -3707,6 +3708,75 @@ async def run_mission(
         # 满整轮（最坏 5 次续跑 ≈ 150 迭代）。
         _CONTINUATION_CAP = 8
         cap_next_reply = False
+        # T2 资产图驱动调度：资产台账水位（内存级，学 attack_fact_mark；
+        # resume 归零 → 恢复首轮重注入一次全量台账，有界无害）
+        _asset_mark = 0
+        # T3 冷事实摘要：阈值/防抖与 inflight 防抖（叠加投影，facts 永不删改）
+        _FACTS_COLD_THRESHOLD = 24
+        _DIGEST_MIN_INTERVAL = 300.0
+        _digest_state = {"last": 0.0, "inflight": False}
+
+        async def _maintain_facts_digest() -> None:
+            """把已冷却的事实条目压缩为持久化摘要（ARTEX 冷图压缩的移植）。
+
+            叠加投影：facts 列表永不删改，digest 覆盖水位单调推进——
+            resume/差量游标/审计链全部无损；失败 best-effort 不阻断主任务。
+            """
+            nonlocal _digest_state
+            try:
+                covered = max(
+                    mission.facts_digest_upto, len(mission.facts) - 8,
+                )
+                segment = mission.facts[mission.facts_digest_upto:covered]
+                if not segment:
+                    return
+                lines = "\n".join(
+                    f"- {str(getattr(fact, 'content', fact))[:400]}"
+                    for fact in segment
+                )
+                digest_prompt = (
+                    "把以下渗透测试任务事实条目压缩为要点清单（保留主机、端口、"
+                    "凭据、会话 ID、已验证结论与失败路径），不超过 600 字，"
+                    "纯文本输出：\n" + lines
+                )
+                digest_model = create_model(
+                    provider=provider, thinking_intensity="off",
+                    temperature=0.2, config=runtime,
+                )
+                set_usage_context(
+                    digest_model, user_id, session_id or mission_id,
+                    "facts_digest",
+                )
+                result = await asyncio.wait_for(
+                    digest_model([UserMsg(name="system", content=digest_prompt)]),
+                    timeout=120,
+                )
+                text = str(
+                    getattr(result, "get_text_content", lambda: "")() or "",
+                ).strip() or "（摘要生成失败，条目原样保留）"
+                mission.facts_digest = (
+                    (mission.facts_digest + "\n" + text).strip()[:4000]
+                )
+                mission.facts_digest_upto = covered
+                mission.record(
+                    "system", "facts_cold_digest",
+                    covered=covered, total=len(mission.facts),
+                )
+                store.save(mission)
+                print(
+                    f"[系统] 冷事实摘要已更新：覆盖 {covered}/{len(mission.facts)} 条"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 摘要失败不影响主任务
+                mission.record(
+                    "system", "facts_digest_failed", error=str(exc)[:200],
+                )
+                store.save(mission)
+                logger.warning("冷事实摘要失败（下轮重试）: %s", exc)
+            finally:
+                _digest_state["inflight"] = False
+
         while True:
             try:
                 _orig_iters = getattr(
@@ -3719,6 +3789,35 @@ async def run_mission(
                 )
                 if _capped_now:
                     main_agent.react_config.max_iters = _CONTINUATION_CAP
+                # T2 资产图驱动调度（ARTEX 移植）：台账水位增量注入下一轮
+                # orch_content——追加式，不新增重开轮（与 O12/nudge 预算正交）。
+                new_assets = mission.assets[_asset_mark:]
+                if new_assets:
+                    _asset_mark = len(mission.assets)
+                    asset_lines = "\n".join(
+                        f"- {item.host}" + (f":{item.port}" if item.port else "")
+                        + (f"（{item.service}）" if item.service else "")
+                        for item in new_assets[:15]
+                    )
+                    orch_content += (
+                        f"\n\n[资产图更新] 自上轮以来新登记 {len(new_assets)} 项资产"
+                        + ("（仅列前 15 项）" if len(new_assets) > 15 else "")
+                        + "：\n" + asset_lines
+                        + "\n多资产任务请按资产分桶推进：未覆盖的资产排入计划，"
+                        "已覆盖的检查是否需要复查。"
+                    )
+                # T3 冷事实摘要触发：阈值 + 防抖 + inflight 三重门（后台执行，
+                # 完成后下一轮 context_layers 自动携带 digest）
+                if (
+                    not _digest_state["inflight"]
+                    and len(mission.facts) - mission.facts_digest_upto
+                    >= _FACTS_COLD_THRESHOLD
+                    and time.monotonic() - _digest_state["last"]
+                    >= _DIGEST_MIN_INTERVAL
+                ):
+                    _digest_state["inflight"] = True
+                    _digest_state["last"] = time.monotonic()
+                    asyncio.create_task(_maintain_facts_digest())
                 try:
                     final_result = await run_interruptible_agent_reply(
                         main_agent,

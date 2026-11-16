@@ -1014,10 +1014,39 @@ def create_model(
         entry, selected, intensity, temperature, web_search, vision, runtime,
     )
     label = str(entry.get("name") or entry.get("provider") or provider)
-    return enable_usage_tracking(
+    tracked = enable_usage_tracking(
         instance, label,
         str(getattr(instance, "model", "") or selected or ""),
     )
+    # T1 LLM 熔断链（20261115 压测 0/6 复盘）：同池启用 profile ≥2 时自动
+    # 挂 failover 包装器——主 profile 配额（429/使用上限）、掉 key、网关 5xx、
+    # 断流时自动切换到下一个 profile，全部候选耗尽才抛回。
+    if config is not None:
+        try:
+            from LLM.failover import (
+                FailoverChatModel,
+                build_chain_keys,
+                failover_enabled,
+            )
+        except ImportError:  # pragma: no cover
+            return tracked
+        if failover_enabled() and not isinstance(tracked, FailoverChatModel):
+            try:
+                chain_keys = build_chain_keys(runtime, provider)
+            except Exception:  # noqa: BLE001 - 链构建失败保持单 profile
+                chain_keys = [provider]
+            if len(chain_keys) > 1:
+                return FailoverChatModel(
+                    primary=tracked,
+                    runtime=runtime,
+                    chain_keys=chain_keys,
+                    intensity=intensity,
+                    temperature=temperature,
+                    model_name=selected,
+                    web_search=web_search,
+                    vision=vision,
+                )
+    return tracked
 
 
 def create_vision_model(
